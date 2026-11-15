@@ -14,8 +14,14 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.content.Context;
+import android.content.ClipboardManager;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.view.Gravity;
 import android.view.inputmethod.InputMethodManager;
 import android.view.View;
+import android.widget.FrameLayout;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
 import android.webkit.WebResourceRequest;
@@ -59,6 +65,22 @@ public class MainActivity extends Activity {
     private TextView status;
     private LinearLayout results;
     private Button scanButton;
+    private LinearLayout readerRoot;
+    private LinearLayout browserPanel;
+    private TextView webToggle;
+    private LinearLayout resultRow;
+    private ScrollView readerScroll;
+    private TextView countLabel;
+    private TextView resultSummary;
+    private TextView allFilter;
+    private TextView gifFilter;
+    private TextView imageFilter;
+    private TextView emptyResults;
+    private View resultAnchor;
+    private final ArrayList<Animatable> animations = new ArrayList<>();
+    private String selectedFilter = "all";
+    private int displayedCount;
+    private boolean showingReader;
     private volatile String commentRequest;
     private volatile String lastCommentPath;
     private PermissionRequest pendingCameraRequest;
@@ -67,49 +89,376 @@ public class MainActivity extends Activity {
     private int requestToken;
     private long cursor;
     private int scanned;
+    private static final int BG = Color.rgb(247, 248, 246);
+    private static final int DARK = Color.rgb(25, 47, 55);
+    private static final int GREEN = Color.rgb(28, 158, 120);
+    private static final int MUTED = Color.rgb(125, 143, 143);
 
     private static class Media {
         final File file;
         final String mime;
         final String commentId;
         final String kind;
+        final Drawable thumbnail;
+        final boolean animated;
 
-        Media(File file, String mime, String commentId, String kind) {
+        Media(File file, String mime, String commentId, String kind, Drawable thumbnail) {
             this.file = file;
             this.mime = mime;
             this.commentId = commentId;
             this.kind = kind;
+            this.thumbnail = thumbnail;
+            this.animated = "image/gif".equals(mime) || thumbnail instanceof Animatable;
         }
     }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setFitsSystemWindows(true);
-        root.setPadding(16, 16, 16, 16);
-        setContentView(root);
+        getWindow().setStatusBarColor(BG);
+        getWindow().setNavigationBarColor(BG);
+        buildReader();
+        if (Intent.ACTION_SEND.equals(getIntent().getAction())) {
+            String shared = getIntent().getStringExtra(Intent.EXTRA_TEXT);
+            if (shared != null) input.setText(shared);
+        }
+        showHome();
+    }
 
+    private TextView label(String value, int size, int color, boolean bold) {
+        TextView view = new TextView(this);
+        view.setText(value);
+        view.setTextSize(size);
+        view.setTextColor(color);
+        if (bold) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        return view;
+    }
+
+    private GradientDrawable shape(int color, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radius));
+        return drawable;
+    }
+
+    private void showHome() {
+        showingReader = false;
+        for (Animatable animation : animations) animation.stop();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(BG);
+        scroll.setFitsSystemWindows(true);
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(18), dp(22), dp(18), dp(28));
+        scroll.addView(page);
+
+        LinearLayout brand = new LinearLayout(this);
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+        TextView mark = label("✦", 23, Color.rgb(168, 240, 216), true);
+        mark.setGravity(Gravity.CENTER);
+        mark.setBackground(shape(DARK, 12));
+        brand.addView(mark, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        TextView name = label("表情收集夹", 19, DARK, true);
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, -2, 1);
+        nameParams.leftMargin = dp(10);
+        brand.addView(name, nameParams);
+        brand.addView(label("DOUYINGETTING", 10, MUTED, true));
+        page.addView(brand);
+
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        hero.setPadding(dp(25), dp(25), dp(25), dp(24));
+        GradientDrawable heroBg = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[]{DARK, Color.rgb(19, 64, 62)});
+        heroBg.setCornerRadius(dp(28));
+        hero.setBackground(heroBg);
+        LinearLayout.LayoutParams heroParams = new LinearLayout.LayoutParams(-1, dp(270));
+        heroParams.topMargin = dp(24);
+        page.addView(hero, heroParams);
+        hero.addView(label("YOUR STICKER SPACE", 11, Color.rgb(157, 226, 204), true));
+        TextView heroTitle = label("把喜欢的表情\n都收进来。", 29, Color.WHITE, true);
+        heroTitle.setLineSpacing(dp(2), 1);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, -2);
+        titleParams.topMargin = dp(15);
+        hero.addView(heroTitle, titleParams);
+        TextView heroSubtitle = label("评论里的图片与动图，\n先预览，再保存。", 12, Color.rgb(195, 219, 215), false);
+        LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(-1, -2);
+        subtitleParams.topMargin = dp(10);
+        hero.addView(heroSubtitle, subtitleParams);
+        LinearLayout stickers = new LinearLayout(this);
+        stickers.setGravity(Gravity.RIGHT);
+        LinearLayout.LayoutParams stickerRow = new LinearLayout.LayoutParams(-1, 0, 1);
+        hero.addView(stickers, stickerRow);
+        for (String emoji : new String[]{"🐱", "🥹", "🐰"}) {
+            TextView sticker = label(emoji, 26, DARK, false);
+            sticker.setGravity(Gravity.CENTER);
+            sticker.setBackground(shape(Color.rgb(246, 231, 234), 13));
+            LinearLayout.LayoutParams stickerParams = new LinearLayout.LayoutParams(dp(48), dp(48));
+            stickerParams.leftMargin = dp(5);
+            stickers.addView(sticker, stickerParams);
+        }
+        hero.addView(label("图片 · GIF · 本机保存", 12, Color.rgb(164, 238, 215), true));
+
+        LinearLayout section = new LinearLayout(this);
+        section.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams sectionParams = new LinearLayout.LayoutParams(-1, -2);
+        sectionParams.topMargin = dp(27);
+        sectionParams.bottomMargin = dp(13);
+        page.addView(section, sectionParams);
+        section.addView(label("选择功能", 19, DARK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        section.addView(label("目前开放 1 项", 11, MUTED, false));
+
+        LinearLayout feature = new LinearLayout(this);
+        feature.setOrientation(LinearLayout.VERTICAL);
+        feature.setPadding(dp(20), dp(20), dp(20), dp(18));
+        feature.setBackground(shape(Color.WHITE, 24));
+        feature.setElevation(dp(5));
+        feature.setOnClickListener(v -> showReader());
+        page.addView(feature);
+        LinearLayout featureTop = new LinearLayout(this);
+        featureTop.setGravity(Gravity.CENTER_VERTICAL);
+        feature.addView(featureTop);
+        TextView icon = label("↗", 27, GREEN, true);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(shape(Color.rgb(229, 249, 239), 16));
+        featureTop.addView(icon, new LinearLayout.LayoutParams(dp(54), dp(54)));
+        LinearLayout featureWords = new LinearLayout(this);
+        featureWords.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams featureWordsParams = new LinearLayout.LayoutParams(-1, -2);
+        featureWordsParams.leftMargin = dp(14);
+        featureTop.addView(featureWords, featureWordsParams);
+        featureWords.addView(label("抖音链接读取", 17, DARK, true));
+        featureWords.addView(label("粘贴作品链接，收集主评论里的表情素材", 11, MUTED, false));
+        TextView chips = label("评论图片     GIF 动图     批量预览", 11, Color.rgb(81, 104, 106), true);
+        LinearLayout.LayoutParams chipsParams = new LinearLayout.LayoutParams(-1, -2);
+        chipsParams.topMargin = dp(19);
+        feature.addView(chips, chipsParams);
+        View divider = new View(this);
+        divider.setBackgroundColor(Color.rgb(234, 241, 238));
+        LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(-1, dp(1));
+        dividerParams.topMargin = dp(20);
+        feature.addView(divider, dividerParams);
+        LinearLayout featureAction = new LinearLayout(this);
+        featureAction.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-1, -2);
+        actionParams.topMargin = dp(13);
+        feature.addView(featureAction, actionParams);
+        featureAction.addView(label("进入读取界面", 13, GREEN, true), new LinearLayout.LayoutParams(0, -2, 1));
+        featureAction.addView(label("➜", 22, GREEN, true));
+        TextView note = label("✓  提取结果会先在界面预览；点击保存后才写入手机。", 11, MUTED, false);
+        LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(-1, -2);
+        noteParams.topMargin = dp(28);
+        page.addView(note, noteParams);
+        setContentView(scroll);
+    }
+
+    private void showReader() {
+        showingReader = true;
+        setContentView(readerRoot);
+        for (Animatable animation : animations) animation.start();
+    }
+
+    private void buildReader() {
+        readerRoot = new LinearLayout(this);
+        readerRoot.setOrientation(LinearLayout.VERTICAL);
+        readerRoot.setBackgroundColor(BG);
+        readerRoot.setFitsSystemWindows(true);
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(18), dp(8), dp(18), dp(8));
+        readerRoot.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(62)));
+        TextView back = label("‹", 32, DARK, false);
+        back.setGravity(Gravity.CENTER);
+        back.setBackground(shape(Color.rgb(237, 242, 239), 12));
+        back.setOnClickListener(v -> showHome());
+        toolbar.addView(back, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        TextView heading = label("抖音链接读取", 18, DARK, true);
+        heading.setGravity(Gravity.CENTER);
+        toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView help = label("帮助", 12, MUTED, true);
+        help.setGravity(Gravity.CENTER);
+        help.setOnClickListener(v -> new AlertDialog.Builder(this).setMessage("粘贴作品链接，打开抖音网页并进入评论区，再点击扫描主评论。提取结果会直接显示预览。")
+                .setPositiveButton("知道了", null).show());
+        toolbar.addView(help, new LinearLayout.LayoutParams(dp(38), dp(38)));
+
+        readerScroll = new ScrollView(this);
+        readerScroll.setFillViewport(true);
+        readerRoot.addView(readerScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(18), dp(8), dp(18), dp(20));
+        readerScroll.addView(content);
+
+        LinearLayout inputCard = new LinearLayout(this);
+        inputCard.setOrientation(LinearLayout.VERTICAL);
+        inputCard.setPadding(dp(20), dp(20), dp(20), dp(18));
+        inputCard.setBackground(shape(Color.WHITE, 23));
+        inputCard.setElevation(dp(3));
+        content.addView(inputCard);
+        LinearLayout inputHead = new LinearLayout(this);
+        inputHead.setGravity(Gravity.CENTER_VERTICAL);
+        inputCard.addView(inputHead);
+        inputHead.addView(label("作品链接", 14, DARK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        TextView connection = label("● 网页登录", 10, GREEN, true);
+        connection.setPadding(dp(8), dp(5), dp(8), dp(5));
+        connection.setBackground(shape(Color.rgb(230, 248, 238), 12));
+        inputHead.addView(connection);
+        LinearLayout urlBox = new LinearLayout(this);
+        urlBox.setGravity(Gravity.CENTER_VERTICAL);
+        urlBox.setPadding(dp(10), 0, dp(8), 0);
+        urlBox.setBackground(shape(Color.rgb(247, 250, 248), 13));
+        LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(-1, dp(52));
+        urlParams.topMargin = dp(14);
+        inputCard.addView(urlBox, urlParams);
         input = new EditText(this);
         input.setSingleLine(true);
+        input.setTextSize(12);
+        input.setTextColor(DARK);
+        input.setHintTextColor(MUTED);
         input.setHint("粘贴抖音作品链接或分享文案");
-        root.addView(input);
+        input.setBackgroundColor(Color.TRANSPARENT);
+        urlBox.addView(input, new LinearLayout.LayoutParams(0, -1, 1));
+        TextView paste = label("粘贴", 12, GREEN, true);
+        paste.setGravity(Gravity.CENTER);
+        paste.setBackground(shape(Color.rgb(220, 247, 232), 9));
+        paste.setOnClickListener(v -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip().getItemCount() > 0)
+                input.setText(clipboard.getPrimaryClip().getItemAt(0).coerceToText(this));
+        });
+        urlBox.addView(paste, new LinearLayout.LayoutParams(dp(48), dp(36)));
+        TextView hint = label("支持分享文案、短链接与作品地址", 11, MUTED, false);
+        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
+        hintParams.topMargin = dp(11);
+        inputCard.addView(hint, hintParams);
         Button open = new Button(this);
+        open.setAllCaps(false);
         open.setText("打开作品");
+        open.setTextColor(Color.WHITE);
+        open.setTextSize(14);
+        open.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        open.setBackground(shape(GREEN, 13));
         open.setOnClickListener(v -> openLink());
-        root.addView(open);
-        status = new TextView(this);
-        status.setText("扫码请使用抖音 App；同机登录可在网页切换验证码登录");
-        root.addView(status);
+        LinearLayout.LayoutParams openParams = new LinearLayout.LayoutParams(-1, dp(48));
+        openParams.topMargin = dp(14);
+        inputCard.addView(open, openParams);
 
+        status = label("粘贴作品链接，打开网页后进入评论区", 12, Color.rgb(81, 105, 107), false);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
+        statusParams.topMargin = dp(18);
+        content.addView(status, statusParams);
+        webToggle = label("网页操作  ▾", 12, GREEN, true);
+        LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(-1, -2);
+        toggleParams.topMargin = dp(10);
+        content.addView(webToggle, toggleParams);
+        webToggle.setOnClickListener(v -> {
+            browserPanel.setVisibility(browserPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+            webToggle.setText(browserPanel.getVisibility() == View.VISIBLE ? "收起网页  ▴" : "网页操作  ▾");
+        });
+        browserPanel = new LinearLayout(this);
+        browserPanel.setOrientation(LinearLayout.VERTICAL);
+        browserPanel.setPadding(dp(10), dp(10), dp(10), dp(10));
+        browserPanel.setBackground(shape(Color.WHITE, 16));
+        LinearLayout.LayoutParams browserParams = new LinearLayout.LayoutParams(-1, -2);
+        browserParams.topMargin = dp(9);
+        content.addView(browserPanel, browserParams);
+        browserPanel.setVisibility(View.GONE);
+        browserPanel.addView(label("在网页中登录并打开评论区，然后扫描主评论", 11, MUTED, false));
+        setupBrowser();
+        browserPanel.addView(browser, new LinearLayout.LayoutParams(-1, dp(290)));
+        LinearLayout controls = new LinearLayout(this);
+        browserPanel.addView(controls);
         Button codeLogin = new Button(this);
-        codeLogin.setText("切换验证码登录");
+        codeLogin.setAllCaps(false);
+        codeLogin.setText("验证码登录");
         codeLogin.setOnClickListener(v -> browser.evaluateJavascript(
                 "(() => {const tab=[...document.querySelectorAll('button,div,span')].find(x=>x.children.length===0&&x.textContent.trim()==='验证码登录'&&x.getBoundingClientRect().width>0);if(tab){tab.click();return true}return false})()",
                 found -> status.setText("true".equals(found) ? "请在抖音网页中输入手机号和验证码" : "请先在网页中点登录，再选择验证码登录")));
-        root.addView(codeLogin);
+        controls.addView(codeLogin, new LinearLayout.LayoutParams(0, dp(48), 1));
+        scanButton = new Button(this);
+        scanButton.setAllCaps(false);
+        scanButton.setText("扫描主评论");
+        scanButton.setOnClickListener(v -> {
+            if (scanning) {
+                scanning = false;
+                requestToken++;
+                scanButton.setText("继续扫描");
+            } else {
+                scanning = true;
+                requestWaits = 0;
+                scanButton.setText("暂停扫描");
+                startPage();
+            }
+        });
+        controls.addView(scanButton, new LinearLayout.LayoutParams(0, dp(48), 1));
 
+        resultAnchor = label("提取结果", 19, DARK, true);
+        LinearLayout.LayoutParams resultHeadParams = new LinearLayout.LayoutParams(-1, -2);
+        resultHeadParams.topMargin = dp(28);
+        content.addView(resultAnchor, resultHeadParams);
+        resultSummary = label("提取后自动显示图片与动图预览", 11, MUTED, false);
+        content.addView(resultSummary);
+        LinearLayout filters = new LinearLayout(this);
+        LinearLayout.LayoutParams filtersParams = new LinearLayout.LayoutParams(-1, -2);
+        filtersParams.topMargin = dp(15);
+        filtersParams.bottomMargin = dp(14);
+        content.addView(filters, filtersParams);
+        allFilter = filter("全部 0", "all", filters);
+        gifFilter = filter("动图 0", "gif", filters);
+        imageFilter = filter("图片 0", "image", filters);
+        emptyResults = label("还没有提取结果。打开作品并扫描评论后，图片和 GIF 会直接显示在这里。", 12, MUTED, false);
+        emptyResults.setPadding(dp(18), dp(25), dp(18), dp(25));
+        emptyResults.setBackground(shape(Color.WHITE, 16));
+        content.addView(emptyResults);
+        results = new LinearLayout(this);
+        results.setOrientation(LinearLayout.VERTICAL);
+        content.addView(results);
+
+        LinearLayout saveBar = new LinearLayout(this);
+        saveBar.setGravity(Gravity.CENTER_VERTICAL);
+        saveBar.setPadding(dp(18), dp(8), dp(18), dp(8));
+        saveBar.setBackgroundColor(Color.WHITE);
+        readerRoot.addView(saveBar, new LinearLayout.LayoutParams(-1, dp(72)));
+        countLabel = label("已提取 0 个", 13, DARK, true);
+        saveBar.addView(countLabel, new LinearLayout.LayoutParams(0, -2, 1));
+        Button saveAll = new Button(this);
+        saveAll.setAllCaps(false);
+        saveAll.setText("保存全部");
+        saveAll.setTextColor(Color.WHITE);
+        saveAll.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        saveAll.setBackground(shape(DARK, 13));
+        saveAll.setOnClickListener(v -> {
+            ArrayList<Media> snapshot = new ArrayList<>(media);
+            worker.execute(() -> {
+            int saved = 0;
+            for (Media item : snapshot) {
+                try { saveToDownloads(item); saved++; } catch (Exception ignored) { }
+            }
+            int count = saved;
+            runOnUiThread(() -> status.setText("已保存 " + count + " 个文件到下载/DouYinGetting"));
+            });
+        });
+        saveBar.addView(saveAll, new LinearLayout.LayoutParams(dp(112), dp(46)));
+        updateResultLabels();
+    }
+
+    private TextView filter(String text, String type, LinearLayout parent) {
+        TextView button = label(text, 11, type.equals(selectedFilter) ? Color.WHITE : MUTED, true);
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(dp(14), dp(8), dp(14), dp(8));
+        button.setBackground(shape(type.equals(selectedFilter) ? DARK : Color.rgb(236, 242, 239), 18));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+        params.rightMargin = dp(7);
+        parent.addView(button, params);
+        button.setOnClickListener(v -> {
+            selectedFilter = type;
+            renderResults();
+        });
+        return button;
+    }
+
+    private void setupBrowser() {
         browser = new WebView(this);
         browser.getSettings().setJavaScriptEnabled(true);
         browser.getSettings().setDomStorageEnabled(true);
@@ -131,56 +480,17 @@ public class MainActivity extends Activity {
                 return null;
             }
             @Override public void onPageFinished(WebView view, String url) {
-                status.setText("作品已打开。请在抖音网页登录并进入评论区，再开始扫描");
+                status.setText("作品已打开。请在网页中登录并进入评论区，再扫描主评论");
             }
         });
         browser.setWebChromeClient(new WebChromeClient() {
             @Override public void onPermissionRequest(PermissionRequest request) {
                 runOnUiThread(() -> askCameraPermission(request));
             }
-
             @Override public void onPermissionRequestCanceled(PermissionRequest request) {
                 if (pendingCameraRequest == request) pendingCameraRequest = null;
             }
         });
-        root.addView(browser, new LinearLayout.LayoutParams(-1, dp(300)));
-
-        scanButton = new Button(this);
-        scanButton.setText("扫描主评论");
-        scanButton.setOnClickListener(v -> {
-            if (scanning) {
-                scanning = false;
-                requestToken++;
-                scanButton.setText("继续扫描");
-            } else {
-                scanning = true;
-                requestWaits = 0;
-                scanButton.setText("暂停扫描");
-                startPage();
-            }
-        });
-        root.addView(scanButton);
-        Button saveAll = new Button(this);
-        saveAll.setText("保存全部已提取文件");
-        saveAll.setOnClickListener(v -> worker.execute(() -> {
-            int saved = 0;
-            for (Media item : new ArrayList<>(media)) {
-                try { saveToDownloads(item); saved++; } catch (Exception ignored) { }
-            }
-            int count = saved;
-            runOnUiThread(() -> status.setText("已保存 " + count + " 个文件到下载/DouYinGetting"));
-        }));
-        root.addView(saveAll);
-        ScrollView scroll = new ScrollView(this);
-        results = new LinearLayout(this);
-        results.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(results);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-
-        if (Intent.ACTION_SEND.equals(getIntent().getAction())) {
-            String shared = getIntent().getStringExtra(Intent.EXTRA_TEXT);
-            if (shared != null) input.setText(shared);
-        }
     }
 
     private int dp(int value) {
@@ -242,11 +552,21 @@ public class MainActivity extends Activity {
         scanButton.setText("扫描主评论");
         media.clear();
         hashes.clear();
+        for (Animatable animation : animations) animation.stop();
+        animations.clear();
         results.removeAllViews();
+        resultRow = null;
+        displayedCount = 0;
+        selectedFilter = "all";
+        updateResultLabels();
+        renderResults();
+        browserPanel.setVisibility(View.VISIBLE);
+        webToggle.setText("收起网页  ▴");
         input.clearFocus();
         InputMethodManager keyboard = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (keyboard != null) keyboard.hideSoftInputFromWindow(input.getWindowToken(), 0);
         browser.loadUrl(link);
+        readerScroll.post(() -> readerScroll.smoothScrollTo(0, browserPanel.getTop()));
     }
 
     private void startPage() {
@@ -368,6 +688,11 @@ public class MainActivity extends Activity {
             } else {
                 scanning = false;
                 scanButton.setText(more ? "继续扫描" : "扫描完成");
+                if (!more) {
+                    browserPanel.setVisibility(View.GONE);
+                    webToggle.setText("网页操作  ▾");
+                    readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
+                }
             }
         });
     }
@@ -399,8 +724,22 @@ public class MainActivity extends Activity {
             folder.mkdirs();
             File file = new File(folder, hash.substring(0, 20) + extension);
             try (OutputStream out = new FileOutputStream(file)) { out.write(bytes); }
-            Media item = new Media(file, mime, commentId, kind);
-            runOnUiThread(() -> { media.add(item); addRow(item); });
+            Drawable thumbnail;
+            try {
+                thumbnail = ImageDecoder.decodeDrawable(ImageDecoder.createSource(file), (decoder, info, sourceInfo) -> {
+                    int width = info.getSize().getWidth();
+                    int height = info.getSize().getHeight();
+                    float scale = Math.min(1f, dp(120) / (float) Math.max(width, height));
+                    decoder.setTargetSize(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
+                });
+            } catch (Exception ignored) { thumbnail = null; }
+            Media item = new Media(file, mime, commentId, kind, thumbnail);
+            runOnUiThread(() -> {
+                media.add(item);
+                updateResultLabels();
+                if (matchesFilter(item)) addTile(item);
+                if (media.size() == 1) readerScroll.postDelayed(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()), 200);
+            });
         } catch (Exception ignored) { }
     }
 
@@ -413,28 +752,84 @@ public class MainActivity extends Activity {
         return null;
     }
 
-    private void addRow(Media item) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        TextView name = new TextView(this);
-        name.setText(item.kind + " · " + item.mime.substring(6) + " · 评论 " + item.commentId);
-        row.addView(name, new LinearLayout.LayoutParams(0, dp(52), 1));
-        Button preview = new Button(this);
-        preview.setText("预览");
-        preview.setOnClickListener(v -> preview(item));
-        row.addView(preview);
-        Button save = new Button(this);
-        save.setText("保存");
-        save.setOnClickListener(v -> worker.execute(() -> {
-            try {
-                saveToDownloads(item);
-                runOnUiThread(() -> status.setText("已保存 " + item.file.getName()));
-            } catch (Exception error) {
-                runOnUiThread(() -> status.setText("保存失败：" + error.getMessage()));
+    private boolean matchesFilter(Media item) {
+        return "all".equals(selectedFilter) || ("gif".equals(selectedFilter) == item.animated);
+    }
+
+    private void updateResultLabels() {
+        int gifCount = 0;
+        for (Media item : media) if (item.animated) gifCount++;
+        allFilter.setText("全部 " + media.size());
+        gifFilter.setText("动图 " + gifCount);
+        imageFilter.setText("图片 " + (media.size() - gifCount));
+        resultSummary.setText(media.isEmpty() ? "提取后自动显示图片与动图预览" : "已找到 " + media.size() + " 个不重复素材 · 默认预览中");
+        countLabel.setText("已提取 " + media.size() + " 个");
+        emptyResults.setText(media.isEmpty() ? "还没有提取结果。打开作品并扫描评论后，图片和 GIF 会直接显示在这里。" : "当前分类没有结果");
+        emptyResults.setVisibility(displayedCount == 0 ? View.VISIBLE : View.GONE);
+    }
+
+    private void renderResults() {
+        for (Animatable animation : animations) animation.stop();
+        animations.clear();
+        results.removeAllViews();
+        resultRow = null;
+        displayedCount = 0;
+        for (Media item : media) if (matchesFilter(item)) addTile(item);
+        emptyResults.setText(media.isEmpty() ? "还没有提取结果。打开作品并扫描评论后，图片和 GIF 会直接显示在这里。" : "当前分类没有结果");
+        emptyResults.setVisibility(displayedCount == 0 ? View.VISIBLE : View.GONE);
+        for (TextView button : new TextView[]{allFilter, gifFilter, imageFilter}) {
+            boolean active = button == allFilter && "all".equals(selectedFilter)
+                    || button == gifFilter && "gif".equals(selectedFilter)
+                    || button == imageFilter && "image".equals(selectedFilter);
+            button.setTextColor(active ? Color.WHITE : MUTED);
+            button.setBackground(shape(active ? DARK : Color.rgb(236, 242, 239), 18));
+        }
+    }
+
+    private void addTile(Media item) {
+        if (displayedCount % 3 == 0) {
+            resultRow = new LinearLayout(this);
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
+            rowParams.bottomMargin = dp(8);
+            results.addView(resultRow, rowParams);
+        }
+        int tileWidth = (getResources().getDisplayMetrics().widthPixels - dp(52)) / 3;
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(shape(Color.WHITE, 15));
+        card.setClipToOutline(true);
+        card.setElevation(dp(2));
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(tileWidth, -2);
+        if (displayedCount % 3 != 0) cardParams.leftMargin = dp(8);
+        resultRow.addView(card, cardParams);
+        FrameLayout art = new FrameLayout(this);
+        art.setBackgroundColor(item.animated ? Color.rgb(255, 232, 238) : Color.rgb(227, 241, 246));
+        card.addView(art, new LinearLayout.LayoutParams(-1, tileWidth));
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setPadding(dp(5), dp(5), dp(5), dp(5));
+        if (item.thumbnail != null) {
+            image.setImageDrawable(item.thumbnail);
+            if (item.thumbnail instanceof Animatable) {
+                Animatable animation = (Animatable) item.thumbnail;
+                animations.add(animation);
+                if (showingReader) animation.start();
             }
-        }));
-        row.addView(save);
-        results.addView(row);
+        }
+        art.addView(image, new FrameLayout.LayoutParams(-1, -1));
+        TextView badge = label(item.animated ? ("image/gif".equals(item.mime) ? "GIF" : "动图") : "图片", 10, Color.WHITE, true);
+        badge.setGravity(Gravity.CENTER);
+        badge.setPadding(dp(6), dp(3), dp(6), dp(3));
+        badge.setBackground(shape(item.animated ? Color.rgb(237, 98, 136) : DARK, 5));
+        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, -2, Gravity.RIGHT | Gravity.TOP);
+        badgeParams.setMargins(0, dp(6), dp(6), 0);
+        art.addView(badge, badgeParams);
+        TextView caption = label(item.animated ? "表情 · 动图" : "评论图片", 10, Color.rgb(91, 110, 111), false);
+        caption.setPadding(dp(7), dp(7), dp(4), dp(8));
+        card.addView(caption);
+        card.setOnClickListener(v -> preview(item));
+        displayedCount++;
+        emptyResults.setVisibility(View.GONE);
     }
 
     private void preview(Media item) {
@@ -443,7 +838,16 @@ public class MainActivity extends Activity {
             ImageView image = new ImageView(this);
             image.setImageDrawable(drawable);
             image.setAdjustViewBounds(true);
-            new AlertDialog.Builder(this).setTitle(item.file.getName()).setView(image).setPositiveButton("关闭", null).show();
+            new AlertDialog.Builder(this).setTitle(item.file.getName()).setView(image)
+                    .setPositiveButton("保存此张", (dialog, which) -> worker.execute(() -> {
+                        try {
+                            saveToDownloads(item);
+                            runOnUiThread(() -> status.setText("已保存 " + item.file.getName()));
+                        } catch (Exception error) {
+                            runOnUiThread(() -> status.setText("保存失败：" + error.getMessage()));
+                        }
+                    }))
+                    .setNegativeButton("关闭", null).show();
             if (drawable instanceof Animatable) ((Animatable) drawable).start();
         } catch (Exception error) {
             status.setText("预览失败：" + error.getMessage());
@@ -475,8 +879,23 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         scanning = false;
+        for (Animatable animation : animations) animation.stop();
         worker.shutdownNow();
         browser.destroy();
         super.onDestroy();
+    }
+
+    @Override protected void onPause() {
+        for (Animatable animation : animations) animation.stop();
+        super.onPause();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (showingReader) for (Animatable animation : animations) animation.start();
+    }
+
+    @Override public void onBackPressed() {
+        if (showingReader) showHome(); else super.onBackPressed();
     }
 }
