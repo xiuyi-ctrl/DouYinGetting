@@ -1,0 +1,14 @@
+__pycache__/
+.chrome-*/
+.network-profile/
+.pagination-profile/
+.probe-profile/
+exports*/
+**/build/
+.gradle/
+android-screen.png
+/.codex-remote-attachments/
+/samples/
+local.properties
+*.keystore
+*.jks

@@ -1,0 +1,19 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.example.douyingetting'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.example.douyingetting'
+        minSdk 29
+        targetSdk 35
+        versionCode 8
+        versionName '0.8'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
