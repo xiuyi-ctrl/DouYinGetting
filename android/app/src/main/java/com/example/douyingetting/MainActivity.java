@@ -19,6 +19,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.inputmethod.InputMethodManager;
 import android.view.View;
 import android.widget.FrameLayout;
@@ -36,6 +37,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -56,6 +59,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Collections;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -64,12 +68,19 @@ import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
     private static final Pattern LINK = Pattern.compile("https?://[^\\s]+douyin\\.com/[^\\s]+", Pattern.CASE_INSENSITIVE);
+    private static final Pattern XHS_LINK = Pattern.compile("https?://(?:[^\\s/]+\\.)?(?:xiaohongshu\\.com|xhslink\\.cn)/[^\\s]+", Pattern.CASE_INSENSITIVE);
+    private static final String DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ArrayList<Media> media = new ArrayList<>();
     private final ArrayList<ScanRecord> records = new ArrayList<>();
     private ScanRecord currentRecord;
     private String activeLink;
     private boolean viewingSavedRecord;
+    private boolean xhsMode;
+    private TextView readerHeading;
+    private TextView inputHeading;
+    private TextView browserHint;
+    private Button codeLogin;
     private WebView browser;
     private EditText input;
     private TextView status;
@@ -100,6 +111,12 @@ public class MainActivity extends Activity {
     private int requestToken;
     private long cursor;
     private int scanned;
+    private int xhsIdlePolls;
+    private final HashSet<String> xhsCommentIds = new HashSet<>();
+    private boolean xhsCaptureSupported;
+    private String xhsCaptureScript;
+    private String lastXhsPage;
+    private int xhsAppRedirects;
     private static final int BG = Color.rgb(247, 248, 246);
     private static final int DARK = Color.rgb(25, 47, 55);
     private static final int GREEN = Color.rgb(28, 158, 120);
@@ -246,14 +263,14 @@ public class MainActivity extends Activity {
         sectionParams.bottomMargin = dp(13);
         page.addView(section, sectionParams);
         section.addView(label("选择功能", 19, DARK, true), new LinearLayout.LayoutParams(0, -2, 1));
-        section.addView(label("目前开放 1 项", 11, MUTED, false));
+        section.addView(label("目前开放 2 项", 11, MUTED, false));
 
         LinearLayout feature = new LinearLayout(this);
         feature.setOrientation(LinearLayout.VERTICAL);
         feature.setPadding(dp(20), dp(20), dp(20), dp(18));
         feature.setBackground(shape(Color.WHITE, 24));
         feature.setElevation(dp(5));
-        feature.setOnClickListener(v -> showReader());
+        feature.setOnClickListener(v -> selectMode(false));
         page.addView(feature);
         LinearLayout featureTop = new LinearLayout(this);
         featureTop.setGravity(Gravity.CENTER_VERTICAL);
@@ -285,11 +302,62 @@ public class MainActivity extends Activity {
         feature.addView(featureAction, actionParams);
         featureAction.addView(label("进入读取界面", 13, GREEN, true), new LinearLayout.LayoutParams(0, -2, 1));
         featureAction.addView(label("➜", 22, GREEN, true));
+        LinearLayout xhsFeature = new LinearLayout(this);
+        xhsFeature.setOrientation(LinearLayout.VERTICAL);
+        xhsFeature.setPadding(dp(20), dp(18), dp(20), dp(18));
+        xhsFeature.setBackground(shape(Color.WHITE, 24));
+        xhsFeature.setElevation(dp(5));
+        LinearLayout.LayoutParams xhsParams = new LinearLayout.LayoutParams(-1, -2);
+        xhsParams.topMargin = dp(12);
+        page.addView(xhsFeature, xhsParams);
+        xhsFeature.addView(label("小红书链接读取  ➜", 17, DARK, true));
+        TextView xhsDescription = label("粘贴笔记链接，提取评论图片并暂存预览", 11, MUTED, false);
+        LinearLayout.LayoutParams xhsDescriptionParams = new LinearLayout.LayoutParams(-1, -2);
+        xhsDescriptionParams.topMargin = dp(8);
+        xhsFeature.addView(xhsDescription, xhsDescriptionParams);
+        xhsFeature.setOnClickListener(v -> selectMode(true));
         TextView note = label("✓  提取结果会先在界面预览；点击保存后才写入手机。", 11, MUTED, false);
         LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(-1, -2);
         noteParams.topMargin = dp(28);
         page.addView(note, noteParams);
         setContentView(scroll);
+    }
+
+    private void selectMode(boolean xhs) {
+        scanning = false;
+        requestToken++;
+        xhsMode = xhs;
+        currentRecord = null;
+        viewingSavedRecord = false;
+        activeLink = null;
+        input.setText("");
+        media.clear();
+        for (Animatable animation : animations) animation.stop();
+        animations.clear();
+        selectedFilter = "all";
+        renderResults();
+        updateResultLabels();
+        configureReaderMode();
+        browserPanel.setVisibility(View.GONE);
+        webToggle.setText("网页操作  ▾");
+        browser.loadUrl("about:blank");
+        showReader();
+    }
+
+    private void configureReaderMode() {
+        browser.getSettings().setUserAgentString(DESKTOP_USER_AGENT);
+        browser.getSettings().setUseWideViewPort(!xhsMode);
+        browser.getSettings().setLoadWithOverviewMode(!xhsMode);
+        browser.getLayoutParams().height = xhsMode
+                ? Math.min(dp(400), (int) (getResources().getDisplayMetrics().heightPixels * 0.48f)) : dp(290);
+        browser.requestLayout();
+        readerHeading.setText(xhsMode ? "小红书链接读取" : "抖音链接读取");
+        inputHeading.setText(xhsMode ? "笔记链接" : "作品链接");
+        input.setHint(xhsMode ? "粘贴小红书笔记链接或分享文案" : "粘贴抖音作品链接或分享文案");
+        browserHint.setText(xhsMode ? "在网页中登录并打开笔记评论，扫描时会逐页读取评论图片" : "在网页中登录并打开评论区，然后扫描主评论");
+        codeLogin.setVisibility(xhsMode ? View.GONE : View.VISIBLE);
+        scanButton.setText("扫描主评论");
+        status.setText(xhsMode ? "粘贴笔记链接，打开网页后进入评论区" : "粘贴作品链接，打开网页后进入评论区");
     }
 
     private void showRecords() {
@@ -323,7 +391,9 @@ public class MainActivity extends Activity {
         headingParams.topMargin = dp(28);
         headingParams.bottomMargin = dp(12);
         page.addView(heading, headingParams);
-        if (records.isEmpty()) {
+        ArrayList<ScanRecord> visibleRecords = new ArrayList<>();
+        for (ScanRecord record : records) if (isXhsLink(record.link) == xhsMode) visibleRecords.add(record);
+        if (visibleRecords.isEmpty()) {
             TextView empty = label("扫描过的作品会暂存在这里，方便随时查看和删除。", 12, MUTED, false);
             empty.setPadding(dp(18), dp(19), dp(18), dp(19));
             empty.setBackground(shape(Color.WHITE, 16));
@@ -331,7 +401,7 @@ public class MainActivity extends Activity {
             return;
         }
         SimpleDateFormat date = new SimpleDateFormat("MM-dd HH:mm", Locale.CHINA);
-        for (ScanRecord record : new ArrayList<>(records)) {
+        for (ScanRecord record : visibleRecords) {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(17), dp(15), dp(17), dp(13));
@@ -371,6 +441,8 @@ public class MainActivity extends Activity {
     }
 
     private void showRecord(ScanRecord record) {
+        xhsMode = isXhsLink(record.link);
+        configureReaderMode();
         currentRecord = record;
         viewingSavedRecord = true;
         activeLink = record.link.startsWith("http") ? record.link : null;
@@ -439,9 +511,9 @@ public class MainActivity extends Activity {
         back.setBackground(shape(Color.rgb(237, 242, 239), 12));
         back.setOnClickListener(v -> showHome());
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(38), dp(38)));
-        TextView heading = label("抖音链接读取", 18, DARK, true);
-        heading.setGravity(Gravity.CENTER);
-        toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        readerHeading = label("抖音链接读取", 18, DARK, true);
+        readerHeading.setGravity(Gravity.CENTER);
+        toolbar.addView(readerHeading, new LinearLayout.LayoutParams(0, -2, 1));
         TextView recordsButton = label("扫描记录", 12, GREEN, true);
         recordsButton.setGravity(Gravity.CENTER);
         recordsButton.setOnClickListener(v -> showRecords());
@@ -464,7 +536,8 @@ public class MainActivity extends Activity {
         LinearLayout inputHead = new LinearLayout(this);
         inputHead.setGravity(Gravity.CENTER_VERTICAL);
         inputCard.addView(inputHead);
-        inputHead.addView(label("作品链接", 14, DARK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        inputHeading = label("作品链接", 14, DARK, true);
+        inputHead.addView(inputHeading, new LinearLayout.LayoutParams(0, -2, 1));
         TextView connection = label("● 网页登录", 10, GREEN, true);
         connection.setPadding(dp(8), dp(5), dp(8), dp(5));
         connection.setBackground(shape(Color.rgb(230, 248, 238), 12));
@@ -529,12 +602,13 @@ public class MainActivity extends Activity {
         browserParams.topMargin = dp(9);
         content.addView(browserPanel, browserParams);
         browserPanel.setVisibility(View.GONE);
-        browserPanel.addView(label("在网页中登录并打开评论区，然后扫描主评论", 11, MUTED, false));
+        browserHint = label("在网页中登录并打开评论区，然后扫描主评论", 11, MUTED, false);
+        browserPanel.addView(browserHint);
         setupBrowser();
         browserPanel.addView(browser, new LinearLayout.LayoutParams(-1, dp(290)));
         LinearLayout controls = new LinearLayout(this);
         browserPanel.addView(controls);
-        Button codeLogin = new Button(this);
+        codeLogin = new Button(this);
         codeLogin.setAllCaps(false);
         codeLogin.setText("验证码登录");
         codeLogin.setOnClickListener(v -> browser.evaluateJavascript(
@@ -547,7 +621,11 @@ public class MainActivity extends Activity {
         scanButton.setOnClickListener(v -> {
             if (viewingSavedRecord) {
                 openLink();
-                status.setText("作品已重新打开，请进入评论区后再次点击扫描");
+                status.setText(xhsMode ? "笔记已重新打开，请进入评论区后再次点击扫描" : "作品已重新打开，请进入评论区后再次点击扫描");
+                return;
+            }
+            if (xhsMode) {
+                toggleXhsScan();
                 return;
             }
             if (scanning) {
@@ -658,13 +736,57 @@ public class MainActivity extends Activity {
 
     private void setupBrowser() {
         browser = new WebView(this);
+        browser.setOnTouchListener((view, event) -> {
+            if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(
+                    event.getActionMasked() != MotionEvent.ACTION_UP && event.getActionMasked() != MotionEvent.ACTION_CANCEL);
+            return false;
+        });
         browser.getSettings().setJavaScriptEnabled(true);
         browser.getSettings().setDomStorageEnabled(true);
         browser.getSettings().setUseWideViewPort(true);
         browser.getSettings().setLoadWithOverviewMode(true);
-        browser.getSettings().setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        browser.getSettings().setBuiltInZoomControls(true);
+        browser.getSettings().setDisplayZoomControls(false);
+        browser.getSettings().setUserAgentString(DESKTOP_USER_AGENT);
         CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true);
+        try (InputStream source = getAssets().open("xhs-capture.js"); ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+            byte[] chunk = new byte[8192];
+            int count;
+            while ((count = source.read(chunk)) != -1) buffer.write(chunk, 0, count);
+            xhsCaptureScript = buffer.toString(StandardCharsets.UTF_8.name());
+            xhsCaptureSupported = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
+            if (xhsCaptureSupported) WebViewCompat.addDocumentStartJavaScript(browser, xhsCaptureScript,
+                    Collections.singleton("https://www.xiaohongshu.com"));
+        } catch (Exception error) {
+            xhsCaptureSupported = false;
+        }
         browser.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri url = request.getUrl();
+                if (!xhsMode || !request.isForMainFrame()) return false;
+                if ("https".equals(url.getScheme()) && "www.xiaohongshu.com".equals(url.getHost())) {
+                    if (url.getPath() != null && (url.getPath().contains("/discovery/item/") || url.getPath().contains("/explore/")))
+                        lastXhsPage = url.toString();
+                    return false;
+                }
+                if (!"xhsdiscover".equals(url.getScheme())) return false;
+                if (++xhsAppRedirects == 1) {
+                    Matcher note = Pattern.compile("[a-fA-F0-9]{24}").matcher(url.toString());
+                    if (note.find()) {
+                        String noteId = note.group();
+                        Uri previous = lastXhsPage == null ? null : Uri.parse(lastXhsPage);
+                        Uri.Builder page = Uri.parse("https://www.xiaohongshu.com/explore/" + noteId).buildUpon();
+                        String token = previous == null ? null : previous.getQueryParameter("xsec_token");
+                        if (token != null) page.appendQueryParameter("xsec_token", token);
+                        page.appendQueryParameter("xsec_source", "app_share");
+                        view.loadUrl(page.build().toString());
+                        status.setText("已拦截小红书 App 跳转，正在打开网页笔记");
+                        return true;
+                    }
+                }
+                status.setText("小红书网页要求在官方 App 中打开；此页面暂无法读取评论");
+                return true;
+            }
             @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String path = uri.getPath();
@@ -678,7 +800,12 @@ public class MainActivity extends Activity {
                 return null;
             }
             @Override public void onPageFinished(WebView view, String url) {
-                status.setText("作品已打开。请在网页中登录并进入评论区，再扫描主评论");
+                if (xhsMode) {
+                    if (!xhsCaptureSupported && xhsCaptureScript != null && url.startsWith("https://www.xiaohongshu.com/"))
+                        browser.evaluateJavascript(xhsCaptureScript, null);
+                    status.setText(url.contains("/login") ? "请在小红书网页中完成登录，再打开笔记"
+                            : "笔记已打开。请进入评论区，再扫描主评论图片");
+                } else status.setText("作品已打开。请在网页中登录并进入评论区，再扫描主评论");
             }
         });
         browser.setWebChromeClient(new WebChromeClient() {
@@ -837,19 +964,22 @@ public class MainActivity extends Activity {
 
     private void openLink() {
         String text = input.getText().toString().replace("\\:", ":");
-        Matcher matcher = LINK.matcher(text);
+        Matcher matcher = (xhsMode ? XHS_LINK : LINK).matcher(text);
         if (!matcher.find()) {
-            status.setText("没有找到抖音链接");
+            status.setText(xhsMode ? "没有找到小红书笔记链接" : "没有找到抖音链接");
             return;
         }
         String link = matcher.group().replaceAll("[，。,.]+$", "");
         activeLink = link;
+        xhsAppRedirects = 0;
+        lastXhsPage = null;
         currentRecord = null;
         viewingSavedRecord = false;
         commentRequest = null;
         lastCommentPath = null;
         cursor = 0;
         scanned = 0;
+        xhsCommentIds.clear();
         requestWaits = 0;
         requestToken++;
         scanning = false;
@@ -870,6 +1000,135 @@ public class MainActivity extends Activity {
         if (keyboard != null) keyboard.hideSoftInputFromWindow(input.getWindowToken(), 0);
         browser.loadUrl(link);
         readerScroll.post(() -> readerScroll.smoothScrollTo(0, browserPanel.getTop()));
+    }
+
+    private static boolean isXhsLink(String link) {
+        return link.contains("xiaohongshu.com/") || link.contains("xhslink.cn/");
+    }
+
+    private void toggleXhsScan() {
+        if (scanning) {
+            scanning = false;
+            requestToken++;
+            scanButton.setText("继续扫描");
+            status.setText("扫描已暂停，已提取的图片保留在暂存记录中");
+            return;
+        }
+        String page = browser.getUrl();
+        if (page == null || !page.startsWith("https://www.xiaohongshu.com/")
+                || !page.matches(".*(?:/explore/|/discovery/item/)[a-fA-F0-9]{24}.*")) {
+            status.setText("请先在网页中打开小红书笔记");
+            return;
+        }
+        if (xhsCaptureScript == null) {
+            status.setText("评论读取组件未加载，请重启 App 后重试");
+            return;
+        }
+        if (currentRecord == null || currentRecord.complete) {
+            String id = UUID.randomUUID().toString();
+            ScanRecord record = new ScanRecord(id, activeLink == null ? page : activeLink,
+                    System.currentTimeMillis(), new File(recordsFolder(), id));
+            currentRecord = record;
+            records.add(0, record);
+            scanned = 0;
+            xhsCommentIds.clear();
+            media.clear();
+            for (Animatable animation : animations) animation.stop();
+            animations.clear();
+            renderResults();
+            updateResultLabels();
+            if (!persistRecord(record)) {
+                records.remove(record);
+                currentRecord = null;
+                return;
+            }
+        }
+        scanning = true;
+        xhsIdlePolls = 0;
+        scanButton.setText("暂停扫描");
+        status.setText("正在读取小红书评论图片…");
+        int token = ++requestToken;
+        browser.evaluateJavascript("window.__xhsCapture?.seed()", ignored -> pollXhs(token));
+    }
+
+    private void pollXhs(int token) {
+        if (!scanning || token != requestToken || !xhsMode) return;
+        browser.evaluateJavascript("window.__xhsCapture?.snapshot();JSON.stringify(window.__xhsCapture?.drain() || [])", value -> {
+            if (!scanning || token != requestToken || !xhsMode) return;
+            try {
+                Object parsed = new JSONTokener(value).nextValue();
+                if (parsed instanceof String) parsed = new JSONTokener((String) parsed).nextValue();
+                JSONArray packets = (JSONArray) parsed;
+                if (packets.length() > 0) {
+                    xhsIdlePolls = 0;
+                    ScanRecord record = currentRecord;
+                    worker.execute(() -> processXhsPackets(record, packets, token));
+                    return;
+                }
+            } catch (Exception error) {
+                scanning = false;
+                scanButton.setText("继续扫描");
+                status.setText("扫描暂停：评论响应解析失败");
+                return;
+            }
+            xhsIdlePolls++;
+            if (xhsIdlePolls == 30) {
+                status.setText("正在等待后续评论；如网页不再加载，请在评论区向下滑动");
+                browserPanel.setVisibility(View.VISIBLE);
+                webToggle.setText("收起网页  ▴");
+                readerScroll.post(() -> readerScroll.smoothScrollTo(0, browserPanel.getTop()));
+            }
+            if (xhsIdlePolls % 4 == 0) browser.evaluateJavascript("window.__xhsCapture?.scroll()", null);
+            browser.postDelayed(() -> pollXhs(token), 500);
+        });
+    }
+
+    private void processXhsPackets(ScanRecord record, JSONArray packets, int token) {
+        if (record == null) return;
+        boolean more = true;
+        for (int p = 0; p < packets.length(); p++) {
+            JSONObject packet = packets.optJSONObject(p);
+            if (packet == null) continue;
+            JSONArray comments = packet.optJSONArray("comments");
+            if (comments == null) continue;
+            for (int i = 0; i < comments.length(); i++) {
+                JSONObject comment = comments.optJSONObject(i);
+                if (comment == null) continue;
+                String id = comment.optString("id");
+                if (!id.isEmpty() && !xhsCommentIds.add(id)) continue;
+                record.scanned++;
+                JSONArray pictures = comment.optJSONArray("pictures");
+                if (pictures == null) continue;
+                for (int j = 0; j < pictures.length(); j++) {
+                    JSONObject picture = pictures.optJSONObject(j);
+                    if (picture != null) download(record, picture.optString("url", null), id, "图片");
+                }
+            }
+            more = packet.optBoolean("hasMore", true);
+            record.complete = !more;
+            persistRecord(record);
+            if (!more) break;
+        }
+        boolean hasMore = more;
+        runOnUiThread(() -> {
+            if (currentRecord != record || token != requestToken) return;
+            status.setText("已扫描 " + record.scanned + " 条主评论，找到 " + media.size() + " 个不同媒体"
+                    + (hasMore ? "（继续扫描）" : "（扫描完成）"));
+            if (hasMore && scanning) {
+                browser.evaluateJavascript("window.__xhsCapture?.scroll()", null);
+                browser.postDelayed(() -> pollXhs(token), 800);
+            } else if (!hasMore) {
+                scanning = false;
+                scanButton.setText("扫描完成");
+                browserPanel.setVisibility(View.GONE);
+                webToggle.setText("网页操作  ▾");
+                if (showingReader) new AlertDialog.Builder(this)
+                        .setTitle("小红书主评论扫描完成")
+                        .setMessage("已扫描 " + record.scanned + " 条主评论，提取 " + media.size() + " 个不同素材。结果已暂存。")
+                        .setPositiveButton("查看结果", (dialog, which) -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()))
+                        .show();
+            }
+        });
     }
 
     private void startPage() {
@@ -1016,18 +1275,16 @@ public class MainActivity extends Activity {
     private void download(ScanRecord record, String source, String commentId, String kind) {
         if (source == null) return;
         try {
-            HttpURLConnection connection = (HttpURLConnection) new URL(source).openConnection();
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(30000);
-            connection.setRequestProperty("User-Agent", "Mozilla/5.0");
-            connection.setRequestProperty("Referer", "https://www.douyin.com/");
-            byte[] bytes;
-            try (InputStream stream = connection.getInputStream(); ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
-                byte[] chunk = new byte[8192];
-                int count;
-                while ((count = stream.read(chunk)) != -1) buffer.write(chunk, 0, count);
-                bytes = buffer.toByteArray();
+            boolean xhs = isXhsLink(record.link);
+            String original = xhs ? originalXhsUrl(source) : source;
+            byte[] bytes = null;
+            if (!original.equals(source)) {
+                try {
+                    bytes = readMedia(original, true);
+                    if (format(bytes) == null) bytes = null;
+                } catch (Exception ignored) { }
             }
+            if (bytes == null) bytes = readMedia(source, xhs);
             String mime = format(bytes);
             if (mime == null) return;
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
@@ -1054,6 +1311,38 @@ public class MainActivity extends Activity {
                 if (media.size() == 1) readerScroll.postDelayed(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()), 200);
             });
         } catch (Exception ignored) { }
+    }
+
+    private static String originalXhsUrl(String source) {
+        Uri uri = Uri.parse(source);
+        String host = uri.getHost();
+        String path = uri.getPath();
+        if (host == null || path == null || !(host.endsWith(".xhscdn.com")
+                || host.endsWith(".rednotecdn.com") || host.equals("ci.xiaohongshu.com"))) return source;
+        int start = -1;
+        for (String folder : new String[]{"/comment/", "/spectrum/", "/notes_pre_post/"}) {
+            int found = path.indexOf(folder);
+            if (found >= 0 && (start < 0 || found < start)) start = found;
+        }
+        if (start < 0) return source;
+        String original = path.substring(start).split("!", 2)[0];
+        return "https://ci.xiaohongshu.com" + original;
+    }
+
+    private static byte[] readMedia(String source, boolean xhs) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(source).openConnection();
+        connection.setConnectTimeout(10000);
+        connection.setReadTimeout(30000);
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0");
+        connection.setRequestProperty("Referer", xhs ? "https://www.xiaohongshu.com/" : "https://www.douyin.com/");
+        try (InputStream stream = connection.getInputStream(); ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+            byte[] chunk = new byte[8192];
+            int count;
+            while ((count = stream.read(chunk)) != -1) buffer.write(chunk, 0, count);
+            return buffer.toByteArray();
+        } finally {
+            connection.disconnect();
+        }
     }
 
     private Drawable decodeThumbnail(File file) {
