@@ -35,6 +35,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -90,6 +91,7 @@ public class MainActivity extends Activity {
     private String selectedFilter = "all";
     private int displayedCount;
     private boolean showingReader;
+    private boolean showingRecords;
     private volatile String commentRequest;
     private volatile String lastCommentPath;
     private PermissionRequest pendingCameraRequest;
@@ -179,6 +181,7 @@ public class MainActivity extends Activity {
             scanButton.setText("继续扫描");
         }
         showingReader = false;
+        showingRecords = false;
         for (Animatable animation : animations) animation.stop();
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -286,6 +289,30 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(-1, -2);
         noteParams.topMargin = dp(28);
         page.addView(note, noteParams);
+        setContentView(scroll);
+    }
+
+    private void showRecords() {
+        if (scanning) {
+            scanning = false;
+            requestToken++;
+            scanButton.setText("继续扫描");
+        }
+        showingReader = false;
+        showingRecords = true;
+        for (Animatable animation : animations) animation.stop();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(BG);
+        scroll.setFitsSystemWindows(true);
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(18), dp(16), dp(18), dp(28));
+        scroll.addView(page);
+        TextView back = label("‹  返回读取", 14, GREEN, true);
+        back.setPadding(0, dp(8), 0, dp(8));
+        back.setOnClickListener(v -> showReader());
+        page.addView(back);
         addRecordCards(page);
         setContentView(scroll);
     }
@@ -372,13 +399,17 @@ public class MainActivity extends Activity {
                         scanning = false;
                         requestToken++;
                         currentRecord = null;
+                        viewingSavedRecord = false;
+                        media.clear();
+                        renderResults();
+                        updateResultLabels();
                     }
                     worker.execute(() -> {
                         boolean deleted = deleteRecordFiles(record);
                         runOnUiThread(() -> {
                             if (deleted) {
                                 records.remove(record);
-                                showHome();
+                                showRecords();
                             } else {
                                 new AlertDialog.Builder(this).setMessage("删除失败，请重试").setPositiveButton("确定", null).show();
                             }
@@ -389,6 +420,7 @@ public class MainActivity extends Activity {
 
     private void showReader() {
         showingReader = true;
+        showingRecords = false;
         setContentView(readerRoot);
         for (Animatable animation : animations) animation.start();
     }
@@ -410,11 +442,10 @@ public class MainActivity extends Activity {
         TextView heading = label("抖音链接读取", 18, DARK, true);
         heading.setGravity(Gravity.CENTER);
         toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView help = label("帮助", 12, MUTED, true);
-        help.setGravity(Gravity.CENTER);
-        help.setOnClickListener(v -> new AlertDialog.Builder(this).setMessage("粘贴作品链接，打开抖音网页并进入评论区，再点击扫描主评论。提取结果会直接显示预览。")
-                .setPositiveButton("知道了", null).show());
-        toolbar.addView(help, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        TextView recordsButton = label("扫描记录", 12, GREEN, true);
+        recordsButton.setGravity(Gravity.CENTER);
+        recordsButton.setOnClickListener(v -> showRecords());
+        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(dp(72), dp(38)));
 
         readerScroll = new ScrollView(this);
         readerScroll.setFillViewport(true);
@@ -594,12 +625,16 @@ public class MainActivity extends Activity {
         saveAll.setOnClickListener(v -> {
             ArrayList<Media> snapshot = new ArrayList<>(media);
             worker.execute(() -> {
-            int saved = 0;
-            for (Media item : snapshot) {
-                try { saveToDownloads(item); saved++; } catch (Exception ignored) { }
-            }
-            int count = saved;
-            runOnUiThread(() -> status.setText("已保存 " + count + " 个文件到下载/DouYinGetting"));
+                int saved = 0;
+                for (Media item : snapshot) {
+                    try { saveToDownloads(item); saved++; } catch (Exception ignored) { }
+                }
+                int success = saved;
+                int failed = snapshot.size() - saved;
+                runOnUiThread(() -> showSaveResult(snapshot.isEmpty() ? "没有可保存的文件"
+                        : failed == 0 ? "保存成功：" + success + " 个文件已写入下载/DouYinGetting"
+                        : success == 0 ? "保存失败：" + failed + " 个文件未能保存"
+                        : "部分保存成功：成功 " + success + " 个，失败 " + failed + " 个"));
             });
         });
         saveBar.addView(saveAll, new LinearLayout.LayoutParams(dp(112), dp(46)));
@@ -968,6 +1003,11 @@ public class MainActivity extends Activity {
                     browserPanel.setVisibility(View.GONE);
                     webToggle.setText("网页操作  ▾");
                     readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
+                    if (showingReader) new AlertDialog.Builder(this)
+                            .setTitle("主评论扫描完成")
+                            .setMessage("已扫描 " + record.scanned + " 条主评论，提取 " + media.size() + " 个不同素材。结果已暂存，可预览或保存。")
+                            .setPositiveButton("查看结果", (dialog, which) -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()))
+                            .show();
                 }
             }
         });
@@ -1139,9 +1179,9 @@ public class MainActivity extends Activity {
                     .setPositiveButton("保存此张", (dialog, which) -> worker.execute(() -> {
                         try {
                             saveToDownloads(item);
-                            runOnUiThread(() -> status.setText("已保存 " + item.file.getName()));
+                            runOnUiThread(() -> showSaveResult("保存成功：" + item.file.getName()));
                         } catch (Exception error) {
-                            runOnUiThread(() -> status.setText("保存失败：" + error.getMessage()));
+                            runOnUiThread(() -> showSaveResult("保存失败：" + error.getMessage()));
                         }
                     }))
                     .setNegativeButton("关闭", null).show();
@@ -1149,6 +1189,11 @@ public class MainActivity extends Activity {
         } catch (Exception error) {
             status.setText("预览失败：" + error.getMessage());
         }
+    }
+
+    private void showSaveResult(String message) {
+        status.setText(message);
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
     private void saveToDownloads(Media item) throws Exception {
@@ -1193,6 +1238,8 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (showingReader) showHome(); else super.onBackPressed();
+        if (showingRecords) showReader();
+        else if (showingReader) showHome();
+        else super.onBackPressed();
     }
 }
