@@ -47,9 +47,15 @@ import java.io.OutputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Locale;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -59,7 +65,10 @@ public class MainActivity extends Activity {
     private static final Pattern LINK = Pattern.compile("https?://[^\\s]+douyin\\.com/[^\\s]+", Pattern.CASE_INSENSITIVE);
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ArrayList<Media> media = new ArrayList<>();
-    private final HashSet<String> hashes = new HashSet<>();
+    private final ArrayList<ScanRecord> records = new ArrayList<>();
+    private ScanRecord currentRecord;
+    private String activeLink;
+    private boolean viewingSavedRecord;
     private WebView browser;
     private EditText input;
     private TextView status;
@@ -96,19 +105,40 @@ public class MainActivity extends Activity {
 
     private static class Media {
         final File file;
+        final String hash;
         final String mime;
         final String commentId;
         final String kind;
-        final Drawable thumbnail;
+        volatile Drawable thumbnail;
         final boolean animated;
 
-        Media(File file, String mime, String commentId, String kind, Drawable thumbnail) {
+        Media(File file, String hash, String mime, String commentId, String kind, Drawable thumbnail, boolean animated) {
             this.file = file;
+            this.hash = hash;
             this.mime = mime;
             this.commentId = commentId;
             this.kind = kind;
             this.thumbnail = thumbnail;
-            this.animated = "image/gif".equals(mime) || thumbnail instanceof Animatable;
+            this.animated = animated || "image/gif".equals(mime) || thumbnail instanceof Animatable;
+        }
+    }
+
+    private static class ScanRecord {
+        final String id;
+        final String link;
+        final long createdAt;
+        final File folder;
+        final ArrayList<Media> items = new ArrayList<>();
+        final HashSet<String> hashes = new HashSet<>();
+        long cursor;
+        int scanned;
+        boolean complete;
+
+        ScanRecord(String id, String link, long createdAt, File folder) {
+            this.id = id;
+            this.link = link;
+            this.createdAt = createdAt;
+            this.folder = folder;
         }
     }
 
@@ -118,6 +148,7 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         buildReader();
+        loadRecords();
         if (Intent.ACTION_SEND.equals(getIntent().getAction())) {
             String shared = getIntent().getStringExtra(Intent.EXTRA_TEXT);
             if (shared != null) input.setText(shared);
@@ -142,6 +173,11 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
+        if (scanning) {
+            scanning = false;
+            requestToken++;
+            scanButton.setText("继续扫描");
+        }
         showingReader = false;
         for (Animatable animation : animations) animation.stop();
         ScrollView scroll = new ScrollView(this);
@@ -250,7 +286,105 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(-1, -2);
         noteParams.topMargin = dp(28);
         page.addView(note, noteParams);
+        addRecordCards(page);
         setContentView(scroll);
+    }
+
+    private void addRecordCards(LinearLayout page) {
+        TextView heading = label("扫描记录", 19, DARK, true);
+        LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(-1, -2);
+        headingParams.topMargin = dp(28);
+        headingParams.bottomMargin = dp(12);
+        page.addView(heading, headingParams);
+        if (records.isEmpty()) {
+            TextView empty = label("扫描过的作品会暂存在这里，方便随时查看和删除。", 12, MUTED, false);
+            empty.setPadding(dp(18), dp(19), dp(18), dp(19));
+            empty.setBackground(shape(Color.WHITE, 16));
+            page.addView(empty);
+            return;
+        }
+        SimpleDateFormat date = new SimpleDateFormat("MM-dd HH:mm", Locale.CHINA);
+        for (ScanRecord record : new ArrayList<>(records)) {
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(dp(17), dp(15), dp(17), dp(13));
+            card.setBackground(shape(Color.WHITE, 17));
+            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, -2);
+            cardParams.bottomMargin = dp(9);
+            page.addView(card, cardParams);
+            card.addView(label(date.format(record.createdAt) + (record.complete ? " · 已完成" : " · 暂存中"), 11, GREEN, true));
+            TextView link = label(record.link, 12, DARK, true);
+            link.setSingleLine(true);
+            link.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams linkParams = new LinearLayout.LayoutParams(-1, -2);
+            linkParams.topMargin = dp(7);
+            card.addView(link, linkParams);
+            int count;
+            synchronized (record) { count = record.items.size(); }
+            TextView detail = label("legacy".equals(record.id) ? "旧版缓存 · 提取 " + count + " 个素材"
+                    : "已扫描 " + record.scanned + " 条主评论 · 提取 " + count + " 个素材", 11, MUTED, false);
+            LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
+            detailParams.topMargin = dp(5);
+            card.addView(detail, detailParams);
+            LinearLayout actions = new LinearLayout(this);
+            actions.setGravity(Gravity.RIGHT);
+            LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-1, -2);
+            actionsParams.topMargin = dp(9);
+            card.addView(actions, actionsParams);
+            TextView view = label("查看预览", 12, GREEN, true);
+            view.setPadding(dp(10), dp(6), dp(10), dp(6));
+            view.setOnClickListener(v -> showRecord(record));
+            actions.addView(view);
+            TextView delete = label("删除记录", 12, MUTED, false);
+            delete.setPadding(dp(10), dp(6), 0, dp(6));
+            delete.setOnClickListener(v -> confirmDelete(record));
+            actions.addView(delete);
+            card.setOnClickListener(v -> showRecord(record));
+        }
+    }
+
+    private void showRecord(ScanRecord record) {
+        currentRecord = record;
+        viewingSavedRecord = true;
+        activeLink = record.link.startsWith("http") ? record.link : null;
+        input.setText(activeLink == null ? "" : activeLink);
+        cursor = record.cursor;
+        scanned = record.scanned;
+        media.clear();
+        synchronized (record) { media.addAll(record.items); }
+        selectedFilter = "all";
+        browserPanel.setVisibility(View.GONE);
+        webToggle.setText("网页操作  ▾");
+        scanButton.setText("重新扫描");
+        showReader();
+        renderResults();
+        updateResultLabels();
+        status.setText("已打开本机暂存记录；重新扫描会生成新记录");
+        readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
+    }
+
+    private void confirmDelete(ScanRecord record) {
+        new AlertDialog.Builder(this).setTitle("删除扫描记录？")
+                .setMessage("将删除这条记录和 App 内暂存的图片、动图。已保存到下载目录的文件不会删除。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("删除", (dialog, which) -> {
+                    if (currentRecord == record) {
+                        scanning = false;
+                        requestToken++;
+                        currentRecord = null;
+                    }
+                    worker.execute(() -> {
+                        boolean deleted = deleteRecordFiles(record);
+                        runOnUiThread(() -> {
+                            if (deleted) {
+                                records.remove(record);
+                                showHome();
+                            } else {
+                                new AlertDialog.Builder(this).setMessage("删除失败，请重试").setPositiveButton("确定", null).show();
+                            }
+                        });
+                    });
+                }).show();
     }
 
     private void showReader() {
@@ -380,11 +514,40 @@ public class MainActivity extends Activity {
         scanButton.setAllCaps(false);
         scanButton.setText("扫描主评论");
         scanButton.setOnClickListener(v -> {
+            if (viewingSavedRecord) {
+                openLink();
+                status.setText("作品已重新打开，请进入评论区后再次点击扫描");
+                return;
+            }
             if (scanning) {
                 scanning = false;
                 requestToken++;
                 scanButton.setText("继续扫描");
             } else {
+                String page = browser.getUrl();
+                if (page == null || !page.startsWith("https://www.douyin.com/")) {
+                    status.setText("请先打开抖音作品页面");
+                    return;
+                }
+                if (currentRecord == null || currentRecord.complete) {
+                    String id = UUID.randomUUID().toString();
+                    ScanRecord record = new ScanRecord(id, activeLink == null ? page : activeLink,
+                            System.currentTimeMillis(), new File(recordsFolder(), id));
+                    currentRecord = record;
+                    records.add(0, record);
+                    cursor = 0;
+                    scanned = 0;
+                    media.clear();
+                    for (Animatable animation : animations) animation.stop();
+                    animations.clear();
+                    renderResults();
+                    updateResultLabels();
+                    if (!persistRecord(record)) {
+                        records.remove(record);
+                        currentRecord = null;
+                        return;
+                    }
+                }
                 scanning = true;
                 requestWaits = 0;
                 scanButton.setText("暂停扫描");
@@ -497,6 +660,109 @@ public class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
+    private File recordsFolder() {
+        return new File(getFilesDir(), "records");
+    }
+
+    private void loadRecords() {
+        File[] folders = recordsFolder().listFiles();
+        if (folders == null) folders = new File[0];
+        for (File folder : folders) {
+            if (!folder.isDirectory()) continue;
+            File manifest = new File(folder, "manifest.json");
+            if (!manifest.isFile()) continue;
+            try {
+                JSONObject data = new JSONObject(new String(Files.readAllBytes(manifest.toPath()), StandardCharsets.UTF_8));
+                ScanRecord record = new ScanRecord(folder.getName(), data.getString("link"), data.getLong("createdAt"), folder);
+                record.scanned = data.optInt("scanned");
+                record.cursor = data.optLong("cursor");
+                record.complete = data.optBoolean("complete");
+                JSONArray saved = data.optJSONArray("media");
+                if (saved != null) for (int i = 0; i < saved.length(); i++) {
+                    JSONObject entry = saved.optJSONObject(i);
+                    if (entry == null) continue;
+                    String name = entry.optString("file");
+                    if (!name.equals(new File(name).getName())) continue;
+                    File file = new File(folder, name);
+                    if (!file.isFile()) continue;
+                    String hash = entry.optString("hash");
+                    record.hashes.add(hash);
+                    record.items.add(new Media(file, hash, entry.optString("mime"), entry.optString("commentId"),
+                            entry.optString("kind"), null, entry.optBoolean("animated")));
+                }
+                records.add(record);
+            } catch (Exception ignored) { }
+        }
+        File legacy = new File(getFilesDir(), "media");
+        File[] oldFiles = legacy.listFiles();
+        if (oldFiles != null && oldFiles.length > 0) {
+            ScanRecord old = new ScanRecord("legacy", "旧版提取结果（来源链接未知）", legacy.lastModified(), legacy);
+            old.complete = true;
+            for (File file : oldFiles) {
+                if (!file.isFile()) continue;
+                String name = file.getName().toLowerCase(Locale.ROOT);
+                String mime = name.endsWith(".gif") ? "image/gif" : name.endsWith(".png") ? "image/png"
+                        : name.endsWith(".jpg") ? "image/jpeg" : name.endsWith(".webp") ? "image/webp" : null;
+                if (mime == null) continue;
+                old.items.add(new Media(file, name, mime, "", "旧版", null, mime.equals("image/gif")));
+            }
+            if (!old.items.isEmpty()) records.add(old);
+        }
+        records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
+    }
+
+    private boolean persistRecord(ScanRecord record) {
+        try {
+            JSONObject data = new JSONObject();
+            data.put("id", record.id);
+            data.put("link", record.link);
+            data.put("createdAt", record.createdAt);
+            data.put("scanned", record.scanned);
+            data.put("cursor", record.cursor);
+            data.put("complete", record.complete);
+            JSONArray saved = new JSONArray();
+            synchronized (record) {
+                for (Media item : record.items) {
+                    JSONObject entry = new JSONObject();
+                    entry.put("file", item.file.getName());
+                    entry.put("hash", item.hash);
+                    entry.put("mime", item.mime);
+                    entry.put("commentId", item.commentId);
+                    entry.put("kind", item.kind);
+                    entry.put("animated", item.animated);
+                    saved.put(entry);
+                }
+            }
+            data.put("media", saved);
+            if (!record.folder.isDirectory() && !record.folder.mkdirs()) throw new Exception("无法创建记录目录");
+            File temporary = new File(record.folder, "manifest.tmp");
+            Files.write(temporary.toPath(), data.toString().getBytes(StandardCharsets.UTF_8));
+            Files.move(temporary.toPath(), new File(record.folder, "manifest.json").toPath(), StandardCopyOption.REPLACE_EXISTING);
+            return true;
+        } catch (Exception error) {
+            runOnUiThread(() -> {
+                if (currentRecord == record) status.setText("记录暂存失败：" + error.getMessage());
+            });
+            return false;
+        }
+    }
+
+    private boolean deleteRecordFiles(ScanRecord record) {
+        File root = recordsFolder();
+        try {
+            File parent = record.folder.getCanonicalFile().getParentFile();
+            boolean storedRecord = parent.equals(root.getCanonicalFile());
+            boolean legacyRecord = "legacy".equals(record.id)
+                    && record.folder.getCanonicalFile().equals(new File(getFilesDir(), "media").getCanonicalFile());
+            if (!storedRecord && !legacyRecord) return false;
+            File[] files = record.folder.listFiles();
+            if (files != null) for (File file : files) {
+                if (!file.isFile() || !file.delete()) return false;
+            }
+            return !record.folder.exists() || record.folder.delete();
+        } catch (Exception error) { return false; }
+    }
+
     private void askCameraPermission(PermissionRequest request) {
         boolean cameraRequested = false;
         for (String resource : request.getResources()) {
@@ -542,6 +808,9 @@ public class MainActivity extends Activity {
             return;
         }
         String link = matcher.group().replaceAll("[，。,.]+$", "");
+        activeLink = link;
+        currentRecord = null;
+        viewingSavedRecord = false;
         commentRequest = null;
         lastCommentPath = null;
         cursor = 0;
@@ -551,7 +820,6 @@ public class MainActivity extends Activity {
         scanning = false;
         scanButton.setText("扫描主评论");
         media.clear();
-        hashes.clear();
         for (Animatable animation : animations) animation.stop();
         animations.clear();
         results.removeAllViews();
@@ -641,7 +909,9 @@ public class MainActivity extends Activity {
                 cursor = next;
                 scanned += comments.length();
                 status.setText("已扫描 " + scanned + " 条主评论，正在保存媒体…");
-                worker.execute(() -> processPage(comments, more));
+                ScanRecord record = currentRecord;
+                int scannedNow = scanned;
+                worker.execute(() -> processPage(record, comments, more, next, scannedNow));
             } catch (Exception error) {
                 scanning = false;
                 scanButton.setText("继续扫描");
@@ -664,7 +934,8 @@ public class MainActivity extends Activity {
         return list == null ? null : list.optString(0, null);
     }
 
-    private void processPage(JSONArray comments, boolean more) {
+    private void processPage(ScanRecord record, JSONArray comments, boolean more, long next, int scannedNow) {
+        if (record == null) return;
         for (int i = 0; i < comments.length(); i++) {
             JSONObject comment = comments.optJSONObject(i);
             if (comment == null) continue;
@@ -672,17 +943,22 @@ public class MainActivity extends Activity {
             JSONArray images = comment.optJSONArray("image_list");
             if (images != null) for (int j = 0; j < images.length(); j++) {
                 JSONObject image = images.optJSONObject(j);
-                if (image != null) download(url(image.optJSONObject("origin_url")), commentId, "图片");
+                if (image != null) download(record, url(image.optJSONObject("origin_url")), commentId, "图片");
             }
             JSONObject sticker = comment.optJSONObject("sticker");
             if (sticker != null) {
                 String source = url(sticker.optJSONObject("animate_url"));
                 if (source == null) source = url(sticker.optJSONObject("static_url"));
-                download(source, commentId, "表情");
+                download(record, source, commentId, "表情");
             }
         }
+        record.scanned = scannedNow;
+        record.cursor = next;
+        record.complete = !more;
+        persistRecord(record);
         runOnUiThread(() -> {
-            status.setText("已扫描 " + scanned + " 条主评论，找到 " + media.size() + " 个不同媒体" + (more ? "（继续扫描）" : "（主评论扫描完成）"));
+            if (currentRecord != record) return;
+            status.setText("已扫描 " + record.scanned + " 条主评论，找到 " + media.size() + " 个不同媒体" + (more ? "（继续扫描）" : "（主评论扫描完成）"));
             if (scanning && more) {
                 browser.postDelayed(this::startPage, 350);
             } else {
@@ -697,7 +973,7 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void download(String source, String commentId, String kind) {
+    private void download(ScanRecord record, String source, String commentId, String kind) {
         if (source == null) return;
         try {
             HttpURLConnection connection = (HttpURLConnection) new URL(source).openConnection();
@@ -718,29 +994,37 @@ public class MainActivity extends Activity {
             StringBuilder hex = new StringBuilder();
             for (byte b : digest) hex.append(String.format("%02x", b & 0xff));
             String hash = hex.toString();
-            if (!hashes.add(hash)) return;
+            synchronized (record) {
+                if (!record.hashes.add(hash)) return;
+            }
             String extension = mime.equals("image/jpeg") ? ".jpg" : mime.equals("image/png") ? ".png" : mime.equals("image/gif") ? ".gif" : ".webp";
-            File folder = new File(getFilesDir(), "media");
-            folder.mkdirs();
-            File file = new File(folder, hash.substring(0, 20) + extension);
+            if (!record.folder.isDirectory() && !record.folder.mkdirs()) throw new Exception("无法创建记录目录");
+            File file = new File(record.folder, hash.substring(0, 20) + extension);
             try (OutputStream out = new FileOutputStream(file)) { out.write(bytes); }
-            Drawable thumbnail;
-            try {
-                thumbnail = ImageDecoder.decodeDrawable(ImageDecoder.createSource(file), (decoder, info, sourceInfo) -> {
-                    int width = info.getSize().getWidth();
-                    int height = info.getSize().getHeight();
-                    float scale = Math.min(1f, dp(120) / (float) Math.max(width, height));
-                    decoder.setTargetSize(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
-                });
-            } catch (Exception ignored) { thumbnail = null; }
-            Media item = new Media(file, mime, commentId, kind, thumbnail);
+            Drawable thumbnail = decodeThumbnail(file);
+            Media item = new Media(file, hash, mime, commentId, kind, thumbnail, thumbnail instanceof Animatable);
+            synchronized (record) { record.items.add(item); }
+            persistRecord(record);
             runOnUiThread(() -> {
+                if (currentRecord != record || !showingReader) return;
+                if (media.contains(item)) return;
                 media.add(item);
                 updateResultLabels();
                 if (matchesFilter(item)) addTile(item);
                 if (media.size() == 1) readerScroll.postDelayed(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()), 200);
             });
         } catch (Exception ignored) { }
+    }
+
+    private Drawable decodeThumbnail(File file) {
+        try {
+            return ImageDecoder.decodeDrawable(ImageDecoder.createSource(file), (decoder, info, sourceInfo) -> {
+                int width = info.getSize().getWidth();
+                int height = info.getSize().getHeight();
+                float scale = Math.min(1f, dp(120) / (float) Math.max(width, height));
+                decoder.setTargetSize(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
+            });
+        } catch (Exception ignored) { return null; }
     }
 
     private static String format(byte[] b) {
@@ -802,6 +1086,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(tileWidth, -2);
         if (displayedCount % 3 != 0) cardParams.leftMargin = dp(8);
         resultRow.addView(card, cardParams);
+        LinearLayout row = resultRow;
         FrameLayout art = new FrameLayout(this);
         art.setBackgroundColor(item.animated ? Color.rgb(255, 232, 238) : Color.rgb(227, 241, 246));
         card.addView(art, new LinearLayout.LayoutParams(-1, tileWidth));
@@ -809,12 +1094,15 @@ public class MainActivity extends Activity {
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setPadding(dp(5), dp(5), dp(5), dp(5));
         if (item.thumbnail != null) {
-            image.setImageDrawable(item.thumbnail);
-            if (item.thumbnail instanceof Animatable) {
-                Animatable animation = (Animatable) item.thumbnail;
-                animations.add(animation);
-                if (showingReader) animation.start();
-            }
+            bindThumbnail(image, item.thumbnail);
+        } else {
+            worker.execute(() -> {
+                Drawable thumbnail = decodeThumbnail(item.file);
+                item.thumbnail = thumbnail;
+                runOnUiThread(() -> {
+                    if (thumbnail != null && row.getParent() == results && showingReader) bindThumbnail(image, thumbnail);
+                });
+            });
         }
         art.addView(image, new FrameLayout.LayoutParams(-1, -1));
         TextView badge = label(item.animated ? ("image/gif".equals(item.mime) ? "GIF" : "动图") : "图片", 10, Color.WHITE, true);
@@ -830,6 +1118,15 @@ public class MainActivity extends Activity {
         card.setOnClickListener(v -> preview(item));
         displayedCount++;
         emptyResults.setVisibility(View.GONE);
+    }
+
+    private void bindThumbnail(ImageView image, Drawable thumbnail) {
+        image.setImageDrawable(thumbnail);
+        if (thumbnail instanceof Animatable) {
+            Animatable animation = (Animatable) thumbnail;
+            animations.add(animation);
+            if (showingReader) animation.start();
+        }
     }
 
     private void preview(Media item) {
