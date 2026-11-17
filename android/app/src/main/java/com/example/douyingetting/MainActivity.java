@@ -105,6 +105,7 @@ public class MainActivity extends Activity {
     private LinearLayout readerRoot;
     private LinearLayout browserPanel;
     private TextView webToggle;
+    private TextView webToggleArrow;
     private LinearLayout resultRow;
     private ScrollView readerScroll;
     private TextView countLabel;
@@ -599,7 +600,7 @@ public class MainActivity extends Activity {
         updateResultLabels();
         configureReaderMode();
         browserPanel.setVisibility(View.GONE);
-        webToggle.setText("网页操作  ▾");
+        updateWebToggle();
         browser.loadUrl("about:blank");
         showReader();
     }
@@ -697,10 +698,7 @@ public class MainActivity extends Activity {
         TextView back = label("‹", 22, INK, false);
         back.setGravity(Gravity.CENTER);
         back.setBackground(card(10));
-        back.setOnClickListener(v -> {
-            if (recordsFromSettings) showRecordPlatforms();
-            else showReader();
-        });
+        back.setOnClickListener(v -> leaveRecords());
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
         TextView heading = label("扫描记录", 16, INK, true);
         heading.setGravity(Gravity.CENTER);
@@ -722,6 +720,12 @@ public class MainActivity extends Activity {
         scroll.addView(page);
         addRecordCards(page);
         setContentView(root);
+    }
+
+    private void leaveRecords() {
+        if (recordsFromSettings) showRecordPlatforms();
+        else if (viewingSavedRecord) selectMode(xhsMode);
+        else showReader();
     }
 
     private void addRecordCards(LinearLayout page) {
@@ -766,8 +770,11 @@ public class MainActivity extends Activity {
             info.setOrientation(LinearLayout.VERTICAL);
             LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(0, -2, 1);
             infoParams.leftMargin = dp(12);
+            infoParams.rightMargin = dp(14);
             head.addView(info, infoParams);
-            TextView title = label(record.link, 13, INK, true);
+            String shortLink = record.link.replaceFirst("^https?://", "").replaceFirst("\\?.*$", "").replaceFirst("/$", "");
+            if (shortLink.length() > 24) shortLink = shortLink.substring(0, 23) + "…";
+            TextView title = label(shortLink, 13, INK, true);
             title.setSingleLine(true);
             title.setEllipsize(android.text.TextUtils.TruncateAt.END);
             info.addView(title);
@@ -775,12 +782,12 @@ public class MainActivity extends Activity {
             int count;
             synchronized (record) { count = record.items.size(); }
             String progress = xhsRecord || record.includeReplies
-                    ? record.scanned + " 条评论（主评论 " + record.mainScanned + " · 回复 " + record.replyScanned + "）"
-                    : record.scanned + " 条主评论";
+                    ? "主 " + record.mainScanned + " · 回 " + record.replyScanned
+                    : record.scanned + " 条评论";
             if (xhsRecord && record.scanned > 0 && record.mainScanned + record.replyScanned == 0)
-                progress = record.scanned + " 条评论（旧版计数）";
+                progress = record.scanned + " 条评论";
             String detail = ("legacy".equals(record.id) ? "旧版缓存" : date.format(record.createdAt) + " · " + progress)
-                    + " · " + count + " 个素材";
+                    + " · " + count + " 素材";
             TextView sub = label(detail, 11, INK3, false);
             sub.setSingleLine(true);
             sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -789,7 +796,8 @@ public class MainActivity extends Activity {
             info.addView(sub, subParams);
 
             TextView state = label(record.complete ? "已完成" : "暂存中", 11, record.complete ? ACCENT : INK3, true);
-            head.addView(state);
+            state.setGravity(Gravity.CENTER);
+            head.addView(state, new LinearLayout.LayoutParams(dp(44), -2));
 
             View divider = new View(this);
             divider.setBackgroundColor(LINE);
@@ -832,7 +840,7 @@ public class MainActivity extends Activity {
         synchronized (record) { media.addAll(record.items); }
         selectedFilter = "all";
         browserPanel.setVisibility(View.GONE);
-        webToggle.setText("网页操作  ▾");
+        updateWebToggle();
         scanButton.setText("重新扫描");
         showReader();
         renderResults();
@@ -1041,13 +1049,22 @@ public class MainActivity extends Activity {
             @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
             @Override public void afterTextChanged(Editable text) { updateScanCard(); }
         });
-        webToggle = label("网页操作  ▾", 12, INK2, true);
-        LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(-1, dp(38));
-        toggleParams.topMargin = dp(6);
-        content.addView(webToggle, toggleParams);
-        webToggle.setOnClickListener(v -> {
+        LinearLayout webToggleRow = new LinearLayout(this);
+        webToggleRow.setGravity(Gravity.CENTER_VERTICAL);
+        webToggleRow.setPadding(dp(16), 0, dp(14), 0);
+        webToggleRow.setBackground(card(14));
+        LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(-1, dp(54));
+        toggleParams.topMargin = dp(12);
+        content.addView(webToggleRow, toggleParams);
+        webToggle = label("网页操作", 15, INK, true);
+        webToggleRow.addView(webToggle, new LinearLayout.LayoutParams(0, -2, 1));
+        webToggleArrow = label("⌄", 19, Color.WHITE, true);
+        webToggleArrow.setGravity(Gravity.CENTER);
+        webToggleArrow.setBackground(shape(ACCENT, 10));
+        webToggleRow.addView(webToggleArrow, new LinearLayout.LayoutParams(dp(34), dp(30)));
+        webToggleRow.setOnClickListener(v -> {
             browserPanel.setVisibility(browserPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
-            webToggle.setText(browserPanel.getVisibility() == View.VISIBLE ? "收起网页  ▴" : "网页操作  ▾");
+            updateWebToggle();
         });
         browserPanel = new LinearLayout(this);
         browserPanel.setOrientation(LinearLayout.VERTICAL);
@@ -1492,6 +1509,12 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void updateWebToggle() {
+        boolean expanded = browserPanel.getVisibility() == View.VISIBLE;
+        webToggle.setText(expanded ? "收起网页" : "网页操作");
+        webToggleArrow.setText(expanded ? "⌃" : "⌄");
+    }
+
     private void openLink() {
         String link = extractLink(input.getText().toString(), xhsMode);
         if (link == null) {
@@ -1524,7 +1547,7 @@ public class MainActivity extends Activity {
         updateResultLabels();
         renderResults();
         browserPanel.setVisibility(View.VISIBLE);
-        webToggle.setText("收起网页  ▴");
+        updateWebToggle();
         input.clearFocus();
         InputMethodManager keyboard = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (keyboard != null) keyboard.hideSoftInputFromWindow(input.getWindowToken(), 0);
@@ -1628,7 +1651,7 @@ public class MainActivity extends Activity {
                 if (xhsIdlePolls == 30) {
                     status.setText("正在等待后续评论；如网页不再加载，请在评论区向下滑动");
                     browserPanel.setVisibility(View.VISIBLE);
-                    webToggle.setText("收起网页  ▴");
+                    updateWebToggle();
                     readerScroll.post(() -> readerScroll.smoothScrollTo(0, browserPanel.getTop()));
                 }
                 if (xhsIdlePolls % 4 == 0) browser.evaluateJavascript("window.__xhsCapture?.scroll()", null);
@@ -1686,7 +1709,7 @@ public class MainActivity extends Activity {
         scanButton.setText("扫描完成");
         status.setText("已扫描 " + record.scanned + " 条评论（主评论 " + record.mainScanned + "、回复 " + record.replyScanned + "），找到 " + media.size() + " 个不同媒体（扫描完成）");
         browserPanel.setVisibility(View.GONE);
-        webToggle.setText("网页操作  ▾");
+        updateWebToggle();
         if (showingReader) new AlertDialog.Builder(this)
                 .setTitle("小红书评论扫描完成")
                 .setMessage("已扫描 " + record.scanned + " 条评论（主评论 " + record.mainScanned + "、回复 " + record.replyScanned + "），提取 " + media.size() + " 个不同素材。结果已暂存。")
@@ -1935,7 +1958,7 @@ public class MainActivity extends Activity {
                 + "，找到 " + media.size() + " 个不同媒体（扫描完成）"
                 + (record.emptyReplyLists > 0 ? "；" + record.emptyReplyLists + " 组回复未返回数据" : ""));
         browserPanel.setVisibility(View.GONE);
-        webToggle.setText("网页操作  ▾");
+        updateWebToggle();
         readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
         if (showingReader) new AlertDialog.Builder(this)
                 .setTitle(record.includeReplies ? "评论扫描完成" : "主评论扫描完成")
@@ -2277,10 +2300,7 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (showingRecords) {
-            if (recordsFromSettings) showRecordPlatforms();
-            else showReader();
-        }
+        if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) showSettings();
         else if (showingReader) {
             if (viewingSavedRecord) showRecords();
