@@ -116,12 +116,15 @@ public class MainActivity extends Activity {
     private int displayedCount;
     private boolean showingReader;
     private boolean showingRecords;
+    private boolean showingSettings;
+    private int douyinPageDelayMs = 2000;
     private volatile String commentRequest;
     private volatile String lastCommentPath;
     private PermissionRequest pendingCameraRequest;
     private boolean scanning;
     private int requestWaits;
     private int requestToken;
+    private int pageRetries;
     private long cursor;
     private int scanned;
     private int xhsIdlePolls;
@@ -179,6 +182,7 @@ public class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        douyinPageDelayMs = getPreferences(MODE_PRIVATE).getInt("douyin_page_delay_ms", 2000);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
@@ -215,6 +219,7 @@ public class MainActivity extends Activity {
         }
         showingReader = false;
         showingRecords = false;
+        showingSettings = false;
         for (Animatable animation : animations) animation.stop();
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -281,9 +286,19 @@ public class MainActivity extends Activity {
         dock.setPadding(dp(18), dp(9), dp(18), 0);
         dock.setBackground(shape(Color.WHITE, 26));
         navArea.addView(dock, new FrameLayout.LayoutParams(-1, dp(74), Gravity.BOTTOM));
-        dock.addView(homeNavItem(false), new LinearLayout.LayoutParams(0, -1, 1));
+        dock.addView(homeNavItem(), new LinearLayout.LayoutParams(0, -1, 1));
         dock.addView(new View(this), new LinearLayout.LayoutParams(0, -1, 1));
-        dock.addView(homeNavItem(true), new LinearLayout.LayoutParams(0, -1, 1));
+        LinearLayout settingsNav = new LinearLayout(this);
+        settingsNav.setOrientation(LinearLayout.VERTICAL);
+        settingsNav.setGravity(Gravity.CENTER);
+        TextView settingsIcon = label("⚙", 26, MUTED, false);
+        settingsIcon.setGravity(Gravity.CENTER);
+        settingsNav.addView(settingsIcon, new LinearLayout.LayoutParams(-1, dp(30)));
+        TextView settingsLabel = label("设置", 12, MUTED, true);
+        settingsLabel.setGravity(Gravity.CENTER);
+        settingsNav.addView(settingsLabel);
+        settingsNav.setOnClickListener(v -> showSettings());
+        dock.addView(settingsNav, new LinearLayout.LayoutParams(0, -1, 1));
         ImageView homeIcon = new ImageView(this);
         homeIcon.setImageResource(R.drawable.home_nav);
         homeIcon.setElevation(dp(5));
@@ -294,17 +309,66 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
-    private LinearLayout homeNavItem(boolean xhs) {
+    private void showSettings() {
+        showingSettings = true;
+        showingReader = false;
+        showingRecords = false;
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+        root.setFitsSystemWindows(true);
+        root.setPadding(dp(18), dp(16), dp(18), dp(24));
+        TextView back = label("‹  返回首页", 14, GREEN, true);
+        back.setPadding(0, dp(8), 0, dp(8));
+        back.setOnClickListener(v -> showHome());
+        root.addView(back);
+        TextView title = label("扫描设置", 22, DARK, true);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, -2);
+        titleParams.topMargin = dp(26);
+        root.addView(title, titleParams);
+        TextView description = label("抖音主评论翻页间隔", 14, DARK, true);
+        LinearLayout.LayoutParams descriptionParams = new LinearLayout.LayoutParams(-1, -2);
+        descriptionParams.topMargin = dp(25);
+        root.addView(description, descriptionParams);
+        root.addView(label("只影响抖音评论扫描；小红书扫描不受影响", 12, MUTED, false));
+        addScanSpeedOption(root, 2000, "稳定模式 · 2 秒", "降低连续请求造成的扫描暂停概率");
+        addScanSpeedOption(root, 350, "快速模式 · 0.35 秒", "扫描更快，但可能频繁暂停");
+        setContentView(root);
+    }
+
+    private void addScanSpeedOption(LinearLayout root, int delay, String title, String detail) {
+        boolean selected = douyinPageDelayMs == delay;
+        LinearLayout option = new LinearLayout(this);
+        option.setOrientation(LinearLayout.VERTICAL);
+        option.setPadding(dp(18), dp(16), dp(18), dp(16));
+        option.setBackground(shape(selected ? Color.rgb(232, 244, 239) : Color.WHITE, 18));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(12);
+        root.addView(option, params);
+        option.addView(label((selected ? "✓  " : "○  ") + title, 16, selected ? GREEN : DARK, true));
+        TextView hint = label(detail, 12, delay == 350 ? Color.rgb(199, 104, 52) : MUTED, false);
+        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
+        hintParams.topMargin = dp(5);
+        option.addView(hint, hintParams);
+        option.setOnClickListener(v -> {
+            douyinPageDelayMs = delay;
+            getPreferences(MODE_PRIVATE).edit().putInt("douyin_page_delay_ms", delay).apply();
+            showSettings();
+            if (delay == 350) Toast.makeText(this, "快速模式可能频繁暂停", Toast.LENGTH_LONG).show();
+        });
+    }
+
+    private LinearLayout homeNavItem() {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.CENTER);
         ImageView icon = new ImageView(this);
-        icon.setImageResource(xhs ? R.drawable.xhs_nav : R.drawable.douyin_nav);
+        icon.setImageResource(R.drawable.douyin_nav);
         item.addView(icon, new LinearLayout.LayoutParams(dp(27), dp(27)));
-        TextView name = label(xhs ? "小红书" : "抖音", 12, MUTED, true);
+        TextView name = label("抖音", 12, MUTED, true);
         name.setGravity(Gravity.CENTER);
         item.addView(name);
-        item.setOnClickListener(v -> selectMode(xhs));
+        item.setOnClickListener(v -> selectMode(false));
         return item;
     }
 
@@ -724,6 +788,7 @@ public class MainActivity extends Activity {
                 }
                 scanning = true;
                 requestWaits = 0;
+                pageRetries = 0;
                 scanButton.setText("暂停扫描");
                 startPage();
             }
@@ -1083,6 +1148,7 @@ public class MainActivity extends Activity {
         scanned = 0;
         xhsCommentIds.clear();
         requestWaits = 0;
+        pageRetries = 0;
         requestToken++;
         scanning = false;
         scanButton.setText(xhsMode ? "扫描评论" : "扫描主评论");
@@ -1303,7 +1369,8 @@ public class MainActivity extends Activity {
                 "const u=new URL(" + JSONObject.quote(commentRequest) + ");" +
                 "u.searchParams.set('cursor'," + JSONObject.quote(Long.toString(cursor)) + ");" +
                 "const r=await fetch(u.toString(),{credentials:'include'});" +
-                "window[k]=JSON.stringify({http:r.status,data:await r.json()})" +
+                "let data=null;try{data=await r.json()}catch(e){}" +
+                "window[k]=JSON.stringify({http:r.status,data})" +
                 "}catch(e){window[k]=JSON.stringify({error:String(e)})}})()})()";
         status.setText("已扫描 " + scanned + " 条主评论，正在等待下一页…");
         browser.evaluateJavascript(script, ignored -> readPageResult(key, token, 0));
@@ -1315,9 +1382,7 @@ public class MainActivity extends Activity {
             if (!scanning || token != requestToken) return;
             if (value == null || "null".equals(value)) {
                 if (polls >= 100) {
-                    scanning = false;
-                    scanButton.setText("继续扫描");
-                    status.setText("扫描暂停：等待评论接口响应超时");
+                    retryPage("等待评论接口响应超时");
                 } else {
                     browser.postDelayed(() -> readPageResult(key, token, polls + 1), 200);
                 }
@@ -1328,25 +1393,20 @@ public class MainActivity extends Activity {
                 int http = response.optInt("http", -1);
                 JSONObject pageData = response.optJSONObject("data");
                 if (pageData == null) {
-                    scanning = false;
-                    scanButton.setText("继续扫描");
-                    status.setText("评论接口返回了无法读取的内容，扫描已暂停；已提取的素材仍在暂存记录中");
-                    updateScanCard();
-                    new AlertDialog.Builder(this)
-                            .setTitle("评论扫描已暂停")
-                            .setMessage("抖音评论接口返回了无法读取的内容。已提取的素材仍在暂存记录中。可以重试当前页；如果反复出现，请稍后再试。")
-                            .setPositiveButton("继续扫描", (dialog, which) -> scanButton.performClick())
-                            .setNegativeButton("稍后再试", null)
-                            .show();
+                    retryPage("评论接口返回了无法读取的内容（HTTP " + http + "）");
                     return;
                 }
                 int code = pageData.optInt("status_code", -1);
-                if (http != 200 || code != 0) throw new Exception("评论接口 HTTP " + http + "，状态 " + code + "，" + pageData.optString("status_msg", "无错误说明"));
+                if (http != 200 || code != 0) {
+                    retryPage("评论接口 HTTP " + http + "，状态 " + code);
+                    return;
+                }
                 JSONArray comments = pageData.optJSONArray("comments");
                 if (comments == null) throw new Exception("没有评论数据");
                 long next = pageData.optLong("cursor", cursor);
                 boolean more = pageData.optInt("has_more", 0) != 0;
                 if (more && next == cursor) throw new Exception("分页游标没有前进");
+                pageRetries = 0;
                 cursor = next;
                 scanned += comments.length();
                 status.setText("已扫描 " + scanned + " 条主评论，正在保存媒体…");
@@ -1360,6 +1420,32 @@ public class MainActivity extends Activity {
                 updateScanCard();
             }
         });
+    }
+
+    private void retryPage(String reason) {
+        if (!scanning) return;
+        if (pageRetries < 3) {
+            int delay = 5000 << pageRetries++;
+            int token = requestToken;
+            ScanRecord record = currentRecord;
+            long waitingCursor = cursor;
+            status.setText(reason + "，" + delay / 1000 + " 秒后自动重试当前页（" + pageRetries + "/3）");
+            browser.postDelayed(() -> {
+                if (scanning && token == requestToken && record == currentRecord && waitingCursor == cursor) startPage();
+            }, delay);
+            return;
+        }
+        pageRetries = 0;
+        scanning = false;
+        scanButton.setText("继续扫描");
+        status.setText(reason + "，扫描已暂停；已提取的素材仍在暂存记录中");
+        updateScanCard();
+        if (showingReader) new AlertDialog.Builder(this)
+                .setTitle("评论扫描已暂停")
+                .setMessage("当前页连续重试后仍无法读取。已提取的素材仍在暂存记录中，可以继续扫描当前页，或稍后再试。")
+                .setPositiveButton("继续扫描", (dialog, which) -> scanButton.performClick())
+                .setNegativeButton("稍后再试", null)
+                .show();
     }
 
     private static JSONObject javascriptObject(String value) throws Exception {
@@ -1403,7 +1489,7 @@ public class MainActivity extends Activity {
             status.setText(more ? "扫描中 · 已发现 " + media.size() + " 个素材"
                     : "已扫描 " + record.scanned + " 条主评论，找到 " + media.size() + " 个不同媒体（扫描完成）");
             if (scanning && more) {
-                browser.postDelayed(this::startPage, 350);
+                browser.postDelayed(this::startPage, douyinPageDelayMs);
             } else {
                 scanning = false;
                 scanButton.setText(more ? "继续扫描" : "扫描完成");
@@ -1733,6 +1819,7 @@ public class MainActivity extends Activity {
     @Override public void onBackPressed() {
         if (showingRecords) showReader();
         else if (showingReader) showHome();
+        else if (showingSettings) showHome();
         else super.onBackPressed();
     }
 }
