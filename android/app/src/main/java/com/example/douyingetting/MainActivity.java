@@ -96,7 +96,6 @@ public class MainActivity extends Activity {
     private EditText input;
     private TextView status;
     private TextView scanCountLine;
-    private TextView scanNote;
     private ProgressBar scanProgress;
     private LinearLayout results;
     private Button scanButton;
@@ -590,9 +589,6 @@ public class MainActivity extends Activity {
         codeLogin.setVisibility(xhsMode ? View.GONE : View.VISIBLE);
         scanButton.setText(xhsMode ? "扫描评论" : "扫描主评论");
         status.setText(xhsMode ? "粘贴笔记链接，打开网页后进入评论区" : "粘贴作品链接，打开网页后进入评论区");
-        if (scanNote != null) scanNote.setText(xhsMode
-                ? "评论分页由网页滚动触发 · 结果会实时暂存到本机"
-                : "每 2 秒翻一页 · 结果会实时暂存到本机");
     }
 
     private void showRecords() {
@@ -946,10 +942,6 @@ public class MainActivity extends Activity {
         progressParams.topMargin = dp(10);
         scanBody.addView(scanProgress, progressParams);
         scanProgress.setVisibility(View.GONE);
-        scanNote = label("每 2 秒翻一页 · 结果会实时暂存到本机", 11, INK3, false);
-        LinearLayout.LayoutParams scanNoteParams = new LinearLayout.LayoutParams(-1, -2);
-        scanNoteParams.topMargin = dp(8);
-        scanBody.addView(scanNote, scanNoteParams);
         status.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
@@ -975,11 +967,6 @@ public class MainActivity extends Activity {
         browserPanel.addView(browserHint);
         setupBrowser();
         browserPanel.addView(browser, new LinearLayout.LayoutParams(-1, dp(290)));
-        LinearLayout controls = new LinearLayout(this);
-        controls.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams controlsParams = new LinearLayout.LayoutParams(-1, dp(44));
-        controlsParams.topMargin = dp(8);
-        browserPanel.addView(controls, controlsParams);
         codeLogin = new Button(this);
         codeLogin.setAllCaps(false);
         codeLogin.setText("验证码登录");
@@ -991,7 +978,9 @@ public class MainActivity extends Activity {
         codeLogin.setOnClickListener(v -> browser.evaluateJavascript(
                 "(() => {const tab=[...document.querySelectorAll('button,div,span')].find(x=>x.children.length===0&&x.textContent.trim()==='验证码登录'&&x.getBoundingClientRect().width>0);if(tab){tab.click();return true}return false})()",
                 found -> status.setText("true".equals(found) ? "请在抖音网页中输入手机号和验证码" : "请先在网页中点登录，再选择验证码登录")));
-        controls.addView(codeLogin, new LinearLayout.LayoutParams(0, dp(44), 1));
+        LinearLayout.LayoutParams loginParams = new LinearLayout.LayoutParams(-1, dp(44));
+        loginParams.topMargin = dp(8);
+        browserPanel.addView(codeLogin, loginParams);
         scanButton = new Button(this);
         scanButton.setAllCaps(false);
         scanButton.setText("扫描主评论");
@@ -1048,9 +1037,9 @@ public class MainActivity extends Activity {
                 startPage();
             }
         });
-        LinearLayout.LayoutParams scanButtonParams = new LinearLayout.LayoutParams(0, dp(44), 1);
-        scanButtonParams.leftMargin = dp(8);
-        controls.addView(scanButton, scanButtonParams);
+        LinearLayout.LayoutParams scanButtonParams = new LinearLayout.LayoutParams(-1, dp(44));
+        scanButtonParams.topMargin = dp(10);
+        content.addView(scanButton, content.indexOfChild(webToggle), scanButtonParams);
 
         resultAnchor = label("提取结果", 20, INK, true);
         LinearLayout.LayoutParams resultHeadParams = new LinearLayout.LayoutParams(-1, -2);
