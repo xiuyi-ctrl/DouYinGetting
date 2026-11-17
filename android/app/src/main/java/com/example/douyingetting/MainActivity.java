@@ -96,6 +96,7 @@ public class MainActivity extends Activity {
     private EditText input;
     private TextView status;
     private TextView scanCountLine;
+    private TextView scanNote;
     private ProgressBar scanProgress;
     private LinearLayout results;
     private Button scanButton;
@@ -105,6 +106,7 @@ public class MainActivity extends Activity {
     private LinearLayout resultRow;
     private ScrollView readerScroll;
     private TextView countLabel;
+    private TextView saveSub;
     private TextView resultSummary;
     private TextView allFilter;
     private TextView gifFilter;
@@ -117,6 +119,7 @@ public class MainActivity extends Activity {
     private boolean showingReader;
     private boolean showingRecords;
     private boolean showingSettings;
+    private boolean recordsFromSettings;
     private int douyinPageDelayMs = 2000;
     private volatile String commentRequest;
     private volatile String lastCommentPath;
@@ -138,6 +141,16 @@ public class MainActivity extends Activity {
     private static final int DARK = Color.rgb(25, 47, 55);
     private static final int GREEN = Color.rgb(28, 158, 120);
     private static final int MUTED = Color.rgb(125, 143, 143);
+    // 读取页 / 记录页设计令牌
+    private static final int SURFACE = Color.WHITE;
+    private static final int LINE = Color.rgb(233, 236, 234);
+    private static final int INK = Color.rgb(23, 37, 43);
+    private static final int INK2 = Color.rgb(95, 110, 110);
+    private static final int INK3 = Color.rgb(154, 166, 166);
+    private static final int ACCENT = Color.rgb(20, 128, 107);
+    private static final int ACCENT_SOFT = Color.rgb(232, 242, 238);
+    private static final int TRACK = Color.rgb(237, 238, 234);
+    private static final int DANGER = Color.rgb(178, 100, 92);
 
     private static class Media {
         final File file;
@@ -209,6 +222,29 @@ public class MainActivity extends Activity {
         drawable.setColor(color);
         drawable.setCornerRadius(dp(radius));
         return drawable;
+    }
+
+    private GradientDrawable card(int radius) {
+        return outlined(radius, SURFACE);
+    }
+
+    private GradientDrawable outlined(int radius, int color) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radius));
+        drawable.setStroke(1, LINE);
+        return drawable;
+    }
+
+    private TextView segment(String text, String type, LinearLayout parent) {
+        TextView button = label(text, 12, INK2, true);
+        button.setGravity(Gravity.CENTER);
+        parent.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
+        button.setOnClickListener(v -> {
+            selectedFilter = type;
+            renderResults();
+        });
+        return button;
     }
 
     private void showHome() {
@@ -313,44 +349,166 @@ public class MainActivity extends Activity {
         showingSettings = true;
         showingReader = false;
         showingRecords = false;
+        for (Animatable animation : animations) animation.stop();
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BG);
         root.setFitsSystemWindows(true);
-        root.setPadding(dp(18), dp(16), dp(18), dp(24));
-        TextView back = label("‹  返回首页", 14, GREEN, true);
-        back.setPadding(0, dp(8), 0, dp(8));
+
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
+        root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
+        TextView back = label("‹", 22, INK, false);
+        back.setGravity(Gravity.CENTER);
+        back.setBackground(card(10));
         back.setOnClickListener(v -> showHome());
-        root.addView(back);
-        TextView title = label("扫描设置", 22, DARK, true);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, -2);
-        titleParams.topMargin = dp(26);
-        root.addView(title, titleParams);
-        TextView description = label("抖音主评论翻页间隔", 14, DARK, true);
-        LinearLayout.LayoutParams descriptionParams = new LinearLayout.LayoutParams(-1, -2);
-        descriptionParams.topMargin = dp(25);
-        root.addView(description, descriptionParams);
-        root.addView(label("只影响抖音评论扫描；小红书扫描不受影响", 12, MUTED, false));
-        addScanSpeedOption(root, 2000, "稳定模式 · 2 秒", "降低连续请求造成的扫描暂停概率");
-        addScanSpeedOption(root, 350, "快速模式 · 0.35 秒", "扫描更快，但可能频繁暂停");
+        toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        TextView title = label("设置", 16, INK, true);
+        title.setGravity(Gravity.CENTER);
+        toolbar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        toolbar.addView(new View(this), new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(20), dp(2), dp(20), dp(20));
+        scroll.addView(page);
+
+        page.addView(groupTitle("扫描", 6));
+        LinearLayout scanCard = new LinearLayout(this);
+        scanCard.setOrientation(LinearLayout.VERTICAL);
+        scanCard.setPadding(dp(16), dp(16), dp(16), dp(16));
+        scanCard.setBackground(card(16));
+        page.addView(scanCard);
+        LinearLayout scanHead = new LinearLayout(this);
+        scanHead.setGravity(Gravity.CENTER_VERTICAL);
+        scanCard.addView(scanHead);
+        scanHead.addView(label("翻页间隔", 14, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        scanHead.addView(label("抖音主评论", 11, INK3, false));
+        LinearLayout speedSwitch = new LinearLayout(this);
+        speedSwitch.setOrientation(LinearLayout.HORIZONTAL);
+        speedSwitch.setPadding(dp(3), dp(3), dp(3), dp(3));
+        speedSwitch.setBackground(shape(TRACK, 10));
+        LinearLayout.LayoutParams speedParams = new LinearLayout.LayoutParams(-1, dp(38));
+        speedParams.topMargin = dp(12);
+        scanCard.addView(speedSwitch, speedParams);
+        addSpeedSegment(speedSwitch, 2000, "稳定 · 2 秒");
+        addSpeedSegment(speedSwitch, 350, "快速 · 0.35 秒");
+        TextView speedNote = label("快速模式扫描更快，但更容易触发评论接口暂停。选择会立即保存。", 11, INK3, false);
+        speedNote.setLineSpacing(0, 1.35f);
+        LinearLayout.LayoutParams speedNoteParams = new LinearLayout.LayoutParams(-1, -2);
+        speedNoteParams.topMargin = dp(10);
+        scanCard.addView(speedNote, speedNoteParams);
+
+        page.addView(groupTitle("本机数据", 18));
+        LinearLayout dataCard = new LinearLayout(this);
+        dataCard.setOrientation(LinearLayout.VERTICAL);
+        dataCard.setBackground(card(16));
+        page.addView(dataCard);
+        dataCard.addView(settingRow("扫描记录", records.size() + " 条", true, v -> {
+            recordsFromSettings = true;
+            showRecords();
+        }));
+        dataCard.addView(rowDivider());
+        dataCard.addView(settingRow("暂存占用", storageSize(), false, null));
+        dataCard.addView(rowDivider());
+        dataCard.addView(settingRow("保存位置", "下载 / DouYinGetting", false, null));
+
+        page.addView(groupTitle("说明", 18));
+        LinearLayout aboutCard = new LinearLayout(this);
+        aboutCard.setOrientation(LinearLayout.VERTICAL);
+        aboutCard.setPadding(dp(16), dp(16), dp(16), dp(16));
+        aboutCard.setBackground(card(16));
+        page.addView(aboutCard);
+        TextView note1 = label("登录在抖音 / 小红书的网页内完成，App 不读取手机上的账号；未登录时只能看到公开的少量评论。", 11, INK2, false);
+        note1.setLineSpacing(0, 1.4f);
+        aboutCard.addView(note1);
+        TextView note2 = label("素材先暂存在 App 内，点「保存」后才写入下载目录。", 11, INK2, false);
+        note2.setLineSpacing(0, 1.4f);
+        LinearLayout.LayoutParams note2Params = new LinearLayout.LayoutParams(-1, -2);
+        note2Params.topMargin = dp(8);
+        aboutCard.addView(note2, note2Params);
+
+        page.addView(groupTitle("关于", 18));
+        LinearLayout aboutRowCard = new LinearLayout(this);
+        aboutRowCard.setOrientation(LinearLayout.VERTICAL);
+        aboutRowCard.setBackground(card(16));
+        page.addView(aboutRowCard);
+        aboutRowCard.addView(settingRow("版本", versionName(), false, null));
+
+        TextView footnote = label("咻咿提取 · 仅处理你在网页中已登录可见的评论", 11, INK3, false);
+        LinearLayout.LayoutParams footnoteParams = new LinearLayout.LayoutParams(-1, -2);
+        footnoteParams.topMargin = dp(22);
+        page.addView(footnote, footnoteParams);
+
         setContentView(root);
     }
 
-    private void addScanSpeedOption(LinearLayout root, int delay, String title, String detail) {
+    private TextView groupTitle(String text, int topMargin) {
+        TextView view = label(text, 12, INK3, true);
+        view.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) view.getLayoutParams();
+        params.topMargin = dp(topMargin);
+        params.bottomMargin = dp(8);
+        return view;
+    }
+
+    private LinearLayout settingRow(String name, String value, boolean chevron, View.OnClickListener click) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(14), dp(16), dp(14));
+        row.addView(label(name, 14, INK, false), new LinearLayout.LayoutParams(0, -2, 1));
+        row.addView(label(value, 12, INK3, false));
+        if (chevron) {
+            TextView arrow = label("›", 18, INK3, false);
+            LinearLayout.LayoutParams arrowParams = new LinearLayout.LayoutParams(-2, -2);
+            arrowParams.leftMargin = dp(6);
+            row.addView(arrow, arrowParams);
+        }
+        if (click != null) row.setOnClickListener(click);
+        return row;
+    }
+
+    private View rowDivider() {
+        View divider = new View(this);
+        divider.setBackgroundColor(LINE);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, 1);
+        params.setMargins(dp(16), 0, dp(16), 0);
+        divider.setLayoutParams(params);
+        return divider;
+    }
+
+    private String storageSize() {
+        long bytes = 0;
+        for (ScanRecord record : records) {
+            File[] files = record.folder.listFiles();
+            if (files == null) continue;
+            for (File file : files) if (file.isFile()) bytes += file.length();
+        }
+        if (bytes <= 0) return "0 MB";
+        double mb = bytes / (1024d * 1024d);
+        return String.format(Locale.US, mb >= 10 ? "%.0f MB" : "%.1f MB", mb);
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception error) {
+            return "-";
+        }
+    }
+
+    private void addSpeedSegment(LinearLayout parent, int delay, String text) {
         boolean selected = douyinPageDelayMs == delay;
-        LinearLayout option = new LinearLayout(this);
-        option.setOrientation(LinearLayout.VERTICAL);
-        option.setPadding(dp(18), dp(16), dp(18), dp(16));
-        option.setBackground(shape(selected ? Color.rgb(232, 244, 239) : Color.WHITE, 18));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-        params.topMargin = dp(12);
-        root.addView(option, params);
-        option.addView(label((selected ? "✓  " : "○  ") + title, 16, selected ? GREEN : DARK, true));
-        TextView hint = label(detail, 12, delay == 350 ? Color.rgb(199, 104, 52) : MUTED, false);
-        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
-        hintParams.topMargin = dp(5);
-        option.addView(hint, hintParams);
-        option.setOnClickListener(v -> {
+        TextView button = label(text, 12, selected ? INK : INK2, true);
+        button.setGravity(Gravity.CENTER);
+        button.setBackground(selected ? shape(SURFACE, 8) : null);
+        parent.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
+        button.setOnClickListener(v -> {
             douyinPageDelayMs = delay;
             getPreferences(MODE_PRIVATE).edit().putInt("douyin_page_delay_ms", delay).apply();
             showSettings();
@@ -432,6 +590,9 @@ public class MainActivity extends Activity {
         codeLogin.setVisibility(xhsMode ? View.GONE : View.VISIBLE);
         scanButton.setText(xhsMode ? "扫描评论" : "扫描主评论");
         status.setText(xhsMode ? "粘贴笔记链接，打开网页后进入评论区" : "粘贴作品链接，打开网页后进入评论区");
+        if (scanNote != null) scanNote.setText(xhsMode
+                ? "评论分页由网页滚动触发 · 结果会实时暂存到本机"
+                : "每 2 秒翻一页 · 结果会实时暂存到本机");
     }
 
     private void showRecords() {
@@ -443,84 +604,134 @@ public class MainActivity extends Activity {
         showingReader = false;
         showingRecords = true;
         for (Animatable animation : animations) animation.stop();
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+        root.setFitsSystemWindows(true);
+
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
+        root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
+        TextView back = label("‹", 22, INK, false);
+        back.setGravity(Gravity.CENTER);
+        back.setBackground(card(10));
+        back.setOnClickListener(v -> showReader());
+        toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        TextView heading = label("扫描记录", 16, INK, true);
+        heading.setGravity(Gravity.CENTER);
+        toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        int visibleCount = 0;
+        for (ScanRecord record : records) if (isXhsLink(record.link) == xhsMode) visibleCount++;
+        TextView total = label("共 " + visibleCount + " 条", 12, INK2, true);
+        total.setGravity(Gravity.CENTER);
+        total.setBackground(card(16));
+        toolbar.addView(total, new LinearLayout.LayoutParams(dp(66), dp(32)));
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(BG);
-        scroll.setFitsSystemWindows(true);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(18), dp(16), dp(18), dp(28));
+        page.setPadding(dp(20), dp(6), dp(20), dp(28));
         scroll.addView(page);
-        TextView back = label("‹  返回读取", 14, GREEN, true);
-        back.setPadding(0, dp(8), 0, dp(8));
-        back.setOnClickListener(v -> showReader());
-        page.addView(back);
         addRecordCards(page);
-        setContentView(scroll);
+        setContentView(root);
     }
 
     private void addRecordCards(LinearLayout page) {
-        TextView heading = label("扫描记录", 19, DARK, true);
-        LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(-1, -2);
-        headingParams.topMargin = dp(28);
-        headingParams.bottomMargin = dp(12);
-        page.addView(heading, headingParams);
+        TextView hint = label("本机暂存 · 删除记录不会影响已保存到下载目录的文件", 11, INK3, false);
+        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
+        hintParams.topMargin = dp(2);
+        hintParams.bottomMargin = dp(14);
+        page.addView(hint, hintParams);
         ArrayList<ScanRecord> visibleRecords = new ArrayList<>();
         for (ScanRecord record : records) if (isXhsLink(record.link) == xhsMode) visibleRecords.add(record);
         if (visibleRecords.isEmpty()) {
-            TextView empty = label("扫描过的作品会暂存在这里，方便随时查看和删除。", 12, MUTED, false);
-            empty.setPadding(dp(18), dp(19), dp(18), dp(19));
-            empty.setBackground(shape(Color.WHITE, 16));
+            TextView empty = label("扫描过的作品会暂存在这里，方便随时查看和删除。", 12, INK3, false);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(18), dp(26), dp(18), dp(26));
+            empty.setBackground(card(16));
             page.addView(empty);
             return;
         }
         SimpleDateFormat date = new SimpleDateFormat("MM-dd HH:mm", Locale.CHINA);
         for (ScanRecord record : visibleRecords) {
+            boolean xhsRecord = isXhsLink(record.link);
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
-            card.setPadding(dp(17), dp(15), dp(17), dp(13));
-            card.setBackground(shape(Color.WHITE, 17));
+            card.setBackground(card(16));
             LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, -2);
-            cardParams.bottomMargin = dp(9);
+            cardParams.bottomMargin = dp(10);
             page.addView(card, cardParams);
-            card.addView(label(date.format(record.createdAt) + (record.complete ? " · 已完成" : " · 暂存中"), 11, GREEN, true));
-            TextView link = label(record.link, 12, DARK, true);
-            link.setSingleLine(true);
-            link.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams linkParams = new LinearLayout.LayoutParams(-1, -2);
-            linkParams.topMargin = dp(7);
-            card.addView(link, linkParams);
+
+            LinearLayout head = new LinearLayout(this);
+            head.setGravity(Gravity.CENTER_VERTICAL);
+            head.setPadding(dp(14), dp(12), dp(14), dp(12));
+            card.addView(head);
+
+            ImageView icon = new ImageView(this);
+            icon.setImageResource(xhsRecord ? R.drawable.xhs_nav : R.drawable.douyin_nav);
+            icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            icon.setPadding(dp(9), dp(9), dp(9), dp(9));
+            icon.setBackground(shape(xhsRecord ? Color.rgb(255, 237, 232) : ACCENT_SOFT, 11));
+            head.addView(icon, new LinearLayout.LayoutParams(dp(38), dp(38)));
+
+            LinearLayout info = new LinearLayout(this);
+            info.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(0, -2, 1);
+            infoParams.leftMargin = dp(12);
+            head.addView(info, infoParams);
+            TextView title = label(record.link, 13, INK, true);
+            title.setSingleLine(true);
+            title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            info.addView(title);
+
             int count;
             synchronized (record) { count = record.items.size(); }
-            String progress = isXhsLink(record.link)
+            String progress = xhsRecord
                     ? record.scanned + " 条评论（主评论 " + record.mainScanned + " · 回复 " + record.replyScanned + "）"
                     : record.scanned + " 条主评论";
-            if (isXhsLink(record.link) && record.scanned > 0 && record.mainScanned + record.replyScanned == 0)
+            if (xhsRecord && record.scanned > 0 && record.mainScanned + record.replyScanned == 0)
                 progress = record.scanned + " 条评论（旧版计数）";
-            TextView detail = label("legacy".equals(record.id) ? "旧版缓存 · 提取 " + count + " 个素材"
-                    : "已扫描 " + progress + " · 提取 " + count + " 个素材", 11, MUTED, false);
-            LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
-            detailParams.topMargin = dp(5);
-            card.addView(detail, detailParams);
+            String detail = ("legacy".equals(record.id) ? "旧版缓存" : date.format(record.createdAt) + " · " + progress)
+                    + " · " + count + " 个素材";
+            TextView sub = label(detail, 11, INK3, false);
+            sub.setSingleLine(true);
+            sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(-1, -2);
+            subParams.topMargin = dp(4);
+            info.addView(sub, subParams);
+
+            TextView state = label(record.complete ? "已完成" : "暂存中", 11, record.complete ? ACCENT : INK3, true);
+            head.addView(state);
+
+            View divider = new View(this);
+            divider.setBackgroundColor(LINE);
+            card.addView(divider, new LinearLayout.LayoutParams(-1, 1));
+
             LinearLayout actions = new LinearLayout(this);
-            actions.setGravity(Gravity.RIGHT);
-            LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-1, -2);
-            actionsParams.topMargin = dp(9);
-            card.addView(actions, actionsParams);
-            TextView view = label("查看预览", 12, GREEN, true);
-            view.setPadding(dp(10), dp(6), dp(10), dp(6));
+            actions.setGravity(Gravity.CENTER_VERTICAL);
+            actions.setPadding(dp(14), dp(10), dp(14), dp(11));
+            card.addView(actions);
+            TextView view = label("查看预览", 12, INK2, true);
             view.setOnClickListener(v -> showRecord(record));
             actions.addView(view);
             if (record.link.startsWith("http")) {
-                TextView copy = label("复制链接", 12, GREEN, true);
-                copy.setPadding(dp(10), dp(6), dp(10), dp(6));
+                TextView copy = label("复制链接", 12, INK2, true);
+                LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(-2, -2);
+                copyParams.leftMargin = dp(20);
                 copy.setOnClickListener(v -> copyLink(record.link));
-                actions.addView(copy);
+                actions.addView(copy, copyParams);
             }
-            TextView delete = label("删除记录", 12, MUTED, false);
-            delete.setPadding(dp(10), dp(6), 0, dp(6));
+            TextView delete = label("删除记录", 12, DANGER, true);
+            LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(-2, -2);
+            deleteParams.leftMargin = dp(20);
             delete.setOnClickListener(v -> confirmDelete(record));
-            actions.addView(delete);
+            actions.addView(delete, deleteParams);
+
             card.setOnClickListener(v -> showRecord(record));
         }
     }
@@ -590,21 +801,24 @@ public class MainActivity extends Activity {
         readerRoot.setFitsSystemWindows(true);
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.setPadding(dp(18), dp(8), dp(18), dp(8));
-        readerRoot.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(68)));
-        TextView back = label("‹", 32, DARK, false);
+        toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
+        readerRoot.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
+        TextView back = label("‹", 22, INK, false);
         back.setGravity(Gravity.CENTER);
-        back.setBackground(shape(Color.rgb(237, 242, 239), 12));
+        back.setBackground(card(10));
         back.setOnClickListener(v -> showHome());
-        toolbar.addView(back, new LinearLayout.LayoutParams(dp(38), dp(38)));
-        readerHeading = label("抖音链接读取", 19, DARK, true);
+        toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        readerHeading = label("抖音链接读取", 16, INK, true);
         readerHeading.setGravity(Gravity.CENTER);
         toolbar.addView(readerHeading, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView recordsButton = label("扫描记录", 12, GREEN, true);
+        TextView recordsButton = label("记录", 12, INK2, true);
         recordsButton.setGravity(Gravity.CENTER);
-        recordsButton.setBackground(shape(Color.rgb(234, 247, 241), 19));
-        recordsButton.setOnClickListener(v -> showRecords());
-        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(dp(72), dp(38)));
+        recordsButton.setBackground(card(16));
+        recordsButton.setOnClickListener(v -> {
+            recordsFromSettings = false;
+            showRecords();
+        });
+        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(dp(58), dp(32)));
 
         FrameLayout scrollArea = new FrameLayout(this);
         readerRoot.addView(scrollArea, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -626,97 +840,124 @@ public class MainActivity extends Activity {
 
         LinearLayout inputCard = new LinearLayout(this);
         inputCard.setOrientation(LinearLayout.VERTICAL);
-        inputCard.setPadding(dp(20), dp(20), dp(20), dp(18));
-        inputCard.setBackground(shape(Color.WHITE, 25));
-        inputCard.setElevation(dp(3));
+        inputCard.setPadding(dp(16), dp(16), dp(16), dp(16));
+        inputCard.setBackground(card(16));
         content.addView(inputCard);
         LinearLayout inputHead = new LinearLayout(this);
         inputHead.setGravity(Gravity.CENTER_VERTICAL);
         inputCard.addView(inputHead);
-        inputHeading = label("作品链接", 15, DARK, true);
+        inputHeading = label("作品链接", 14, INK, true);
         inputHead.addView(inputHeading, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView connection = label("● 网页登录", 10, GREEN, true);
-        connection.setPadding(dp(8), dp(5), dp(8), dp(5));
-        connection.setBackground(shape(Color.rgb(230, 248, 238), 12));
+        LinearLayout connection = new LinearLayout(this);
+        connection.setGravity(Gravity.CENTER_VERTICAL);
+        View connectionDot = new View(this);
+        connectionDot.setBackground(shape(ACCENT, 3));
+        connection.addView(connectionDot, new LinearLayout.LayoutParams(dp(5), dp(5)));
+        TextView connectionText = label("网页已登录", 11, ACCENT, true);
+        LinearLayout.LayoutParams connectionParams = new LinearLayout.LayoutParams(-2, -2);
+        connectionParams.leftMargin = dp(5);
+        connection.addView(connectionText, connectionParams);
         inputHead.addView(connection);
         LinearLayout urlBox = new LinearLayout(this);
         urlBox.setGravity(Gravity.CENTER_VERTICAL);
-        urlBox.setPadding(dp(10), 0, dp(8), 0);
-        urlBox.setBackground(shape(Color.rgb(247, 250, 248), 13));
-        LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(-1, dp(52));
-        urlParams.topMargin = dp(14);
+        urlBox.setPadding(dp(10), 0, dp(6), 0);
+        urlBox.setBackground(outlined(10, Color.rgb(247, 248, 246)));
+        LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(-1, dp(44));
+        urlParams.topMargin = dp(12);
         inputCard.addView(urlBox, urlParams);
         input = new EditText(this);
         input.setSingleLine(true);
-        input.setTextSize(12);
-        input.setTextColor(DARK);
-        input.setHintTextColor(MUTED);
+        input.setTextSize(13);
+        input.setTextColor(INK);
+        input.setHintTextColor(INK3);
         input.setHint("粘贴抖音作品链接或分享文案");
         input.setBackgroundColor(Color.TRANSPARENT);
+        input.setPadding(0, 0, 0, 0);
         urlBox.addView(input, new LinearLayout.LayoutParams(0, -1, 1));
-        TextView paste = label("粘贴", 12, GREEN, true);
+        TextView paste = label("粘贴", 11, INK2, true);
         paste.setGravity(Gravity.CENTER);
-        paste.setBackground(shape(Color.rgb(220, 247, 232), 9));
+        paste.setBackground(card(8));
         paste.setOnClickListener(v -> {
             ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip().getItemCount() > 0)
                 input.setText(clipboard.getPrimaryClip().getItemAt(0).coerceToText(this));
         });
-        urlBox.addView(paste, new LinearLayout.LayoutParams(dp(48), dp(36)));
-        TextView copy = label("复制", 12, GREEN, true);
+        LinearLayout.LayoutParams pasteParams = new LinearLayout.LayoutParams(dp(40), dp(32));
+        pasteParams.leftMargin = dp(6);
+        urlBox.addView(paste, pasteParams);
+        TextView copy = label("复制", 11, INK2, true);
         copy.setGravity(Gravity.CENTER);
+        copy.setBackground(card(8));
         copy.setOnClickListener(v -> {
             String link = extractLink(input.getText().toString(), xhsMode);
             if (link == null && input.getText().length() == 0) link = activeLink;
             if (link == null) showSaveResult("没有可复制的链接");
             else copyLink(link);
         });
-        urlBox.addView(copy, new LinearLayout.LayoutParams(dp(42), dp(36)));
-        TextView hint = label("支持分享文案、短链接与作品地址", 11, MUTED, false);
+        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(dp(40), dp(32));
+        copyParams.leftMargin = dp(6);
+        urlBox.addView(copy, copyParams);
+        TextView hint = label("支持分享文案、短链接与作品地址", 11, INK3, false);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
-        hintParams.topMargin = dp(11);
+        hintParams.topMargin = dp(10);
         inputCard.addView(hint, hintParams);
         Button open = new Button(this);
         open.setAllCaps(false);
         open.setText("打开作品");
         open.setTextColor(Color.WHITE);
-        open.setTextSize(14);
+        open.setTextSize(15);
         open.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        open.setBackground(shape(GREEN, 16));
+        open.setBackground(shape(ACCENT, 12));
+        open.setMinHeight(0);
+        open.setStateListAnimator(null);
         open.setOnClickListener(v -> openLink());
-        LinearLayout.LayoutParams openParams = new LinearLayout.LayoutParams(-1, dp(48));
-        openParams.topMargin = dp(14);
+        LinearLayout.LayoutParams openParams = new LinearLayout.LayoutParams(-1, dp(46));
+        openParams.topMargin = dp(12);
         inputCard.addView(open, openParams);
 
         LinearLayout scanCard = new LinearLayout(this);
-        scanCard.setOrientation(LinearLayout.VERTICAL);
-        scanCard.setPadding(dp(16), dp(14), dp(16), dp(14));
-        scanCard.setBackground(shape(Color.rgb(232, 244, 239), 20));
+        scanCard.setOrientation(LinearLayout.HORIZONTAL);
+        scanCard.setGravity(Gravity.TOP);
+        scanCard.setBackground(card(16));
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
-        statusParams.topMargin = dp(18);
+        statusParams.topMargin = dp(12);
         content.addView(scanCard, statusParams);
-        status = label("粘贴作品链接，打开网页后进入评论区", 12, DARK, true);
-        scanCard.addView(status);
-        scanCountLine = label("", 11, GREEN, false);
+        View scanBar = new View(this);
+        scanBar.setBackground(shape(ACCENT, 2));
+        LinearLayout.LayoutParams scanBarParams = new LinearLayout.LayoutParams(dp(3), dp(40));
+        scanBarParams.topMargin = dp(16);
+        scanBarParams.leftMargin = dp(8);
+        scanCard.addView(scanBar, scanBarParams);
+        LinearLayout scanBody = new LinearLayout(this);
+        scanBody.setOrientation(LinearLayout.VERTICAL);
+        scanBody.setPadding(dp(14), dp(14), dp(14), dp(14));
+        scanCard.addView(scanBody, new LinearLayout.LayoutParams(0, -2, 1));
+        status = label("粘贴作品链接，打开网页后进入评论区", 14, INK, true);
+        scanBody.addView(status);
+        scanCountLine = label("", 12, INK2, false);
         LinearLayout.LayoutParams countParams = new LinearLayout.LayoutParams(-1, -2);
-        countParams.topMargin = dp(5);
-        scanCard.addView(scanCountLine, countParams);
+        countParams.topMargin = dp(6);
+        scanBody.addView(scanCountLine, countParams);
         scanCountLine.setVisibility(View.GONE);
         scanProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         scanProgress.setIndeterminate(true);
-        scanProgress.setIndeterminateTintList(ColorStateList.valueOf(GREEN));
-        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(-1, dp(4));
+        scanProgress.setIndeterminateTintList(ColorStateList.valueOf(ACCENT));
+        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(-1, dp(3));
         progressParams.topMargin = dp(10);
-        scanCard.addView(scanProgress, progressParams);
+        scanBody.addView(scanProgress, progressParams);
         scanProgress.setVisibility(View.GONE);
+        scanNote = label("每 2 秒翻一页 · 结果会实时暂存到本机", 11, INK3, false);
+        LinearLayout.LayoutParams scanNoteParams = new LinearLayout.LayoutParams(-1, -2);
+        scanNoteParams.topMargin = dp(8);
+        scanBody.addView(scanNote, scanNoteParams);
         status.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
             @Override public void afterTextChanged(Editable text) { updateScanCard(); }
         });
-        webToggle = label("网页操作  ▾", 12, GREEN, true);
-        LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(-1, -2);
-        toggleParams.topMargin = dp(10);
+        webToggle = label("网页操作  ▾", 12, INK2, true);
+        LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(-1, dp(38));
+        toggleParams.topMargin = dp(6);
         content.addView(webToggle, toggleParams);
         webToggle.setOnClickListener(v -> {
             browserPanel.setVisibility(browserPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
@@ -725,27 +966,41 @@ public class MainActivity extends Activity {
         browserPanel = new LinearLayout(this);
         browserPanel.setOrientation(LinearLayout.VERTICAL);
         browserPanel.setPadding(dp(10), dp(10), dp(10), dp(10));
-        browserPanel.setBackground(shape(Color.WHITE, 16));
+        browserPanel.setBackground(card(14));
         LinearLayout.LayoutParams browserParams = new LinearLayout.LayoutParams(-1, -2);
         browserParams.topMargin = dp(9);
         content.addView(browserPanel, browserParams);
         browserPanel.setVisibility(View.GONE);
-        browserHint = label("在网页中登录并打开评论区，然后扫描主评论", 11, MUTED, false);
+        browserHint = label("在网页中登录并打开评论区，然后扫描主评论", 11, INK3, false);
         browserPanel.addView(browserHint);
         setupBrowser();
         browserPanel.addView(browser, new LinearLayout.LayoutParams(-1, dp(290)));
         LinearLayout controls = new LinearLayout(this);
-        browserPanel.addView(controls);
+        controls.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams controlsParams = new LinearLayout.LayoutParams(-1, dp(44));
+        controlsParams.topMargin = dp(8);
+        browserPanel.addView(controls, controlsParams);
         codeLogin = new Button(this);
         codeLogin.setAllCaps(false);
         codeLogin.setText("验证码登录");
+        codeLogin.setTextColor(INK2);
+        codeLogin.setTextSize(13);
+        codeLogin.setBackground(card(10));
+        codeLogin.setMinHeight(0);
+        codeLogin.setStateListAnimator(null);
         codeLogin.setOnClickListener(v -> browser.evaluateJavascript(
                 "(() => {const tab=[...document.querySelectorAll('button,div,span')].find(x=>x.children.length===0&&x.textContent.trim()==='验证码登录'&&x.getBoundingClientRect().width>0);if(tab){tab.click();return true}return false})()",
                 found -> status.setText("true".equals(found) ? "请在抖音网页中输入手机号和验证码" : "请先在网页中点登录，再选择验证码登录")));
-        controls.addView(codeLogin, new LinearLayout.LayoutParams(0, dp(48), 1));
+        controls.addView(codeLogin, new LinearLayout.LayoutParams(0, dp(44), 1));
         scanButton = new Button(this);
         scanButton.setAllCaps(false);
         scanButton.setText("扫描主评论");
+        scanButton.setTextColor(Color.WHITE);
+        scanButton.setTextSize(14);
+        scanButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        scanButton.setBackground(shape(ACCENT, 10));
+        scanButton.setMinHeight(0);
+        scanButton.setStateListAnimator(null);
         scanButton.setOnClickListener(v -> {
             if (viewingSavedRecord) {
                 openLink();
@@ -793,43 +1048,64 @@ public class MainActivity extends Activity {
                 startPage();
             }
         });
-        controls.addView(scanButton, new LinearLayout.LayoutParams(0, dp(48), 1));
+        LinearLayout.LayoutParams scanButtonParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        scanButtonParams.leftMargin = dp(8);
+        controls.addView(scanButton, scanButtonParams);
 
-        resultAnchor = label("提取结果", 20, DARK, true);
+        resultAnchor = label("提取结果", 20, INK, true);
         LinearLayout.LayoutParams resultHeadParams = new LinearLayout.LayoutParams(-1, -2);
-        resultHeadParams.topMargin = dp(28);
+        resultHeadParams.topMargin = dp(22);
         content.addView(resultAnchor, resultHeadParams);
-        resultSummary = label("提取后自动显示图片与动图预览", 11, MUTED, false);
-        content.addView(resultSummary);
+        resultSummary = label("提取后自动显示图片与动图预览", 12, INK3, false);
+        LinearLayout.LayoutParams resultSummaryParams = new LinearLayout.LayoutParams(-1, -2);
+        resultSummaryParams.topMargin = dp(4);
+        content.addView(resultSummary, resultSummaryParams);
         LinearLayout filters = new LinearLayout(this);
-        LinearLayout.LayoutParams filtersParams = new LinearLayout.LayoutParams(-1, -2);
-        filtersParams.topMargin = dp(15);
-        filtersParams.bottomMargin = dp(14);
+        filters.setOrientation(LinearLayout.HORIZONTAL);
+        filters.setPadding(dp(3), dp(3), dp(3), dp(3));
+        filters.setBackground(shape(TRACK, 10));
+        LinearLayout.LayoutParams filtersParams = new LinearLayout.LayoutParams(-1, dp(38));
+        filtersParams.topMargin = dp(14);
+        filtersParams.bottomMargin = dp(12);
         content.addView(filters, filtersParams);
-        allFilter = filter("全部 0", "all", filters);
-        gifFilter = filter("动图 0", "gif", filters);
-        imageFilter = filter("图片 0", "image", filters);
-        emptyResults = label("还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。", 12, MUTED, false);
-        emptyResults.setPadding(dp(18), dp(25), dp(18), dp(25));
-        emptyResults.setBackground(shape(Color.WHITE, 16));
+        allFilter = segment("全部 0", "all", filters);
+        gifFilter = segment("动图 0", "gif", filters);
+        imageFilter = segment("图片 0", "image", filters);
+        emptyResults = label("还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。", 12, INK3, false);
+        emptyResults.setGravity(Gravity.CENTER);
+        emptyResults.setPadding(dp(18), dp(26), dp(18), dp(26));
+        emptyResults.setBackground(card(16));
         content.addView(emptyResults);
         results = new LinearLayout(this);
         results.setOrientation(LinearLayout.VERTICAL);
         content.addView(results);
 
+        View saveDivider = new View(this);
+        saveDivider.setBackgroundColor(LINE);
+        readerRoot.addView(saveDivider, new LinearLayout.LayoutParams(-1, 1));
         LinearLayout saveBar = new LinearLayout(this);
         saveBar.setGravity(Gravity.CENTER_VERTICAL);
-        saveBar.setPadding(dp(18), dp(8), dp(18), dp(8));
-        saveBar.setBackgroundColor(Color.WHITE);
-        readerRoot.addView(saveBar, new LinearLayout.LayoutParams(-1, dp(78)));
-        countLabel = label("已提取 0 个", 13, DARK, true);
-        saveBar.addView(countLabel, new LinearLayout.LayoutParams(0, -2, 1));
+        saveBar.setPadding(dp(20), dp(10), dp(20), dp(14));
+        saveBar.setBackgroundColor(BG);
+        readerRoot.addView(saveBar, new LinearLayout.LayoutParams(-1, dp(72)));
+        LinearLayout saveInfo = new LinearLayout(this);
+        saveInfo.setOrientation(LinearLayout.VERTICAL);
+        saveBar.addView(saveInfo, new LinearLayout.LayoutParams(0, -2, 1));
+        countLabel = label("已提取 0 个", 14, INK, true);
+        saveInfo.addView(countLabel);
+        saveSub = label("保存到 下载 / DouYinGetting", 11, INK3, false);
+        LinearLayout.LayoutParams saveSubParams = new LinearLayout.LayoutParams(-1, -2);
+        saveSubParams.topMargin = dp(3);
+        saveInfo.addView(saveSub, saveSubParams);
         Button saveAll = new Button(this);
         saveAll.setAllCaps(false);
         saveAll.setText("保存全部");
         saveAll.setTextColor(Color.WHITE);
+        saveAll.setTextSize(13);
         saveAll.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        saveAll.setBackground(shape(DARK, 17));
+        saveAll.setBackground(shape(ACCENT, 10));
+        saveAll.setMinHeight(0);
+        saveAll.setStateListAnimator(null);
         saveAll.setOnClickListener(v -> {
             ArrayList<Media> snapshot = new ArrayList<>(media);
             worker.execute(() -> {
@@ -845,7 +1121,7 @@ public class MainActivity extends Activity {
                         : "部分保存成功：成功 " + success + " 个，失败 " + failed + " 个"));
             });
         });
-        saveBar.addView(saveAll, new LinearLayout.LayoutParams(dp(112), dp(46)));
+        saveBar.addView(saveAll, new LinearLayout.LayoutParams(dp(104), dp(40)));
         updateResultLabels();
     }
 
@@ -859,21 +1135,6 @@ public class MainActivity extends Activity {
             scanCountLine.setText(counts);
             scanCountLine.setVisibility(View.VISIBLE);
         } else scanCountLine.setVisibility(View.GONE);
-    }
-
-    private TextView filter(String text, String type, LinearLayout parent) {
-        TextView button = label(text, 11, type.equals(selectedFilter) ? Color.WHITE : MUTED, true);
-        button.setGravity(Gravity.CENTER);
-        button.setPadding(dp(14), dp(8), dp(14), dp(8));
-        button.setBackground(shape(type.equals(selectedFilter) ? DARK : Color.rgb(236, 242, 239), 18));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
-        params.rightMargin = dp(7);
-        parent.addView(button, params);
-        button.setOnClickListener(v -> {
-            selectedFilter = type;
-            renderResults();
-        });
-        return button;
     }
 
     private void setupBrowser() {
@@ -1629,10 +1890,12 @@ public class MainActivity extends Activity {
         int gifCount = 0;
         for (Media item : media) if (item.animated) gifCount++;
         allFilter.setText("全部 " + media.size());
-        gifFilter.setText("动态 " + gifCount);
+        gifFilter.setText("动图 " + gifCount);
         imageFilter.setText("图片 " + (media.size() - gifCount));
-        resultSummary.setText(media.isEmpty() ? "提取后自动显示图片与动态媒体预览" : "已找到 " + media.size() + " 个不重复素材 · 默认预览中");
+        resultSummary.setText(media.isEmpty() ? "提取后自动显示图片与动图预览" : media.size() + " 个不重复素材 · 默认预览中");
         countLabel.setText("已提取 " + media.size() + " 个");
+        saveSub.setText(media.isEmpty() ? "保存到 下载 / DouYinGetting"
+                : gifCount + " 个动图 · " + (media.size() - gifCount) + " 张图片");
         emptyResults.setText(media.isEmpty() ? "还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。" : "当前分类没有结果");
         emptyResults.setVisibility(displayedCount == 0 ? View.VISIBLE : View.GONE);
     }
@@ -1646,38 +1909,35 @@ public class MainActivity extends Activity {
         for (Media item : media) if (matchesFilter(item)) addTile(item);
         emptyResults.setText(media.isEmpty() ? "还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。" : "当前分类没有结果");
         emptyResults.setVisibility(displayedCount == 0 ? View.VISIBLE : View.GONE);
-        for (TextView button : new TextView[]{allFilter, gifFilter, imageFilter}) {
-            boolean active = button == allFilter && "all".equals(selectedFilter)
-                    || button == gifFilter && "gif".equals(selectedFilter)
-                    || button == imageFilter && "image".equals(selectedFilter);
-            button.setTextColor(active ? Color.WHITE : MUTED);
-            button.setBackground(shape(active ? DARK : Color.rgb(236, 242, 239), 18));
-        }
+        styleSegment(allFilter, "all");
+        styleSegment(gifFilter, "gif");
+        styleSegment(imageFilter, "image");
+    }
+
+    private void styleSegment(TextView button, String type) {
+        boolean active = type.equals(selectedFilter);
+        button.setTextColor(active ? INK : INK2);
+        button.setBackground(active ? shape(SURFACE, 8) : null);
     }
 
     private void addTile(Media item) {
         if (displayedCount % 3 == 0) {
             resultRow = new LinearLayout(this);
             LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
-            rowParams.bottomMargin = dp(8);
+            rowParams.bottomMargin = dp(6);
             results.addView(resultRow, rowParams);
         }
         int tileWidth = (getResources().getDisplayMetrics().widthPixels - dp(52)) / 3;
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(shape(Color.WHITE, 15));
-        card.setClipToOutline(true);
-        card.setElevation(dp(2));
-        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(tileWidth, -2);
-        if (displayedCount % 3 != 0) cardParams.leftMargin = dp(8);
-        resultRow.addView(card, cardParams);
         LinearLayout row = resultRow;
         FrameLayout art = new FrameLayout(this);
-        art.setBackgroundColor(item.animated ? Color.rgb(255, 232, 238) : Color.rgb(227, 241, 246));
-        card.addView(art, new LinearLayout.LayoutParams(-1, tileWidth));
+        art.setBackground(shape(SURFACE, 10));
+        art.setClipToOutline(true);
+        LinearLayout.LayoutParams artParams = new LinearLayout.LayoutParams(tileWidth, tileWidth);
+        if (displayedCount % 3 != 0) artParams.leftMargin = dp(6);
+        resultRow.addView(art, artParams);
         ImageView image = new ImageView(this);
-        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        image.setPadding(dp(5), dp(5), dp(5), dp(5));
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        art.addView(image, new FrameLayout.LayoutParams(-1, -1));
         if (item.thumbnail != null) {
             bindThumbnail(image, item.thumbnail);
         } else {
@@ -1689,26 +1949,23 @@ public class MainActivity extends Activity {
                 });
             });
         }
-        art.addView(image, new FrameLayout.LayoutParams(-1, -1));
         if ("video/mp4".equals(item.mime)) {
-            TextView play = label("▶ 点击播放", 11, DARK, true);
+            TextView play = label("▶", 14, Color.WHITE, true);
             play.setGravity(Gravity.CENTER);
-            play.setBackground(shape(Color.WHITE, 12));
-            FrameLayout.LayoutParams playParams = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER);
-            play.setPadding(dp(8), dp(5), dp(8), dp(5));
-            art.addView(play, playParams);
+            play.setBackground(shape(Color.argb(110, 0, 0, 0), 17));
+            art.addView(play, new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.CENTER));
         }
-        TextView badge = label("video/mp4".equals(item.mime) ? "视频" : item.animated ? ("image/gif".equals(item.mime) ? "GIF" : "动图") : "图片", 10, Color.WHITE, true);
-        badge.setGravity(Gravity.CENTER);
-        badge.setPadding(dp(6), dp(3), dp(6), dp(3));
-        badge.setBackground(shape(item.animated ? Color.rgb(237, 98, 136) : DARK, 5));
-        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, -2, Gravity.RIGHT | Gravity.TOP);
-        badgeParams.setMargins(0, dp(6), dp(6), 0);
-        art.addView(badge, badgeParams);
-        TextView caption = label("video/mp4".equals(item.mime) ? ("表情".equals(item.kind) ? "表情 · 视频" : "评论视频") : item.animated ? "表情 · 动图" : "评论图片", 10, Color.rgb(91, 110, 111), false);
-        caption.setPadding(dp(7), dp(7), dp(4), dp(8));
-        card.addView(caption);
-        card.setOnClickListener(v -> preview(item));
+        if (item.animated || "video/mp4".equals(item.mime)) {
+            String tag = "video/mp4".equals(item.mime) ? "视频" : ("image/gif".equals(item.mime) ? "GIF" : "动图");
+            TextView badge = label(tag, 9, Color.WHITE, true);
+            badge.setGravity(Gravity.CENTER);
+            badge.setPadding(dp(6), 0, dp(6), 0);
+            badge.setBackground(shape(Color.argb(190, 23, 37, 43), 5));
+            FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, dp(17), Gravity.LEFT | Gravity.BOTTOM);
+            badgeParams.setMargins(dp(6), 0, 0, dp(6));
+            art.addView(badge, badgeParams);
+        }
+        art.setOnClickListener(v -> preview(item));
         displayedCount++;
         emptyResults.setVisibility(View.GONE);
     }
@@ -1817,7 +2074,10 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (showingRecords) showReader();
+        if (showingRecords) {
+            if (recordsFromSettings) showSettings();
+            else showReader();
+        }
         else if (showingReader) showHome();
         else if (showingSettings) showHome();
         else super.onBackPressed();

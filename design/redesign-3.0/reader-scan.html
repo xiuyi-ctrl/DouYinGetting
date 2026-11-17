@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>咻咿提取 · 读取页（扫描中）</title>
+<link rel="stylesheet" href="tokens.css">
+</head>
+<body>
+<div class="screen">
+  <div class="statusbar">
+    <span>9:41</span>
+    <span class="icons">
+      <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 3.6a10 10 0 0 1 14 0"/><path d="M3.6 6.2a6.4 6.4 0 0 1 8.8 0"/><circle cx="8" cy="9.3" r="1" fill="currentColor" stroke="none"/></svg>
+      <svg width="24" height="11" viewBox="0 0 24 11" fill="none"><rect x=".5" y=".5" width="20" height="10" rx="3" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="14" height="7" rx="1.8" fill="currentColor"/><path d="M22.5 4v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".4"/></svg>
+    </span>
+  </div>
+
+  <div class="topbar">
+    <button class="back">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5L7.5 12l7 7"/></svg>
+    </button>
+    <h1>抖音链接读取</h1>
+    <button class="pill-btn">记录</button>
+  </div>
+
+  <main class="scroll">
+    <section class="card input-card" style="margin-top:6px">
+      <div class="label-row">
+        <b>作品链接</b>
+        <span class="dot"><i></i>网页已登录</span>
+      </div>
+      <div class="field">
+        <input value="https://v.douyin.com/v3Xd0Tk4X0c/" readonly>
+        <button class="icon-btn" title="粘贴">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="8" y="3.5" width="8" height="4" rx="1.4"/><path d="M8 5.5H6.5A2 2 0 0 0 4.5 7.5v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-11a2 2 0 0 0-2-2H16"/>
+          </svg>
+        </button>
+        <button class="icon-btn" title="复制">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+            <rect x="8.5" y="8.5" width="11" height="11" rx="2.2"/><path d="M15.5 5.5h-9a2 2 0 0 0-2 2v9"/>
+          </svg>
+        </button>
+      </div>
+      <button class="btn">打开作品</button>
+    </section>
+
+    <section class="card scan-card">
+      <div class="scan-top">
+        <b>正在扫描主评论</b>
+        <button class="ghost-link" style="color:var(--accent);font-size:12px;padding:0">暂停</button>
+      </div>
+      <div class="counts">已扫描 128 条 · 已发现 24 个素材</div>
+      <div class="bar"><i style="width:42%"></i></div>
+      <div class="scan-note">每 2 秒翻一页 · 结果会实时暂存到本机</div>
+    </section>
+
+    <div class="web-toggle">
+      <span>网页操作</span>
+      <span style="color:var(--ink-3)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M5 15l7-7 7 7"/></svg>
+      </span>
+    </div>
+
+    <section class="web-panel">
+      <div class="web-chrome">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span class="addr">www.douyin.com/video/7707515663400689257</span>
+      </div>
+      <div class="web-body" style="height:133px">
+        <div class="row">
+          <div class="skeleton tile-ghost"></div>
+          <div class="lines">
+            <i class="skeleton" style="width:72%"></i>
+            <i class="skeleton" style="width:46%"></i>
+            <i class="skeleton" style="width:58%"></i>
+          </div>
+        </div>
+        <div class="row">
+          <div class="skeleton tile-ghost"></div>
+          <div class="lines">
+            <i class="skeleton" style="width:54%"></i>
+            <i class="skeleton" style="width:78%"></i>
+            <i class="skeleton" style="width:36%"></i>
+          </div>
+        </div>
+        <div class="web-hint">登录与评论区在此完成</div>
+      </div>
+    </section>
+
+    <div class="section-head" style="margin-top:14px">
+      <h2>提取结果</h2>
+      <span>实时更新 · 5 个动图</span>
+    </div>
+
+    <div class="grid">
+      <div class="tile"><img src="../../exports/7707515663400689257/ae2af8230b0b05cc760b.png" alt=""></div>
+      <div class="tile"><img src="../../exports/7707515663400689257/378b16e6eadb12e0cbe2.gif" alt=""><span class="tag">GIF</span></div>
+      <div class="tile"><img src="../../exports/7707515663400689257/f9d54b1db9c0c9a93fa2.jpg" alt=""></div>
+    </div>
+  </main>
+
+  <div class="savebar">
+    <div class="sum"><b>已提取 24 个</b><small>其中 5 个动图</small></div>
+    <button class="btn small">保存全部</button>
+  </div>
+</div>
+
+<script src="probe.js"></script>
+</body>
+</html>

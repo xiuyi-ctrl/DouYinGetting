@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>咻咿提取 · 设置</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+  .topbar .spacer34 { width: 34px; flex: none; }
+  .group { margin-top: 18px; }
+  .group-title {
+    margin: 0 0 8px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .6px;
+    color: var(--ink-3);
+  }
+  .setting-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 15px 16px;
+    font-size: 14px;
+    color: var(--ink);
+  }
+  .setting-row .val {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .setting-row .chev { font-size: 18px; line-height: 1; color: var(--ink-3); }
+  .hr { height: 1px; margin: 0 16px; background: var(--line); }
+  .card-pad { padding: 16px; }
+  .card-pad .scan-head { display: flex; align-items: baseline; justify-content: space-between; }
+  .card-pad b { font-size: 14px; font-weight: 700; }
+  .card-pad .tag { font-size: 11px; color: var(--ink-3); }
+  .card-pad .note { margin: 10px 0 0; font-size: 11px; line-height: 1.7; color: var(--ink-3); }
+  .seg.wide { margin-top: 12px; }
+  .seg.wide button { font-size: 12px; }
+  .about p { margin: 0; font-size: 11px; line-height: 1.8; color: var(--ink-2); }
+  .footnote.static { margin: 24px 0 0; }
+</style>
+</head>
+<body>
+<div class="screen">
+  <div class="statusbar">
+    <span>9:41</span>
+    <span class="icons">
+      <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 3.6a10 10 0 0 1 14 0"/><path d="M3.6 6.2a6.4 6.4 0 0 1 8.8 0"/><circle cx="8" cy="9.3" r="1" fill="currentColor" stroke="none"/></svg>
+      <svg width="24" height="11" viewBox="0 0 24 11" fill="none"><rect x=".5" y=".5" width="20" height="10" rx="3" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="14" height="7" rx="1.8" fill="currentColor"/><path d="M22.5 4v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".4"/></svg>
+    </span>
+  </div>
+
+  <div class="topbar">
+    <button class="back">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5L7.5 12l7 7"/></svg>
+    </button>
+    <h1>设置</h1>
+    <span class="spacer34"></span>
+  </div>
+
+  <main class="scroll" style="padding-top:2px">
+    <section class="group">
+      <p class="group-title">扫描</p>
+      <div class="card card-pad">
+        <div class="scan-head">
+          <b>翻页间隔</b>
+          <span class="tag">抖音主评论</span>
+        </div>
+        <div class="seg wide">
+          <button class="on">稳定 · 2 秒</button>
+          <button>快速 · 0.35 秒</button>
+        </div>
+        <p class="note">快速模式扫描更快，但更容易触发评论接口暂停。选择会立即保存。</p>
+      </div>
+    </section>
+
+    <section class="group">
+      <p class="group-title">本机数据</p>
+      <div class="card" style="padding:0">
+        <div class="setting-row">
+          <span>扫描记录</span>
+          <span class="val">12 条</span>
+          <span class="chev">›</span>
+        </div>
+        <div class="hr"></div>
+        <div class="setting-row">
+          <span>暂存占用</span>
+          <span class="val">18.4 MB</span>
+        </div>
+        <div class="hr"></div>
+        <div class="setting-row">
+          <span>保存位置</span>
+          <span class="val">下载 / DouYinGetting</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="group">
+      <p class="group-title">说明</p>
+      <div class="card card-pad about">
+        <p>登录在抖音 / 小红书的网页内完成，App 不读取手机上的账号；未登录时只能看到公开的少量评论。</p>
+        <p style="margin-top:8px">素材先暂存在 App 内，点「保存」后才写入下载目录。</p>
+      </div>
+    </section>
+
+    <section class="group">
+      <p class="group-title">关于</p>
+      <div class="card" style="padding:0">
+        <div class="setting-row">
+          <span>版本</span>
+          <span class="val">2.14</span>
+        </div>
+      </div>
+    </section>
+
+    <p class="footnote static">咻咿提取 · 仅处理你在网页中已登录可见的评论</p>
+  </main>
+</div>
+
+<script src="probe.js"></script>
+</body>
+</html>

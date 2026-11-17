@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>咻咿提取 · 重构 3.0 设计稿总览</title>
+<style>
+  body {
+    margin: 0;
+    padding: 28px;
+    width: max-content;
+    background: #DFE2DE;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: #17252B;
+  }
+  .row { display: flex; gap: 22px; align-items: flex-start; }
+  figure { margin: 0; }
+  iframe {
+    width: 390px;
+    height: 844px;
+    border: 0;
+    border-radius: 22px;
+    background: #F6F6F4;
+    box-shadow: 0 12px 32px rgba(23, 37, 43, .18);
+    display: block;
+  }
+  figcaption { margin-top: 12px; font-size: 13px; color: #5F6E6E; text-align: center; }
+  figcaption b { display: block; color: #17252B; font-size: 14px; margin-bottom: 3px; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <figure>
+      <iframe src="home.html"></iframe>
+      <figcaption><b>首页</b>原布局保留 · 新插画与图标</figcaption>
+    </figure>
+    <figure>
+      <iframe src="reader-scan.html"></iframe>
+      <figcaption><b>读取页 · 扫描中</b>链接输入 · 进度 · 网页操作</figcaption>
+    </figure>
+    <figure>
+      <iframe src="reader-results.html"></iframe>
+      <figcaption><b>读取页 · 结果</b>筛选 · 三列网格 · 保存</figcaption>
+    </figure>
+    <figure>
+      <iframe src="records.html"></iframe>
+      <figcaption><b>扫描记录</b>本机暂存 · 查看 / 复制 / 删除</figcaption>
+    </figure>
+  </div>
+</body>
+</html>
