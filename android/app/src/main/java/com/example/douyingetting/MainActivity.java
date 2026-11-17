@@ -42,7 +42,9 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.PopupWindow;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.MediaController;
@@ -99,6 +101,7 @@ public class MainActivity extends Activity {
     private ProgressBar scanProgress;
     private LinearLayout results;
     private Button scanButton;
+    private PopupWindow noticePopup;
     private LinearLayout readerRoot;
     private LinearLayout browserPanel;
     private TextView webToggle;
@@ -117,10 +120,13 @@ public class MainActivity extends Activity {
     private int displayedCount;
     private boolean showingReader;
     private boolean showingRecords;
+    private boolean showingRecordPlatforms;
     private boolean showingSettings;
     private boolean recordsFromSettings;
     private int douyinPageDelayMs = 2000;
+    private boolean douyinReadReplies;
     private volatile String commentRequest;
+    private volatile String replyRequest;
     private volatile String lastCommentPath;
     private PermissionRequest pendingCameraRequest;
     private boolean scanning;
@@ -182,6 +188,12 @@ public class MainActivity extends Activity {
         int scanned;
         int mainScanned;
         int replyScanned;
+        int emptyReplyLists;
+        boolean includeReplies;
+        boolean mainDone;
+        final ArrayList<String> replyParents = new ArrayList<>();
+        int replyIndex;
+        long replyCursor;
         boolean complete;
 
         ScanRecord(String id, String link, long createdAt, File folder) {
@@ -195,6 +207,7 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         douyinPageDelayMs = getPreferences(MODE_PRIVATE).getInt("douyin_page_delay_ms", 2000);
+        douyinReadReplies = getPreferences(MODE_PRIVATE).getBoolean("douyin_read_replies", false);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
@@ -254,6 +267,7 @@ public class MainActivity extends Activity {
         }
         showingReader = false;
         showingRecords = false;
+        showingRecordPlatforms = false;
         showingSettings = false;
         for (Animatable animation : animations) animation.stop();
         LinearLayout root = new LinearLayout(this);
@@ -348,6 +362,7 @@ public class MainActivity extends Activity {
         showingSettings = true;
         showingReader = false;
         showingRecords = false;
+        showingRecordPlatforms = false;
         for (Animatable animation : animations) animation.stop();
 
         LinearLayout root = new LinearLayout(this);
@@ -387,7 +402,7 @@ public class MainActivity extends Activity {
         scanHead.setGravity(Gravity.CENTER_VERTICAL);
         scanCard.addView(scanHead);
         scanHead.addView(label("翻页间隔", 14, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
-        scanHead.addView(label("抖音主评论", 11, INK3, false));
+        scanHead.addView(label("抖音评论", 11, INK3, false));
         LinearLayout speedSwitch = new LinearLayout(this);
         speedSwitch.setOrientation(LinearLayout.HORIZONTAL);
         speedSwitch.setPadding(dp(3), dp(3), dp(3), dp(3));
@@ -402,6 +417,20 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams speedNoteParams = new LinearLayout.LayoutParams(-1, -2);
         speedNoteParams.topMargin = dp(10);
         scanCard.addView(speedNote, speedNoteParams);
+        LinearLayout replyRow = new LinearLayout(this);
+        replyRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams replyParams = new LinearLayout.LayoutParams(-1, -2);
+        replyParams.topMargin = dp(16);
+        scanCard.addView(replyRow, replyParams);
+        replyRow.addView(label("读取评论回复", 14, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        Switch replySwitch = new Switch(this);
+        replySwitch.setChecked(douyinReadReplies);
+        replySwitch.setOnCheckedChangeListener((button, checked) -> {
+            douyinReadReplies = checked;
+            getPreferences(MODE_PRIVATE).edit().putBoolean("douyin_read_replies", checked).apply();
+        });
+        replyRow.addView(replySwitch);
+        scanCard.addView(label("开启后会逐条读取抖音主评论下的回复，扫描时间会增加。", 11, INK3, false));
 
         page.addView(groupTitle("本机数据", 18));
         LinearLayout dataCard = new LinearLayout(this);
@@ -410,7 +439,7 @@ public class MainActivity extends Activity {
         page.addView(dataCard);
         dataCard.addView(settingRow("扫描记录", records.size() + " 条", true, v -> {
             recordsFromSettings = true;
-            showRecords();
+            showRecordPlatforms();
         }));
         dataCard.addView(rowDivider());
         dataCard.addView(settingRow("暂存占用", storageSize(), false, null));
@@ -585,10 +614,64 @@ public class MainActivity extends Activity {
         readerHeading.setText(xhsMode ? "小红书链接读取" : "抖音链接读取");
         inputHeading.setText(xhsMode ? "笔记链接" : "作品链接");
         input.setHint(xhsMode ? "粘贴小红书笔记链接或分享文案" : "粘贴抖音作品链接或分享文案");
-        browserHint.setText(xhsMode ? "在网页中登录并打开笔记评论，扫描时会读取评论素材" : "在网页中登录并打开评论区，然后扫描主评论");
+        browserHint.setText(xhsMode ? "在网页中登录并打开笔记评论，扫描时会读取评论素材" : douyinReadReplies
+                ? "在网页中登录并打开评论区，然后扫描主评论与回复" : "在网页中登录并打开评论区，然后扫描主评论");
         codeLogin.setVisibility(xhsMode ? View.GONE : View.VISIBLE);
-        scanButton.setText(xhsMode ? "扫描评论" : "扫描主评论");
+        scanButton.setText(xhsMode || douyinReadReplies ? "扫描评论" : "扫描主评论");
         status.setText(xhsMode ? "粘贴笔记链接，打开网页后进入评论区" : "粘贴作品链接，打开网页后进入评论区");
+    }
+
+    private void showRecordPlatforms() {
+        showingReader = false;
+        showingRecords = false;
+        showingSettings = false;
+        showingRecordPlatforms = true;
+        int douyinCount = 0;
+        int xhsCount = 0;
+        for (ScanRecord record : records) {
+            if (isXhsLink(record.link)) xhsCount++;
+            else douyinCount++;
+        }
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+        root.setFitsSystemWindows(true);
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
+        root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
+        TextView back = label("‹", 22, INK, false);
+        back.setGravity(Gravity.CENTER);
+        back.setBackground(card(10));
+        back.setOnClickListener(v -> showSettings());
+        toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        TextView heading = label("选择平台", 16, INK, true);
+        heading.setGravity(Gravity.CENTER);
+        toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        toolbar.addView(new View(this), new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(20), dp(18), dp(20), 0);
+        root.addView(page);
+        page.addView(label("选择要查看的扫描记录", 13, INK2, false));
+        LinearLayout choices = new LinearLayout(this);
+        choices.setOrientation(LinearLayout.VERTICAL);
+        choices.setBackground(card(16));
+        LinearLayout.LayoutParams choicesParams = new LinearLayout.LayoutParams(-1, -2);
+        choicesParams.topMargin = dp(16);
+        page.addView(choices, choicesParams);
+        choices.addView(settingRow("抖音扫描记录", douyinCount + " 条", true, v -> {
+            xhsMode = false;
+            showRecords();
+        }));
+        choices.addView(rowDivider());
+        choices.addView(settingRow("小红书扫描记录", xhsCount + " 条", true, v -> {
+            xhsMode = true;
+            showRecords();
+        }));
+        setContentView(root);
     }
 
     private void showRecords() {
@@ -599,6 +682,7 @@ public class MainActivity extends Activity {
         }
         showingReader = false;
         showingRecords = true;
+        showingRecordPlatforms = false;
         for (Animatable animation : animations) animation.stop();
 
         LinearLayout root = new LinearLayout(this);
@@ -613,7 +697,10 @@ public class MainActivity extends Activity {
         TextView back = label("‹", 22, INK, false);
         back.setGravity(Gravity.CENTER);
         back.setBackground(card(10));
-        back.setOnClickListener(v -> showReader());
+        back.setOnClickListener(v -> {
+            if (recordsFromSettings) showRecordPlatforms();
+            else showReader();
+        });
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
         TextView heading = label("扫描记录", 16, INK, true);
         heading.setGravity(Gravity.CENTER);
@@ -687,7 +774,7 @@ public class MainActivity extends Activity {
 
             int count;
             synchronized (record) { count = record.items.size(); }
-            String progress = xhsRecord
+            String progress = xhsRecord || record.includeReplies
                     ? record.scanned + " 条评论（主评论 " + record.mainScanned + " · 回复 " + record.replyScanned + "）"
                     : record.scanned + " 条主评论";
             if (xhsRecord && record.scanned > 0 && record.mainScanned + record.replyScanned == 0)
@@ -740,7 +827,7 @@ public class MainActivity extends Activity {
         activeLink = record.link.startsWith("http") ? record.link : null;
         input.setText(activeLink == null ? "" : activeLink);
         cursor = record.cursor;
-        scanned = record.scanned;
+        scanned = xhsMode ? record.scanned : record.mainScanned > 0 ? record.mainScanned : record.scanned;
         media.clear();
         synchronized (record) { media.addAll(record.items); }
         selectedFilter = "all";
@@ -785,6 +872,7 @@ public class MainActivity extends Activity {
     private void showReader() {
         showingReader = true;
         showingRecords = false;
+        showingRecordPlatforms = false;
         setContentView(readerRoot);
         updateScanCard();
         for (Animatable animation : animations) animation.start();
@@ -802,7 +890,10 @@ public class MainActivity extends Activity {
         TextView back = label("‹", 22, INK, false);
         back.setGravity(Gravity.CENTER);
         back.setBackground(card(10));
-        back.setOnClickListener(v -> showHome());
+        back.setOnClickListener(v -> {
+            if (viewingSavedRecord) showRecords();
+            else showHome();
+        });
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
         readerHeading = label("抖音链接读取", 16, INK, true);
         readerHeading.setGravity(Gravity.CENTER);
@@ -907,13 +998,16 @@ public class MainActivity extends Activity {
         open.setMinHeight(0);
         open.setStateListAnimator(null);
         open.setOnClickListener(v -> openLink());
-        LinearLayout.LayoutParams openParams = new LinearLayout.LayoutParams(-1, dp(46));
-        openParams.topMargin = dp(12);
-        inputCard.addView(open, openParams);
+        LinearLayout actionRow = new LinearLayout(this);
+        actionRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-1, dp(46));
+        actionParams.topMargin = dp(12);
+        inputCard.addView(actionRow, actionParams);
+        actionRow.addView(open, new LinearLayout.LayoutParams(0, -1, 1));
 
         LinearLayout scanCard = new LinearLayout(this);
         scanCard.setOrientation(LinearLayout.HORIZONTAL);
-        scanCard.setGravity(Gravity.TOP);
+        scanCard.setGravity(Gravity.CENTER_VERTICAL);
         scanCard.setBackground(card(16));
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = dp(12);
@@ -921,11 +1015,11 @@ public class MainActivity extends Activity {
         View scanBar = new View(this);
         scanBar.setBackground(shape(ACCENT, 2));
         LinearLayout.LayoutParams scanBarParams = new LinearLayout.LayoutParams(dp(3), dp(40));
-        scanBarParams.topMargin = dp(16);
         scanBarParams.leftMargin = dp(8);
         scanCard.addView(scanBar, scanBarParams);
         LinearLayout scanBody = new LinearLayout(this);
         scanBody.setOrientation(LinearLayout.VERTICAL);
+        scanBody.setGravity(Gravity.CENTER_VERTICAL);
         scanBody.setPadding(dp(14), dp(14), dp(14), dp(14));
         scanCard.addView(scanBody, new LinearLayout.LayoutParams(0, -2, 1));
         status = label("粘贴作品链接，打开网页后进入评论区", 14, INK, true);
@@ -977,7 +1071,7 @@ public class MainActivity extends Activity {
         codeLogin.setStateListAnimator(null);
         codeLogin.setOnClickListener(v -> browser.evaluateJavascript(
                 "(() => {const tab=[...document.querySelectorAll('button,div,span')].find(x=>x.children.length===0&&x.textContent.trim()==='验证码登录'&&x.getBoundingClientRect().width>0);if(tab){tab.click();return true}return false})()",
-                found -> status.setText("true".equals(found) ? "请在抖音网页中输入手机号和验证码" : "请先在网页中点登录，再选择验证码登录")));
+                found -> showTopNotice("true".equals(found) ? "请在抖音网页中输入手机号和验证码" : "请先在网页中点登录，再选择验证码登录")));
         LinearLayout.LayoutParams loginParams = new LinearLayout.LayoutParams(-1, dp(44));
         loginParams.topMargin = dp(8);
         browserPanel.addView(codeLogin, loginParams);
@@ -1008,7 +1102,7 @@ public class MainActivity extends Activity {
             } else {
                 String page = browser.getUrl();
                 if (page == null || !page.startsWith("https://www.douyin.com/")) {
-                    status.setText("请先打开抖音作品页面");
+                    showTopNotice("请先打开抖音作品页面");
                     return;
                 }
                 if (currentRecord == null || currentRecord.complete) {
@@ -1016,6 +1110,7 @@ public class MainActivity extends Activity {
                     ScanRecord record = new ScanRecord(id, activeLink == null ? page : activeLink,
                             System.currentTimeMillis(), new File(recordsFolder(), id));
                     currentRecord = record;
+                    record.includeReplies = douyinReadReplies;
                     records.add(0, record);
                     cursor = 0;
                     scanned = 0;
@@ -1037,9 +1132,9 @@ public class MainActivity extends Activity {
                 startPage();
             }
         });
-        LinearLayout.LayoutParams scanButtonParams = new LinearLayout.LayoutParams(-1, dp(44));
-        scanButtonParams.topMargin = dp(10);
-        content.addView(scanButton, content.indexOfChild(webToggle), scanButtonParams);
+        LinearLayout.LayoutParams scanButtonParams = new LinearLayout.LayoutParams(0, -1, 1);
+        scanButtonParams.leftMargin = dp(8);
+        actionRow.addView(scanButton, scanButtonParams);
 
         resultAnchor = label("提取结果", 20, INK, true);
         LinearLayout.LayoutParams resultHeadParams = new LinearLayout.LayoutParams(-1, -2);
@@ -1120,6 +1215,8 @@ public class MainActivity extends Activity {
         if (scanning && currentRecord != null) {
             String counts = xhsMode
                     ? "主评论 " + currentRecord.mainScanned + " · 回复 " + currentRecord.replyScanned + " · 合计 " + currentRecord.scanned
+                    : currentRecord.includeReplies
+                    ? "主评论 " + currentRecord.mainScanned + " · 回复 " + currentRecord.replyScanned + " · 合计 " + currentRecord.scanned
                     : "主评论 " + currentRecord.scanned;
             scanCountLine.setText(counts);
             scanCountLine.setVisibility(View.VISIBLE);
@@ -1186,7 +1283,8 @@ public class MainActivity extends Activity {
                 if (path != null && path.contains("comment")) {
                     lastCommentPath = path;
                     if (path.contains("comment/list") && host != null && (host.equals("douyin.com") || host.endsWith(".douyin.com"))) {
-                        commentRequest = uri.toString();
+                        if (path.contains("comment/list/reply")) replyRequest = uri.toString();
+                        else commentRequest = uri.toString();
                     }
                 }
                 return null;
@@ -1232,6 +1330,13 @@ public class MainActivity extends Activity {
                 record.scanned = data.optInt("scanned");
                 record.mainScanned = data.optInt("mainScanned");
                 record.replyScanned = data.optInt("replyScanned");
+                record.emptyReplyLists = data.optInt("emptyReplyLists");
+                record.includeReplies = data.optBoolean("includeReplies");
+                record.mainDone = data.optBoolean("mainDone");
+                record.replyIndex = data.optInt("replyIndex");
+                record.replyCursor = data.optLong("replyCursor");
+                JSONArray parents = data.optJSONArray("replyParents");
+                if (parents != null) for (int i = 0; i < parents.length(); i++) record.replyParents.add(parents.optString(i));
                 record.cursor = data.optLong("cursor");
                 record.complete = data.optBoolean("complete");
                 JSONArray saved = data.optJSONArray("media");
@@ -1299,6 +1404,12 @@ public class MainActivity extends Activity {
             data.put("scanned", record.scanned);
             data.put("mainScanned", record.mainScanned);
             data.put("replyScanned", record.replyScanned);
+            data.put("emptyReplyLists", record.emptyReplyLists);
+            data.put("includeReplies", record.includeReplies);
+            data.put("mainDone", record.mainDone);
+            data.put("replyIndex", record.replyIndex);
+            data.put("replyCursor", record.replyCursor);
+            data.put("replyParents", new JSONArray(record.replyParents));
             data.put("cursor", record.cursor);
             data.put("complete", record.complete);
             JSONArray saved = new JSONArray();
@@ -1384,7 +1495,7 @@ public class MainActivity extends Activity {
     private void openLink() {
         String link = extractLink(input.getText().toString(), xhsMode);
         if (link == null) {
-            status.setText(xhsMode ? "没有找到小红书笔记链接" : "没有找到抖音链接");
+            showTopNotice(xhsMode ? "没有找到小红书笔记链接" : "没有找到抖音链接");
             return;
         }
         activeLink = link;
@@ -1393,6 +1504,7 @@ public class MainActivity extends Activity {
         currentRecord = null;
         viewingSavedRecord = false;
         commentRequest = null;
+        replyRequest = null;
         lastCommentPath = null;
         cursor = 0;
         scanned = 0;
@@ -1401,7 +1513,7 @@ public class MainActivity extends Activity {
         pageRetries = 0;
         requestToken++;
         scanning = false;
-        scanButton.setText(xhsMode ? "扫描评论" : "扫描主评论");
+        scanButton.setText(xhsMode || douyinReadReplies ? "扫描评论" : "扫描主评论");
         media.clear();
         for (Animatable animation : animations) animation.stop();
         animations.clear();
@@ -1450,11 +1562,11 @@ public class MainActivity extends Activity {
         String page = browser.getUrl();
         if (page == null || !page.startsWith("https://www.xiaohongshu.com/")
                 || !page.matches(".*(?:/explore/|/discovery/item/)[a-fA-F0-9]{24}.*")) {
-            status.setText("请先在网页中打开小红书笔记");
+            showTopNotice("请先在网页中打开小红书笔记");
             return;
         }
         if (xhsCaptureScript == null) {
-            status.setText("评论读取组件未加载，请重启 App 后重试");
+            showTopNotice("评论读取组件未加载，请重启 App 后重试");
             return;
         }
         if (currentRecord == null || currentRecord.complete) {
@@ -1585,12 +1697,12 @@ public class MainActivity extends Activity {
     private void startPage() {
         String page = browser.getUrl();
         if (page == null || !page.startsWith("https://www.douyin.com/")) {
-            status.setText("请先打开抖音作品页面");
+            showTopNotice("请先打开抖音作品页面");
             scanning = false;
             return;
         }
         if (commentRequest == null) {
-            browser.evaluateJavascript("(() => {let path='';const entries=performance.getEntriesByType('resource');for(let i=entries.length-1;i>=0;i--){const u=new URL(entries[i].name);if(u.pathname.includes('comment')){path=u.pathname;if(u.pathname.includes('comment/list')&&(u.hostname==='douyin.com'||u.hostname.endsWith('.douyin.com')))return JSON.stringify({url:u.href,path})}}return JSON.stringify({url:null,path})})()", value -> {
+            browser.evaluateJavascript("(() => {let path='';const entries=performance.getEntriesByType('resource');for(let i=entries.length-1;i>=0;i--){const u=new URL(entries[i].name);if(u.pathname.includes('comment')){path=u.pathname;if(u.pathname.includes('comment/list')&&!u.pathname.includes('comment/list/reply')&&(u.hostname==='douyin.com'||u.hostname.endsWith('.douyin.com')))return JSON.stringify({url:u.href,path})}}return JSON.stringify({url:null,path})})()", value -> {
                 if (!scanning) return;
                 if (value != null && !"null".equals(value)) {
                     try {
@@ -1604,7 +1716,7 @@ public class MainActivity extends Activity {
                     startPage();
                 } else if (++requestWaits >= 10) {
                     scanning = false;
-                    scanButton.setText("扫描主评论");
+                    scanButton.setText(douyinReadReplies ? "扫描评论" : "扫描主评论");
                     status.setText("未找到评论列表请求。最近相关路径：" + (lastCommentPath == null || lastCommentPath.isEmpty() ? "无" : lastCommentPath) + "。请截图发给开发者");
                 } else {
                     status.setText("请打开评论区，正在等待评论列表请求…");
@@ -1613,20 +1725,32 @@ public class MainActivity extends Activity {
             });
             return;
         }
+        ScanRecord record = currentRecord;
+        boolean reply = record != null && record.mainDone && record.includeReplies;
+        if (reply && record.replyIndex >= record.replyParents.size()) {
+            finishDouyinScan(record);
+            return;
+        }
         int token = ++requestToken;
         String key = "__dyScanResult" + token;
         String script = "(()=>{const k=" + JSONObject.quote(key) + ";window[k]=null;(async()=>{try{" +
-                "const u=new URL(" + JSONObject.quote(commentRequest) + ");" +
-                "u.searchParams.set('cursor'," + JSONObject.quote(Long.toString(cursor)) + ");" +
+                "const u=new URL(" + JSONObject.quote(reply && replyRequest != null ? replyRequest : commentRequest) + ");" +
+                (reply ? "u.pathname=u.pathname.replace(/comment\\/list\\/?$/,'comment/list/reply/');" +
+                        "const id=u.searchParams.get('item_id')||u.searchParams.get('aweme_id');if(!id)throw Error('缺少作品 ID');" +
+                        "u.searchParams.delete('aweme_id');u.searchParams.set('item_id',id);" +
+                        "u.searchParams.set('comment_id'," + JSONObject.quote(record.replyParents.get(record.replyIndex)) + ");" +
+                        "u.searchParams.set('count','20');" : "") +
+                "u.searchParams.set('cursor'," + JSONObject.quote(Long.toString(reply ? record.replyCursor : cursor)) + ");" +
                 "const r=await fetch(u.toString(),{credentials:'include'});" +
                 "let data=null;try{data=await r.json()}catch(e){}" +
                 "window[k]=JSON.stringify({http:r.status,data})" +
                 "}catch(e){window[k]=JSON.stringify({error:String(e)})}})()})()";
-        status.setText("已扫描 " + scanned + " 条主评论，正在等待下一页…");
-        browser.evaluateJavascript(script, ignored -> readPageResult(key, token, 0));
+        status.setText(reply ? "已扫描 " + record.mainScanned + " 条主评论，正在读取回复 " + (record.replyIndex + 1) + "/" + record.replyParents.size()
+                : "已扫描 " + scanned + " 条主评论，正在等待下一页…");
+        browser.evaluateJavascript(script, ignored -> readPageResult(key, token, 0, reply));
     }
 
-    private void readPageResult(String key, int token, int polls) {
+    private void readPageResult(String key, int token, int polls, boolean reply) {
         if (!scanning || token != requestToken) return;
         browser.evaluateJavascript("window." + key, value -> {
             if (!scanning || token != requestToken) return;
@@ -1634,7 +1758,7 @@ public class MainActivity extends Activity {
                 if (polls >= 100) {
                     retryPage("等待评论接口响应超时");
                 } else {
-                    browser.postDelayed(() -> readPageResult(key, token, polls + 1), 200);
+                    browser.postDelayed(() -> readPageResult(key, token, polls + 1, reply), 200);
                 }
                 return;
             }
@@ -1651,16 +1775,31 @@ public class MainActivity extends Activity {
                     retryPage("评论接口 HTTP " + http + "，状态 " + code);
                     return;
                 }
-                JSONArray comments = pageData.optJSONArray("comments");
-                if (comments == null) throw new Exception("没有评论数据");
-                long next = pageData.optLong("cursor", cursor);
+                JSONArray pageComments = pageData.optJSONArray("comments");
+                if (pageComments == null && !reply) throw new Exception("没有评论数据");
+                JSONArray comments = pageComments == null ? new JSONArray() : pageComments;
+                long currentCursor = reply ? currentRecord.replyCursor : cursor;
+                long next = pageData.optLong("cursor", currentCursor);
                 boolean more = pageData.optInt("has_more", 0) != 0;
-                if (more && next == cursor) throw new Exception("分页游标没有前进");
+                if (more && next == currentCursor) {
+                    if (reply) {
+                        retryPage("回复分页游标没有前进");
+                        return;
+                    }
+                    throw new Exception("分页游标没有前进");
+                }
                 pageRetries = 0;
+                if (reply) {
+                    ScanRecord replyRecord = currentRecord;
+                    boolean emptyList = pageComments == null;
+                    worker.execute(() -> processReplyPage(replyRecord, comments, more, next, emptyList));
+                    return;
+                }
                 cursor = next;
                 scanned += comments.length();
                 status.setText("已扫描 " + scanned + " 条主评论，正在保存媒体…");
                 ScanRecord record = currentRecord;
+                record.mainScanned = scanned;
                 int scannedNow = scanned;
                 worker.execute(() -> processPage(record, comments, more, next, scannedNow));
             } catch (Exception error) {
@@ -1717,45 +1856,94 @@ public class MainActivity extends Activity {
         for (int i = 0; i < comments.length(); i++) {
             JSONObject comment = comments.optJSONObject(i);
             if (comment == null) continue;
-            String commentId = comment.optString("cid");
-            JSONArray images = comment.optJSONArray("image_list");
-            if (images != null) for (int j = 0; j < images.length(); j++) {
-                JSONObject image = images.optJSONObject(j);
-                if (image != null) download(record, url(image.optJSONObject("origin_url")), commentId, "图片");
-            }
-            JSONObject sticker = comment.optJSONObject("sticker");
-            if (sticker != null) {
-                String source = url(sticker.optJSONObject("animate_url"));
-                if (source == null) source = url(sticker.optJSONObject("static_url"));
-                download(record, source, commentId, "表情");
+            downloadCommentMedia(record, comment, false);
+            if (record.includeReplies && comment.optInt("reply_comment_total") > 0) {
+                String id = comment.optString("cid");
+                if (!id.isEmpty()) record.replyParents.add(id);
             }
         }
-        record.scanned = scannedNow;
+        record.mainScanned = scannedNow;
+        record.scanned = record.mainScanned + record.replyScanned;
         record.cursor = next;
-        record.complete = !more;
+        record.mainDone = !more;
+        record.complete = !more && (!record.includeReplies || record.replyParents.isEmpty());
         persistRecord(record);
         runOnUiThread(() -> {
             if (currentRecord != record) return;
-            status.setText(more ? "扫描中 · 已发现 " + media.size() + " 个素材"
-                    : "已扫描 " + record.scanned + " 条主评论，找到 " + media.size() + " 个不同媒体（扫描完成）");
-            if (scanning && more) {
+            status.setText(record.mainDone && record.includeReplies && !record.complete ? "主评论已完成，正在读取回复…"
+                    : "扫描中 · 已发现 " + media.size() + " 个素材");
+            if (scanning && !record.complete) {
                 browser.postDelayed(this::startPage, douyinPageDelayMs);
             } else {
                 scanning = false;
-                scanButton.setText(more ? "继续扫描" : "扫描完成");
+                scanButton.setText(record.complete ? "扫描完成" : "继续扫描");
                 updateScanCard();
-                if (!more) {
-                    browserPanel.setVisibility(View.GONE);
-                    webToggle.setText("网页操作  ▾");
-                    readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
-                    if (showingReader) new AlertDialog.Builder(this)
-                            .setTitle("主评论扫描完成")
-                            .setMessage("已扫描 " + record.scanned + " 条主评论，提取 " + media.size() + " 个不同素材。结果已暂存，可预览或保存。")
-                            .setPositiveButton("查看结果", (dialog, which) -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()))
-                            .show();
-                }
+                if (record.complete) finishDouyinScan(record);
             }
         });
+    }
+
+    private void processReplyPage(ScanRecord record, JSONArray comments, boolean more, long next, boolean emptyList) {
+        if (record == null) return;
+        if (emptyList && !more) record.emptyReplyLists++;
+        for (int i = 0; i < comments.length(); i++) {
+            JSONObject comment = comments.optJSONObject(i);
+            if (comment != null) downloadCommentMedia(record, comment, true);
+        }
+        record.replyScanned += comments.length();
+        record.scanned = record.mainScanned + record.replyScanned;
+        if (more) record.replyCursor = next;
+        else {
+            record.replyIndex++;
+            record.replyCursor = 0;
+        }
+        record.complete = record.replyIndex >= record.replyParents.size();
+        persistRecord(record);
+        runOnUiThread(() -> {
+            if (currentRecord != record) return;
+            updateScanCard();
+            if (scanning && !record.complete) browser.postDelayed(this::startPage, douyinPageDelayMs);
+            else {
+                scanning = false;
+                if (record.complete) finishDouyinScan(record);
+                else scanButton.setText("继续扫描");
+            }
+        });
+    }
+
+    private void downloadCommentMedia(ScanRecord record, JSONObject comment, boolean reply) {
+        String id = comment.optString("cid");
+        JSONArray images = comment.optJSONArray("image_list");
+        if (images != null) for (int i = 0; i < images.length(); i++) {
+            JSONObject image = images.optJSONObject(i);
+            if (image != null) download(record, url(image.optJSONObject("origin_url")), id, reply ? "回复图片" : "图片");
+        }
+        JSONObject sticker = comment.optJSONObject("sticker");
+        if (sticker != null) {
+            String source = url(sticker.optJSONObject("animate_url"));
+            if (source == null) source = url(sticker.optJSONObject("static_url"));
+            download(record, source, id, reply ? "回复表情" : "表情");
+        }
+    }
+
+    private void finishDouyinScan(ScanRecord record) {
+        if (currentRecord != record || !record.complete) return;
+        scanning = false;
+        scanButton.setText("扫描完成");
+        updateScanCard();
+        status.setText("已扫描 " + record.scanned + (record.includeReplies ? " 条评论" : " 条主评论")
+                + "，找到 " + media.size() + " 个不同媒体（扫描完成）"
+                + (record.emptyReplyLists > 0 ? "；" + record.emptyReplyLists + " 组回复未返回数据" : ""));
+        browserPanel.setVisibility(View.GONE);
+        webToggle.setText("网页操作  ▾");
+        readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
+        if (showingReader) new AlertDialog.Builder(this)
+                .setTitle(record.includeReplies ? "评论扫描完成" : "主评论扫描完成")
+                .setMessage((record.includeReplies ? "主评论 " + record.mainScanned + " 条，回复 " + record.replyScanned + " 条"
+                        : "主评论 " + record.mainScanned + " 条") + "，提取 " + media.size() + " 个不同素材。结果已暂存。"
+                        + (record.emptyReplyLists > 0 ? "\n" + record.emptyReplyLists + " 组回复未返回数据，未计入扫描数。" : ""))
+                .setPositiveButton("查看结果", (dialog, which) -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()))
+                .show();
     }
 
     private void download(ScanRecord record, String source, String commentId, String kind) {
@@ -1954,6 +2142,12 @@ public class MainActivity extends Activity {
             badgeParams.setMargins(dp(6), 0, 0, dp(6));
             art.addView(badge, badgeParams);
         }
+        if (item.kind.startsWith("回复")) {
+            TextView replyBadge = label("回复", 9, Color.WHITE, true);
+            replyBadge.setGravity(Gravity.CENTER);
+            replyBadge.setBackground(shape(ACCENT, 5));
+            art.addView(replyBadge, new FrameLayout.LayoutParams(dp(32), dp(18), Gravity.RIGHT | Gravity.TOP));
+        }
         art.setOnClickListener(v -> preview(item));
         displayedCount++;
         emptyResults.setVisibility(View.GONE);
@@ -2021,6 +2215,25 @@ public class MainActivity extends Activity {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
+    private void showTopNotice(String message) {
+        if (noticePopup != null) noticePopup.dismiss();
+        TextView notice = label(message, 13, Color.WHITE, true);
+        notice.setGravity(Gravity.CENTER);
+        notice.setMaxWidth(dp(320));
+        notice.setPadding(dp(16), dp(11), dp(16), dp(11));
+        notice.setBackground(shape(DARK, 12));
+        PopupWindow popup = new PopupWindow(notice, -2, -2);
+        popup.setElevation(dp(8));
+        noticePopup = popup;
+        popup.showAtLocation(readerRoot, Gravity.TOP | Gravity.CENTER_HORIZONTAL, 0, dp(64));
+        readerRoot.postDelayed(() -> {
+            if (noticePopup == popup) {
+                popup.dismiss();
+                noticePopup = null;
+            }
+        }, 2000);
+    }
+
     private void saveToDownloads(Media item) throws Exception {
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, item.file.getName());
@@ -2046,6 +2259,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         scanning = false;
+        if (noticePopup != null) noticePopup.dismiss();
         for (Animatable animation : animations) animation.stop();
         worker.shutdownNow();
         browser.destroy();
@@ -2064,10 +2278,14 @@ public class MainActivity extends Activity {
 
     @Override public void onBackPressed() {
         if (showingRecords) {
-            if (recordsFromSettings) showSettings();
+            if (recordsFromSettings) showRecordPlatforms();
             else showReader();
         }
-        else if (showingReader) showHome();
+        else if (showingRecordPlatforms) showSettings();
+        else if (showingReader) {
+            if (viewingSavedRecord) showRecords();
+            else showHome();
+        }
         else if (showingSettings) showHome();
         else super.onBackPressed();
     }
