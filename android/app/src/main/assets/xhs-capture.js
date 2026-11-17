@@ -3,42 +3,85 @@
   const packets = [];
   let seeded = false;
   const domSeen = new Set();
-  const matches = url => String(url || '').includes('/api/sns/web/v2/comment/page');
+  const expandedReplies = new WeakSet();
+  const matches = url => /\/api\/sns\/web\/v2\/comment\/(?:sub\/)?page/.test(String(url || ''));
+  const mediaUrl = value => {
+    if (!value || typeof value !== 'object') return '';
+    const stream = value.stream || value.live_photo?.media?.stream || value.livePhoto?.media?.stream;
+    for (const codec of ['h264', 'h265']) {
+      const item = stream?.[codec]?.[0];
+      if (item?.master_url || item?.masterUrl) {
+        const url = item.master_url || item.masterUrl;
+        return url.startsWith('//') ? 'https:' + url : url;
+      }
+    }
+    const url = value.video_url || value.videoUrl || '';
+    return url.startsWith('//') ? 'https:' + url : url;
+  };
+  const normalize = (comment, reply) => {
+    const pictures = (comment.pictures || []).map(picture => ({
+      url: picture.url_pre || picture.urlPre || picture.url_default || picture.urlDefault || picture.url || '',
+      video: mediaUrl(picture)
+    }));
+    const video = mediaUrl(comment.video || comment.video_info || comment.videoInfo);
+    if (video) pictures.push({url: '', video});
+    return {id: String(comment.id || ''), reply, pictures};
+  };
   const push = response => {
     const data = response && response.data;
     if (!Array.isArray(data && data.comments)) return;
+    const comments = [];
+    data.comments.forEach(comment => {
+      comments.push(normalize(comment, !!response.__replies));
+      (comment.sub_comments || comment.subComments || []).forEach(reply => comments.push(normalize(reply, true)));
+    });
     packets.push({
-      comments: data.comments.map(comment => ({
-        id: String(comment.id || ''),
-        pictures: (comment.pictures || []).map(picture => ({
-          url: picture.url_pre || picture.urlPre || picture.url_default || picture.urlDefault || picture.url || ''
-        }))
-      })),
+      comments,
       cursor: String(data.cursor || ''),
-      hasMore: !!data.has_more
+      hasMore: !!(data.has_more ?? data.hasMore),
+      replies: !!response.__replies
     });
   };
   const originalFetch = window.fetch;
   window.fetch = function () {
     return originalFetch.apply(this, arguments).then(response => {
-      if (matches(response.url)) response.clone().json().then(push).catch(() => {});
+      if (matches(response.url)) response.clone().json().then(data => {
+        data.__replies = response.url.includes('/comment/sub/page');
+        push(data);
+      }).catch(() => {});
       return response;
     });
   };
   const originalOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__xhsCommentRequest = matches(url);
+    this.__xhsReplyRequest = String(url).includes('/comment/sub/page');
     return originalOpen.apply(this, arguments);
   };
   const originalSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function () {
     if (this.__xhsCommentRequest) this.addEventListener('load', () => {
-      try { push(this.responseType === 'json' ? this.response : JSON.parse(this.responseText)); } catch (_) {}
+      try {
+        const data = this.responseType === 'json' ? this.response : JSON.parse(this.responseText);
+        data.__replies = this.__xhsReplyRequest;
+        push(data);
+      } catch (_) {}
     });
     return originalSend.apply(this, arguments);
   };
   window.__xhsCapture = {
     drain: () => packets.splice(0),
+    expandReplies: () => {
+      const labels = document.querySelectorAll('.comment-item *, .parent-comment *');
+      for (const label of labels) {
+        if (label.childElementCount || expandedReplies.has(label)) continue;
+        if (!/^展开.*回复/.test(label.textContent.trim())) continue;
+        expandedReplies.add(label);
+        label.click();
+        return true;
+      }
+      return false;
+    },
     snapshot: () => {
       const found = [];
       document.querySelectorAll('.comment-item, .parent-comment').forEach((item, index) => {
@@ -49,16 +92,20 @@
             (background && background !== 'none' ? background.match(/url\(["']?(.*?)["']?\)/)?.[1] : '');
           if (url && /^https?:/.test(url)) pictures.push({url});
         });
+        item.querySelectorAll('video').forEach(node => {
+          const video = node.currentSrc || node.src || node.querySelector('source')?.src;
+          if (video && /^https?:/.test(video)) pictures.push({url: '', video});
+        });
         const id = item.id || item.getAttribute('data-id') || String(index);
         const fresh = pictures.filter(picture => {
-          const key = id + ':' + picture.url;
+          const key = id + ':' + (picture.video || picture.url);
           if (domSeen.has(key)) return false;
           domSeen.add(key);
           return true;
         });
         if (fresh.length) found.push({id: 'dom-' + id + '-' + domSeen.size, pictures: fresh});
       });
-      if (found.length) packets.push({comments: found, cursor: '', hasMore: true});
+      if (found.length) packets.push({comments: found, cursor: '', hasMore: true, dom: true});
     },
     seed: () => {
       if (seeded || packets.length) return;
