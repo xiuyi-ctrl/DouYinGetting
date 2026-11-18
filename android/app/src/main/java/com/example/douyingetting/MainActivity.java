@@ -111,6 +111,8 @@ public class MainActivity extends Activity {
     private TextView countLabel;
     private TextView saveSub;
     private TextView resultSummary;
+    private TextView selectionAction;
+    private Button saveButton;
     private TextView allFilter;
     private TextView gifFilter;
     private TextView imageFilter;
@@ -118,11 +120,14 @@ public class MainActivity extends Activity {
     private View resultAnchor;
     private final ArrayList<Animatable> animations = new ArrayList<>();
     private String selectedFilter = "all";
+    private final HashSet<Media> selectedMedia = new HashSet<>();
+    private boolean selectingMedia;
     private int displayedCount;
     private boolean showingReader;
     private boolean showingRecords;
     private boolean showingRecordPlatforms;
     private boolean showingSettings;
+    private boolean showingFavorites;
     private boolean recordsFromSettings;
     private int douyinPageDelayMs = 2000;
     private boolean douyinReadReplies;
@@ -360,6 +365,7 @@ public class MainActivity extends Activity {
     }
 
     private void showSettings() {
+        showingFavorites = false;
         showingSettings = true;
         showingReader = false;
         showingRecords = false;
@@ -442,6 +448,8 @@ public class MainActivity extends Activity {
             recordsFromSettings = true;
             showRecordPlatforms();
         }));
+        dataCard.addView(rowDivider());
+        dataCard.addView(settingRow("收藏夹", "查看收藏", true, v -> showFavorites()));
         dataCard.addView(rowDivider());
         dataCard.addView(settingRow("暂存占用", storageSize(), false, null));
         dataCard.addView(rowDivider());
@@ -592,6 +600,7 @@ public class MainActivity extends Activity {
         viewingSavedRecord = false;
         activeLink = null;
         input.setText("");
+        clearMediaSelection();
         media.clear();
         for (Animatable animation : animations) animation.stop();
         animations.clear();
@@ -836,6 +845,7 @@ public class MainActivity extends Activity {
         input.setText(activeLink == null ? "" : activeLink);
         cursor = record.cursor;
         scanned = xhsMode ? record.scanned : record.mainScanned > 0 ? record.mainScanned : record.scanned;
+        clearMediaSelection();
         media.clear();
         synchronized (record) { media.addAll(record.items); }
         selectedFilter = "all";
@@ -859,6 +869,7 @@ public class MainActivity extends Activity {
                         requestToken++;
                         currentRecord = null;
                         viewingSavedRecord = false;
+                        clearMediaSelection();
                         media.clear();
                         renderResults();
                         updateResultLabels();
@@ -1131,6 +1142,7 @@ public class MainActivity extends Activity {
                     records.add(0, record);
                     cursor = 0;
                     scanned = 0;
+                    clearMediaSelection();
                     media.clear();
                     for (Animatable animation : animations) animation.stop();
                     animations.clear();
@@ -1158,9 +1170,23 @@ public class MainActivity extends Activity {
         resultHeadParams.topMargin = dp(22);
         content.addView(resultAnchor, resultHeadParams);
         resultSummary = label("提取后自动显示图片与动图预览", 12, INK3, false);
-        LinearLayout.LayoutParams resultSummaryParams = new LinearLayout.LayoutParams(-1, -2);
-        resultSummaryParams.topMargin = dp(4);
-        content.addView(resultSummary, resultSummaryParams);
+        LinearLayout summaryRow = new LinearLayout(this);
+        summaryRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(-1, -2);
+        summaryParams.topMargin = dp(4);
+        content.addView(summaryRow, summaryParams);
+        summaryRow.addView(resultSummary, new LinearLayout.LayoutParams(0, -2, 1));
+        selectionAction = label("多选", 12, ACCENT, true);
+        selectionAction.setGravity(Gravity.CENTER);
+        selectionAction.setPadding(dp(12), dp(6), dp(12), dp(6));
+        selectionAction.setBackground(shape(ACCENT_SOFT, 10));
+        selectionAction.setOnClickListener(v -> {
+            selectingMedia = !selectingMedia;
+            selectedMedia.clear();
+            renderResults();
+            updateResultLabels();
+        });
+        summaryRow.addView(selectionAction);
         LinearLayout filters = new LinearLayout(this);
         filters.setOrientation(LinearLayout.HORIZONTAL);
         filters.setPadding(dp(3), dp(3), dp(3), dp(3));
@@ -1198,31 +1224,32 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams saveSubParams = new LinearLayout.LayoutParams(-1, -2);
         saveSubParams.topMargin = dp(3);
         saveInfo.addView(saveSub, saveSubParams);
-        Button saveAll = new Button(this);
-        saveAll.setAllCaps(false);
-        saveAll.setText("保存全部");
-        saveAll.setTextColor(Color.WHITE);
-        saveAll.setTextSize(13);
-        saveAll.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        saveAll.setBackground(shape(ACCENT, 10));
-        saveAll.setMinHeight(0);
-        saveAll.setStateListAnimator(null);
-        saveAll.setOnClickListener(v -> {
-            ArrayList<Media> snapshot = new ArrayList<>(media);
+        saveButton = new Button(this);
+        saveButton.setAllCaps(false);
+        saveButton.setText("保存全部");
+        saveButton.setTextColor(Color.WHITE);
+        saveButton.setTextSize(13);
+        saveButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        saveButton.setBackground(shape(ACCENT, 10));
+        saveButton.setMinHeight(0);
+        saveButton.setStateListAnimator(null);
+        saveButton.setOnClickListener(v -> {
+            ArrayList<Media> snapshot = new ArrayList<>();
+            for (Media item : media) if (!selectingMedia || selectedMedia.contains(item)) snapshot.add(item);
             worker.execute(() -> {
                 int saved = 0;
+                int skipped = 0;
                 for (Media item : snapshot) {
-                    try { saveToDownloads(item); saved++; } catch (Exception ignored) { }
+                    try { if (saveToDownloads(item)) saved++; else skipped++; } catch (Exception ignored) { }
                 }
                 int success = saved;
-                int failed = snapshot.size() - saved;
+                int duplicates = skipped;
+                int failed = snapshot.size() - saved - skipped;
                 runOnUiThread(() -> showSaveResult(snapshot.isEmpty() ? "没有可保存的文件"
-                        : failed == 0 ? "保存成功：" + success + " 个文件已写入下载/DouYinGetting"
-                        : success == 0 ? "保存失败：" + failed + " 个文件未能保存"
-                        : "部分保存成功：成功 " + success + " 个，失败 " + failed + " 个"));
+                        : "保存结果：成功 " + success + " 个，重复跳过 " + duplicates + " 个，失败 " + failed + " 个"));
             });
         });
-        saveBar.addView(saveAll, new LinearLayout.LayoutParams(dp(104), dp(40)));
+        saveBar.addView(saveButton, new LinearLayout.LayoutParams(dp(104), dp(40)));
         updateResultLabels();
     }
 
@@ -1537,6 +1564,7 @@ public class MainActivity extends Activity {
         requestToken++;
         scanning = false;
         scanButton.setText(xhsMode || douyinReadReplies ? "扫描评论" : "扫描主评论");
+        clearMediaSelection();
         media.clear();
         for (Animatable animation : animations) animation.stop();
         animations.clear();
@@ -1601,6 +1629,7 @@ public class MainActivity extends Activity {
             scanned = 0;
             xhsCommentIds.clear();
             xhsMainDone = false;
+            clearMediaSelection();
             media.clear();
             for (Animatable animation : animations) animation.stop();
             animations.clear();
@@ -2086,14 +2115,24 @@ public class MainActivity extends Activity {
         return "all".equals(selectedFilter) || ("gif".equals(selectedFilter) == item.animated);
     }
 
+    private void clearMediaSelection() {
+        selectingMedia = false;
+        selectedMedia.clear();
+    }
+
     private void updateResultLabels() {
         int gifCount = 0;
         for (Media item : media) if (item.animated) gifCount++;
         allFilter.setText("全部 " + media.size());
         gifFilter.setText("动图 " + gifCount);
         imageFilter.setText("图片 " + (media.size() - gifCount));
-        resultSummary.setText(media.isEmpty() ? "提取后自动显示图片与动图预览" : media.size() + " 个不重复素材 · 默认预览中");
-        countLabel.setText("已提取 " + media.size() + " 个");
+        resultSummary.setText(selectingMedia ? "点击素材选择，可跨分类多选"
+                : media.isEmpty() ? "提取后自动显示图片与动图预览" : media.size() + " 个不重复素材 · 默认预览中");
+        selectionAction.setText(selectingMedia ? "完成" : "多选");
+        countLabel.setText(selectingMedia ? "已选 " + selectedMedia.size() + " / " + media.size() + " 个" : "已提取 " + media.size() + " 个");
+        saveButton.setText(selectingMedia ? "保存选中" : "保存全部");
+        saveButton.setEnabled(!selectingMedia || !selectedMedia.isEmpty());
+        saveButton.setAlpha(saveButton.isEnabled() ? 1f : 0.45f);
         saveSub.setText(media.isEmpty() ? "保存到 下载 / DouYinGetting"
                 : gifCount + " 个动图 · " + (media.size() - gifCount) + " 张图片");
         emptyResults.setText(media.isEmpty() ? "还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。" : "当前分类没有结果");
@@ -2171,7 +2210,33 @@ public class MainActivity extends Activity {
             replyBadge.setBackground(shape(ACCENT, 5));
             art.addView(replyBadge, new FrameLayout.LayoutParams(dp(32), dp(18), Gravity.RIGHT | Gravity.TOP));
         }
-        art.setOnClickListener(v -> preview(item));
+        TextView check = label(selectedMedia.contains(item) ? "✓" : "", 15, selectedMedia.contains(item) ? Color.WHITE : ACCENT, true);
+        check.setGravity(Gravity.CENTER);
+        check.setBackground(shape(selectedMedia.contains(item) ? ACCENT : Color.argb(225, 255, 255, 255), 13));
+        FrameLayout.LayoutParams checkParams = new FrameLayout.LayoutParams(dp(26), dp(26), Gravity.LEFT | Gravity.TOP);
+        checkParams.setMargins(dp(6), dp(6), 0, 0);
+        art.addView(check, checkParams);
+        check.setVisibility(selectingMedia ? View.VISIBLE : View.GONE);
+        art.setOnClickListener(v -> {
+            if (!selectingMedia) {
+                preview(item);
+                return;
+            }
+            if (!selectedMedia.add(item)) selectedMedia.remove(item);
+            boolean selected = selectedMedia.contains(item);
+            check.setText(selected ? "✓" : "");
+            check.setTextColor(selected ? Color.WHITE : ACCENT);
+            check.setBackground(shape(selected ? ACCENT : Color.argb(225, 255, 255, 255), 13));
+            updateResultLabels();
+        });
+        art.setOnLongClickListener(v -> {
+            if (selectingMedia) return false;
+            selectingMedia = true;
+            selectedMedia.add(item);
+            renderResults();
+            updateResultLabels();
+            return true;
+        });
         displayedCount++;
         emptyResults.setVisibility(View.GONE);
     }
@@ -2200,10 +2265,11 @@ public class MainActivity extends Activity {
                 FrameLayout frame = new FrameLayout(this);
                 frame.addView(video, new FrameLayout.LayoutParams(-1, dp(260)));
                 AlertDialog dialog = new AlertDialog.Builder(this).setTitle(item.file.getName()).setView(frame)
+                        .setNeutralButton(isFavorite(item) ? "取消收藏" : "收藏", (d, w) -> toggleFavorite(item))
                         .setPositiveButton("保存此段", (ignored, which) -> worker.execute(() -> {
                             try {
-                                saveToDownloads(item);
-                                runOnUiThread(() -> showSaveResult("保存成功：" + item.file.getName()));
+                                boolean saved = saveToDownloads(item);
+                                runOnUiThread(() -> showSaveResult(saved ? "保存成功：" + item.file.getName() : "已保存过，已跳过重复素材"));
                             } catch (Exception error) {
                                 runOnUiThread(() -> showSaveResult("保存失败：" + error.getMessage()));
                             }
@@ -2218,10 +2284,11 @@ public class MainActivity extends Activity {
             image.setImageDrawable(drawable);
             image.setAdjustViewBounds(true);
             new AlertDialog.Builder(this).setTitle(item.file.getName()).setView(image)
+                    .setNeutralButton(isFavorite(item) ? "取消收藏" : "收藏", (d, w) -> toggleFavorite(item))
                     .setPositiveButton("保存此张", (dialog, which) -> worker.execute(() -> {
                         try {
-                            saveToDownloads(item);
-                            runOnUiThread(() -> showSaveResult("保存成功：" + item.file.getName()));
+                            boolean saved = saveToDownloads(item);
+                            runOnUiThread(() -> showSaveResult(saved ? "保存成功：" + item.file.getName() : "已保存过，已跳过重复素材"));
                         } catch (Exception error) {
                             runOnUiThread(() -> showSaveResult("保存失败：" + error.getMessage()));
                         }
@@ -2231,6 +2298,120 @@ public class MainActivity extends Activity {
         } catch (Exception error) {
             status.setText("预览失败：" + error.getMessage());
         }
+    }
+
+    private File favoriteFile(Media item) {
+        String name = item.file.getName();
+        return new File(new File(getFilesDir(), "favorites"), item.hash + name.substring(name.lastIndexOf('.')));
+    }
+
+    private boolean isFavorite(Media item) {
+        return favoriteFile(item).isFile();
+    }
+
+    private void toggleFavorite(Media item) {
+        worker.execute(() -> {
+            String message;
+            try {
+                File target = favoriteFile(item);
+                if (target.isFile()) {
+                    if (!target.delete()) throw new Exception("无法移除收藏");
+                    message = "已取消收藏";
+                } else {
+                    File folder = target.getParentFile();
+                    if (!folder.isDirectory() && !folder.mkdirs()) throw new Exception("无法创建收藏夹");
+                    File temp = new File(folder, target.getName() + ".tmp");
+                    try {
+                        Files.copy(item.file.toPath(), temp.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                        Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                    } finally { temp.delete(); }
+                    message = "已收藏，相同素材只保留一份";
+                }
+            } catch (Exception error) { message = "收藏操作失败：" + error.getMessage(); }
+            String result = message;
+            runOnUiThread(() -> {
+                Toast.makeText(this, result, Toast.LENGTH_SHORT).show();
+                if (showingFavorites) showFavorites();
+            });
+        });
+    }
+
+    private void showFavorites() {
+        showingFavorites = true;
+        showingReader = false;
+        showingRecords = false;
+        showingRecordPlatforms = false;
+        showingSettings = false;
+        for (Animatable animation : animations) animation.stop();
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+        root.setFitsSystemWindows(true);
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(20), 0, dp(20), 0);
+        root.addView(header, new LinearLayout.LayoutParams(-1, dp(54)));
+        TextView back = label("‹", 24, INK, true);
+        back.setGravity(Gravity.CENTER);
+        back.setOnClickListener(v -> showSettings());
+        header.addView(back, new LinearLayout.LayoutParams(dp(44), -1));
+        TextView title = label("收藏夹", 18, INK, true);
+        header.addView(title);
+        ScrollView scroll = new ScrollView(this);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(20), dp(12), dp(20), dp(20));
+        scroll.addView(list);
+        list.addView(label("相同素材只收藏一份 · 删除扫描记录不影响收藏", 12, INK3, false));
+        setContentView(root);
+        worker.execute(() -> {
+            File[] files = new File(getFilesDir(), "favorites").listFiles();
+            ArrayList<Media> items = new ArrayList<>();
+            if (files != null) {
+                java.util.Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+                for (File file : files) {
+                    if (!file.isFile() || file.getName().endsWith(".tmp")) continue;
+                    try (InputStream stream = new FileInputStream(file)) {
+                        byte[] bytes = new byte[32];
+                        if (stream.read(bytes) < 12) continue;
+                        String mime = format(bytes);
+                        if (mime == null) continue;
+                        String hash = file.getName().substring(0, file.getName().lastIndexOf('.'));
+                        items.add(new Media(file, hash, mime, "", "收藏", null, false));
+                    } catch (Exception ignored) { }
+                }
+            }
+            runOnUiThread(() -> {
+                if (!showingFavorites || !root.isAttachedToWindow()) return;
+                title.setText("收藏夹 · " + items.size());
+                if (items.isEmpty()) list.addView(label("在素材预览中点击收藏，喜欢的表情会显示在这里。", 14, INK2, false));
+                LinearLayout row = null;
+                int size = (getResources().getDisplayMetrics().widthPixels - dp(52)) / 3;
+                for (int i = 0; i < items.size(); i++) {
+                    Media item = items.get(i);
+                    if (i % 3 == 0) {
+                        row = new LinearLayout(this);
+                        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
+                        rp.topMargin = dp(8);
+                        list.addView(row, rp);
+                    }
+                    ImageView image = new ImageView(this);
+                    image.setBackground(card(10));
+                    image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                    LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(size, size);
+                    if (i % 3 != 0) ip.leftMargin = dp(6);
+                    row.addView(image, ip);
+                    image.setOnClickListener(v -> preview(item));
+                    worker.execute(() -> {
+                        Drawable thumbnail = decodeThumbnail(item.file);
+                        runOnUiThread(() -> {
+                            if (root.isAttachedToWindow()) image.setImageDrawable(thumbnail);
+                        });
+                    });
+                }
+            });
+        });
     }
 
     private void showSaveResult(String message) {
@@ -2257,7 +2438,14 @@ public class MainActivity extends Activity {
         }, 2000);
     }
 
-    private void saveToDownloads(Media item) throws Exception {
+    private boolean saveToDownloads(Media item) throws Exception {
+        String key = "saved_media_" + item.hash;
+        String previous = getPreferences(MODE_PRIVATE).getString(key, null);
+        if (previous != null) {
+            try (android.os.ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(Uri.parse(previous), "r")) {
+                if (descriptor != null) return false;
+            } catch (Exception ignored) { }
+        }
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, item.file.getName());
         values.put(MediaStore.Downloads.MIME_TYPE, item.mime);
@@ -2278,6 +2466,8 @@ public class MainActivity extends Activity {
         values.clear();
         values.put(MediaStore.MediaColumns.IS_PENDING, 0);
         getContentResolver().update(target, values, null, null);
+        getPreferences(MODE_PRIVATE).edit().putString(key, target.toString()).commit();
+        return true;
     }
 
     @Override protected void onDestroy() {
@@ -2300,7 +2490,8 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (showingRecords) leaveRecords();
+        if (showingFavorites) showSettings();
+        else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) showSettings();
         else if (showingReader) {
             if (viewingSavedRecord) showRecords();
