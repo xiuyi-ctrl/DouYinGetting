@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="records" path="records/" />
+    <files-path name="favorites" path="favorites/" />
+    <files-path name="legacy_media" path="media/" />
+</paths>

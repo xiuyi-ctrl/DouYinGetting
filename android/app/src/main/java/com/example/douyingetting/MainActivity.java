@@ -98,6 +98,7 @@ public class MainActivity extends Activity {
     private EditText input;
     private TextView status;
     private TextView scanCountLine;
+    private TextView scanDetails;
     private ProgressBar scanProgress;
     private LinearLayout results;
     private Button scanButton;
@@ -113,6 +114,7 @@ public class MainActivity extends Activity {
     private TextView resultSummary;
     private TextView selectionAction;
     private Button saveButton;
+    private Button shareSelectedButton;
     private TextView allFilter;
     private TextView gifFilter;
     private TextView imageFilter;
@@ -128,6 +130,7 @@ public class MainActivity extends Activity {
     private boolean showingRecordPlatforms;
     private boolean showingSettings;
     private boolean showingFavorites;
+    private Runnable returnFromFavorites;
     private boolean recordsFromSettings;
     private int douyinPageDelayMs = 2000;
     private boolean douyinReadReplies;
@@ -195,6 +198,15 @@ public class MainActivity extends Activity {
         int mainScanned;
         int replyScanned;
         int emptyReplyLists;
+        int loggedEmptyReplyLists;
+        final ArrayList<String> scanIssues = new ArrayList<>();
+        int issueCount;
+
+        synchronized void addIssue(String issue) {
+            issueCount++;
+            if (scanIssues.size() >= 50) scanIssues.remove(0);
+            scanIssues.add(issue);
+        }
         boolean includeReplies;
         boolean mainDone;
         final ArrayList<String> replyParents = new ArrayList<>();
@@ -341,7 +353,7 @@ public class MainActivity extends Activity {
         dock.setPadding(dp(18), dp(9), dp(18), 0);
         dock.setBackground(shape(Color.WHITE, 26));
         navArea.addView(dock, new FrameLayout.LayoutParams(-1, dp(74), Gravity.BOTTOM));
-        dock.addView(homeNavItem(), new LinearLayout.LayoutParams(0, -1, 1));
+        dock.addView(favoritesNavItem(), new LinearLayout.LayoutParams(0, -1, 1));
         dock.addView(new View(this), new LinearLayout.LayoutParams(0, -1, 1));
         LinearLayout settingsNav = new LinearLayout(this);
         settingsNav.setOrientation(LinearLayout.VERTICAL);
@@ -449,7 +461,7 @@ public class MainActivity extends Activity {
             showRecordPlatforms();
         }));
         dataCard.addView(rowDivider());
-        dataCard.addView(settingRow("收藏夹", "查看收藏", true, v -> showFavorites()));
+        dataCard.addView(settingRow("收藏夹", "查看收藏", true, v -> openFavorites(this::showSettings)));
         dataCard.addView(rowDivider());
         dataCard.addView(settingRow("暂存占用", storageSize(), false, null));
         dataCard.addView(rowDivider());
@@ -553,17 +565,17 @@ public class MainActivity extends Activity {
         });
     }
 
-    private LinearLayout homeNavItem() {
+    private LinearLayout favoritesNavItem() {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.CENTER);
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(R.drawable.douyin_nav);
-        item.addView(icon, new LinearLayout.LayoutParams(dp(27), dp(27)));
-        TextView name = label("抖音", 12, MUTED, true);
+        TextView icon = label("☆", 26, MUTED, false);
+        icon.setGravity(Gravity.CENTER);
+        item.addView(icon, new LinearLayout.LayoutParams(-1, dp(30)));
+        TextView name = label("收藏", 12, MUTED, true);
         name.setGravity(Gravity.CENTER);
         item.addView(name);
-        item.setOnClickListener(v -> selectMode(false));
+        item.setOnClickListener(v -> openFavorites(this::showHome));
         return item;
     }
 
@@ -1055,6 +1067,14 @@ public class MainActivity extends Activity {
         progressParams.topMargin = dp(10);
         scanBody.addView(scanProgress, progressParams);
         scanProgress.setVisibility(View.GONE);
+        scanDetails = label("查看扫描明细", 13, ACCENT, true);
+        scanDetails.setGravity(Gravity.CENTER_VERTICAL);
+        scanDetails.setMinHeight(dp(44));
+        scanDetails.setVisibility(View.GONE);
+        scanDetails.setOnClickListener(v -> {
+            if (currentRecord != null) showScanDetails(currentRecord);
+        });
+        scanBody.addView(scanDetails);
         status.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
@@ -1250,21 +1270,67 @@ public class MainActivity extends Activity {
             });
         });
         saveBar.addView(saveButton, new LinearLayout.LayoutParams(dp(104), dp(40)));
+        shareSelectedButton = shareButton("分享", v -> {
+            ArrayList<Media> items = new ArrayList<>();
+            for (Media item : media) if (selectedMedia.contains(item)) items.add(item);
+            shareMedia(items);
+        });
+        LinearLayout.LayoutParams shareParams = new LinearLayout.LayoutParams(dp(62), dp(40));
+        shareParams.rightMargin = dp(8);
+        saveBar.addView(shareSelectedButton, saveBar.indexOfChild(saveButton), shareParams);
         updateResultLabels();
     }
 
     private void updateScanCard() {
         if (scanProgress == null) return;
         scanProgress.setVisibility(scanning ? View.VISIBLE : View.GONE);
-        if (scanning && currentRecord != null) {
-            String counts = xhsMode
-                    ? "主评论 " + currentRecord.mainScanned + " · 回复 " + currentRecord.replyScanned + " · 合计 " + currentRecord.scanned
-                    : currentRecord.includeReplies
-                    ? "主评论 " + currentRecord.mainScanned + " · 回复 " + currentRecord.replyScanned + " · 合计 " + currentRecord.scanned
-                    : "主评论 " + currentRecord.scanned;
-            scanCountLine.setText(counts);
-            scanCountLine.setVisibility(View.VISIBLE);
-        } else scanCountLine.setVisibility(View.GONE);
+        ScanRecord record = currentRecord;
+        scanDetails.setVisibility(record == null ? View.GONE : View.VISIBLE);
+        scanCountLine.setVisibility(record == null ? View.GONE : View.VISIBLE);
+        if (record == null) return;
+        scanCountLine.setText(scanCounts(record));
+        synchronized (record) {
+            int issues = record.issueCount + Math.max(0, record.emptyReplyLists - record.loggedEmptyReplyLists);
+            scanDetails.setText(issues > 0 ? "查看扫描明细 · " + issues + " 条异常" : "查看扫描明细");
+        }
+    }
+
+    private String scanCounts(ScanRecord record) {
+        if (isXhsLink(record.link) || record.includeReplies) {
+            String counts = "主评论 " + record.mainScanned + " · 回复 " + record.replyScanned;
+            if (record.mainScanned + record.replyScanned == 0 && record.scanned > 0)
+                counts = "已读取 " + record.scanned + " 条评论";
+            if (!isXhsLink(record.link) && record.mainDone)
+                counts += " · 回复组 " + record.replyIndex + "/" + record.replyParents.size();
+            return counts;
+        }
+        return "已读取 " + Math.max(record.scanned, record.mainScanned) + " 条主评论";
+    }
+
+    private void showScanDetails(ScanRecord record) {
+        StringBuilder message = new StringBuilder(scanCounts(record));
+        message.append("\n").append(record.complete ? "扫描已完成" : scanning && currentRecord == record ? "扫描进行中" : "扫描未完成");
+        synchronized (record) {
+            message.append(" · ").append(record.items.size()).append(" 个素材");
+            int olderEmpty = Math.max(0, record.emptyReplyLists - record.loggedEmptyReplyLists);
+            if (olderEmpty > 0) message.append("\n\n旧记录中有 ").append(olderEmpty).append(" 组回复未返回数据");
+            if (record.issueCount > record.scanIssues.size()) message.append("\n\n显示最近 50 条异常，共 ").append(record.issueCount).append(" 条");
+            if (record.scanIssues.isEmpty() && olderEmpty == 0) message.append("\n\n暂无已记录的异常");
+            for (String issue : record.scanIssues) message.append("\n\n").append(issue);
+        }
+        new AlertDialog.Builder(this).setTitle("扫描明细").setMessage(message.toString())
+                .setPositiveButton("关闭", null).show();
+    }
+
+    private void recordScanPause(String reason) {
+        ScanRecord record = currentRecord;
+        if (record == null) return;
+        String location = isXhsLink(record.link) ? "网页评论"
+                : record.mainDone && record.replyIndex < record.replyParents.size()
+                ? "回复组 " + (record.replyIndex + 1) + "（主评论 ID " + record.replyParents.get(record.replyIndex) + "）"
+                : "主评论分页（已读取 " + scanned + " 条）";
+        record.addIssue(location + "： " + reason);
+        worker.execute(() -> persistRecord(record));
     }
 
     private void setupBrowser() {
@@ -1375,6 +1441,12 @@ public class MainActivity extends Activity {
                 record.mainScanned = data.optInt("mainScanned");
                 record.replyScanned = data.optInt("replyScanned");
                 record.emptyReplyLists = data.optInt("emptyReplyLists");
+                record.loggedEmptyReplyLists = data.optInt("loggedEmptyReplyLists");
+                JSONArray issues = data.optJSONArray("scanIssues");
+                if (issues != null) {
+                    for (int i = 0; i < issues.length(); i++) record.addIssue(issues.optString(i));
+                }
+                record.issueCount = Math.max(record.issueCount, data.optInt("issueCount"));
                 record.includeReplies = data.optBoolean("includeReplies");
                 record.mainDone = data.optBoolean("mainDone");
                 record.replyIndex = data.optInt("replyIndex");
@@ -1448,7 +1520,12 @@ public class MainActivity extends Activity {
             data.put("scanned", record.scanned);
             data.put("mainScanned", record.mainScanned);
             data.put("replyScanned", record.replyScanned);
-            data.put("emptyReplyLists", record.emptyReplyLists);
+            synchronized (record) {
+                data.put("emptyReplyLists", record.emptyReplyLists);
+                data.put("loggedEmptyReplyLists", record.loggedEmptyReplyLists);
+                data.put("scanIssues", new JSONArray(record.scanIssues));
+                data.put("issueCount", record.issueCount);
+            }
             data.put("includeReplies", record.includeReplies);
             data.put("mainDone", record.mainDone);
             data.put("replyIndex", record.replyIndex);
@@ -1666,6 +1743,7 @@ public class MainActivity extends Activity {
             } catch (Exception error) {
                 scanning = false;
                 scanButton.setText("继续扫描");
+                recordScanPause("评论响应解析失败");
                 status.setText("扫描暂停：评论响应解析失败");
                 return;
             }
@@ -1769,6 +1847,7 @@ public class MainActivity extends Activity {
                 } else if (++requestWaits >= 10) {
                     scanning = false;
                     scanButton.setText(douyinReadReplies ? "扫描评论" : "扫描主评论");
+                    recordScanPause("未找到评论列表请求，请确认网页评论区已打开");
                     status.setText("未找到评论列表请求。最近相关路径：" + (lastCommentPath == null || lastCommentPath.isEmpty() ? "无" : lastCommentPath) + "。请截图发给开发者");
                 } else {
                     status.setText("请打开评论区，正在等待评论列表请求…");
@@ -1857,7 +1936,8 @@ public class MainActivity extends Activity {
             } catch (Exception error) {
                 scanning = false;
                 scanButton.setText("继续扫描");
-                status.setText("扫描暂停：" + error.getMessage());
+                recordScanPause("评论响应解析失败");
+                status.setText("扫描暂停：评论响应解析失败");
                 updateScanCard();
             }
         });
@@ -1879,6 +1959,7 @@ public class MainActivity extends Activity {
         pageRetries = 0;
         scanning = false;
         scanButton.setText("继续扫描");
+        recordScanPause(reason + "（重试后仍失败）");
         status.setText(reason + "，扫描已暂停；已提取的素材仍在暂存记录中");
         updateScanCard();
         if (showingReader) new AlertDialog.Builder(this)
@@ -1937,7 +2018,14 @@ public class MainActivity extends Activity {
 
     private void processReplyPage(ScanRecord record, JSONArray comments, boolean more, long next, boolean emptyList) {
         if (record == null) return;
-        if (emptyList && !more) record.emptyReplyLists++;
+        if (emptyList && !more) {
+            synchronized (record) {
+                record.emptyReplyLists++;
+                record.loggedEmptyReplyLists++;
+                record.addIssue("回复组 " + (record.replyIndex + 1) + "（主评论 ID "
+                        + record.replyParents.get(record.replyIndex) + "）：未返回回复数据");
+            }
+        }
         for (int i = 0; i < comments.length(); i++) {
             JSONObject comment = comments.optJSONObject(i);
             if (comment != null) downloadCommentMedia(record, comment, true);
@@ -2012,13 +2100,13 @@ public class MainActivity extends Activity {
             }
             if (bytes == null) bytes = readMedia(source, xhs);
             String mime = format(bytes);
-            if (mime == null) return;
+            if (mime == null) throw new Exception("媒体格式无法识别");
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
             StringBuilder hex = new StringBuilder();
             for (byte b : digest) hex.append(String.format("%02x", b & 0xff));
             String hash = hex.toString();
             synchronized (record) {
-                if (!record.hashes.add(hash)) return;
+                if (record.hashes.contains(hash)) return;
             }
             String extension = mime.equals("video/mp4") ? ".mp4" : mime.equals("image/heic") ? ".heic" : mime.equals("image/avif") ? ".avif" : mime.equals("image/jpeg") ? ".jpg" : mime.equals("image/png") ? ".png" : mime.equals("image/gif") ? ".gif" : ".webp";
             if (!record.folder.isDirectory() && !record.folder.mkdirs()) throw new Exception("无法创建记录目录");
@@ -2026,7 +2114,10 @@ public class MainActivity extends Activity {
             try (OutputStream out = new FileOutputStream(file)) { out.write(bytes); }
             Drawable thumbnail = decodeThumbnail(file);
             Media item = new Media(file, hash, mime, commentId, kind, thumbnail, thumbnail instanceof Animatable);
-            synchronized (record) { record.items.add(item); }
+            synchronized (record) {
+                record.hashes.add(hash);
+                record.items.add(item);
+            }
             persistRecord(record);
             runOnUiThread(() -> {
                 if (currentRecord != record || !showingReader) return;
@@ -2036,7 +2127,10 @@ public class MainActivity extends Activity {
                 if (matchesFilter(item)) addTile(item);
                 if (media.size() == 1) readerScroll.postDelayed(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()), 200);
             });
-        } catch (Exception ignored) { }
+        } catch (Exception error) {
+            String reason = "媒体格式无法识别".equals(error.getMessage()) ? "媒体格式无法识别" : "下载或写入暂存失败";
+            record.addIssue(kind + (commentId == null || commentId.isEmpty() ? "" : "（评论 ID " + commentId + "）") + "： " + reason);
+        }
     }
 
     private static String originalXhsUrl(String source) {
@@ -2133,6 +2227,9 @@ public class MainActivity extends Activity {
         saveButton.setText(selectingMedia ? "保存选中" : "保存全部");
         saveButton.setEnabled(!selectingMedia || !selectedMedia.isEmpty());
         saveButton.setAlpha(saveButton.isEnabled() ? 1f : 0.45f);
+        shareSelectedButton.setVisibility(selectingMedia ? View.VISIBLE : View.GONE);
+        shareSelectedButton.setEnabled(!selectedMedia.isEmpty());
+        shareSelectedButton.setAlpha(shareSelectedButton.isEnabled() ? 1f : 0.45f);
         saveSub.setText(media.isEmpty() ? "保存到 下载 / DouYinGetting"
                 : gifCount + " 个动图 · " + (media.size() - gifCount) + " 张图片");
         emptyResults.setText(media.isEmpty() ? "还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。" : "当前分类没有结果");
@@ -2250,6 +2347,62 @@ public class MainActivity extends Activity {
         }
     }
 
+    private Button shareButton(String text, View.OnClickListener action) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextColor(ACCENT);
+        button.setTextSize(13);
+        button.setPadding(0, 0, 0, 0);
+        button.setBackground(shape(ACCENT_SOFT, 10));
+        button.setStateListAnimator(null);
+        button.setOnClickListener(action);
+        return button;
+    }
+
+    private void shareMedia(java.util.List<Media> items) {
+        if (items.isEmpty()) return;
+        try {
+            ArrayList<Uri> uris = new ArrayList<>();
+            String mime = items.get(0).mime;
+            boolean imagesOnly = true;
+            for (Media item : items) {
+                if (!item.file.isFile()) throw new java.io.IOException("素材文件已不存在");
+                uris.add(androidx.core.content.FileProvider.getUriForFile(this, getPackageName() + ".share", item.file));
+                if (!mime.equals(item.mime)) mime = "*/*";
+                imagesOnly &= item.mime.startsWith("image/");
+            }
+            if ("*/*".equals(mime) && imagesOnly) mime = "image/*";
+            boolean multiple = uris.size() > 1;
+            Intent send = new Intent(multiple ? Intent.ACTION_SEND_MULTIPLE : Intent.ACTION_SEND).setType(mime);
+            if (multiple) send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+            else send.putExtra(Intent.EXTRA_STREAM, uris.get(0));
+            ClipData clip = ClipData.newRawUri("素材", uris.get(0));
+            for (int i = 1; i < uris.size(); i++) clip.addItem(new ClipData.Item(uris.get(i)));
+            send.setClipData(clip);
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(send, "分享素材"));
+        } catch (java.io.IOException | RuntimeException error) {
+            Toast.makeText(this, "无法分享，请确认素材仍在本机", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private View shareablePreview(Media item, View preview, AlertDialog dialog) {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout actions = new LinearLayout(this);
+        actions.setPadding(dp(12), dp(6), dp(12), dp(6));
+        actions.addView(shareButton(isFavorite(item) ? "取消收藏" : "收藏", v -> {
+            dialog.dismiss();
+            toggleFavorite(item);
+        }), new LinearLayout.LayoutParams(0, dp(44), 1));
+        LinearLayout.LayoutParams shareParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        shareParams.leftMargin = dp(8);
+        actions.addView(shareButton("分享原文件", v -> shareMedia(Collections.singletonList(item))), shareParams);
+        panel.addView(actions, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(preview, new LinearLayout.LayoutParams(-1, -2));
+        return panel;
+    }
+
     private void preview(Media item) {
         try {
             if ("video/mp4".equals(item.mime)) {
@@ -2264,8 +2417,7 @@ public class MainActivity extends Activity {
                 video.setMediaController(controls);
                 FrameLayout frame = new FrameLayout(this);
                 frame.addView(video, new FrameLayout.LayoutParams(-1, dp(260)));
-                AlertDialog dialog = new AlertDialog.Builder(this).setTitle(item.file.getName()).setView(frame)
-                        .setNeutralButton(isFavorite(item) ? "取消收藏" : "收藏", (d, w) -> toggleFavorite(item))
+                AlertDialog dialog = new AlertDialog.Builder(this).setTitle(item.file.getName())
                         .setPositiveButton("保存此段", (ignored, which) -> worker.execute(() -> {
                             try {
                                 boolean saved = saveToDownloads(item);
@@ -2275,6 +2427,7 @@ public class MainActivity extends Activity {
                             }
                         }))
                         .setNegativeButton("关闭", null).create();
+                dialog.setView(shareablePreview(item, frame, dialog));
                 dialog.setOnDismissListener(ignored -> video.stopPlayback());
                 dialog.show();
                 return;
@@ -2283,9 +2436,8 @@ public class MainActivity extends Activity {
             ImageView image = new ImageView(this);
             image.setImageDrawable(drawable);
             image.setAdjustViewBounds(true);
-            new AlertDialog.Builder(this).setTitle(item.file.getName()).setView(image)
-                    .setNeutralButton(isFavorite(item) ? "取消收藏" : "收藏", (d, w) -> toggleFavorite(item))
-                    .setPositiveButton("保存此张", (dialog, which) -> worker.execute(() -> {
+            AlertDialog dialog = new AlertDialog.Builder(this).setTitle(item.file.getName())
+                    .setPositiveButton("保存此张", (ignored, which) -> worker.execute(() -> {
                         try {
                             boolean saved = saveToDownloads(item);
                             runOnUiThread(() -> showSaveResult(saved ? "保存成功：" + item.file.getName() : "已保存过，已跳过重复素材"));
@@ -2293,7 +2445,9 @@ public class MainActivity extends Activity {
                             runOnUiThread(() -> showSaveResult("保存失败：" + error.getMessage()));
                         }
                     }))
-                    .setNegativeButton("关闭", null).show();
+                    .setNegativeButton("关闭", null).create();
+            dialog.setView(shareablePreview(item, image, dialog));
+            dialog.show();
             if (drawable instanceof Animatable) ((Animatable) drawable).start();
         } catch (Exception error) {
             status.setText("预览失败：" + error.getMessage());
@@ -2310,6 +2464,7 @@ public class MainActivity extends Activity {
     }
 
     private void toggleFavorite(Media item) {
+        boolean adding = !isFavorite(item);
         worker.execute(() -> {
             String message;
             try {
@@ -2330,10 +2485,45 @@ public class MainActivity extends Activity {
             } catch (Exception error) { message = "收藏操作失败：" + error.getMessage(); }
             String result = message;
             runOnUiThread(() -> {
+                if (adding && isFavorite(item) && showingReader && !isFinishing()) {
+                    new AlertDialog.Builder(this).setTitle("已收藏")
+                            .setPositiveButton("查看收藏", (dialog, which) -> openFavorites(this::returnToReaderFromFavorites))
+                            .setNegativeButton("关闭", null).show();
+                    return;
+                }
                 Toast.makeText(this, result, Toast.LENGTH_SHORT).show();
                 if (showingFavorites) showFavorites();
             });
         });
+    }
+
+    private void openFavorites(Runnable onBack) {
+        returnFromFavorites = onBack;
+        if (scanning) {
+            scanning = false;
+            requestToken++;
+            scanButton.setText("继续扫描");
+            status.setText("扫描已暂停，可返回读取页继续扫描");
+        }
+        showFavorites();
+    }
+
+    private void returnToReaderFromFavorites() {
+        if (currentRecord != null) {
+            synchronized (currentRecord) {
+                for (Media item : currentRecord.items) if (!media.contains(item)) media.add(item);
+            }
+            renderResults();
+            updateResultLabels();
+        }
+        showReader();
+    }
+
+    private void leaveFavorites() {
+        showingFavorites = false;
+        Runnable onBack = returnFromFavorites;
+        returnFromFavorites = null;
+        onBack.run();
     }
 
     private void showFavorites() {
@@ -2353,7 +2543,7 @@ public class MainActivity extends Activity {
         root.addView(header, new LinearLayout.LayoutParams(-1, dp(54)));
         TextView back = label("‹", 24, INK, true);
         back.setGravity(Gravity.CENTER);
-        back.setOnClickListener(v -> showSettings());
+        back.setOnClickListener(v -> leaveFavorites());
         header.addView(back, new LinearLayout.LayoutParams(dp(44), -1));
         TextView title = label("收藏夹", 18, INK, true);
         header.addView(title);
@@ -2490,7 +2680,7 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (showingFavorites) showSettings();
+        if (showingFavorites) leaveFavorites();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) showSettings();
         else if (showingReader) {
