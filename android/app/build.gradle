@@ -14,8 +14,8 @@ android {
         applicationId 'com.example.douyingetting'
         minSdk 29
         targetSdk 35
-        versionCode 51
-        versionName '3.2.4'
+        versionCode 56
+        versionName '3.2.9'
     }
 
     compileOptions {
