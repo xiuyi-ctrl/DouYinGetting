@@ -1465,14 +1465,7 @@ public class MainActivity extends Activity {
         panel.setBackground(shape(SURFACE, 24));
         panel.addView(label("扫描明细", 20, INK, true));
 
-        ScrollView scroll = new ScrollView(this) {
-            @Override protected void onMeasure(int widthSpec, int heightSpec) {
-                int limit = getResources().getDisplayMetrics().heightPixels / 2;
-                if (View.MeasureSpec.getMode(heightSpec) != View.MeasureSpec.UNSPECIFIED)
-                    limit = Math.min(limit, View.MeasureSpec.getSize(heightSpec));
-                super.onMeasure(widthSpec, View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST));
-            }
-        };
+        ScrollView scroll = dialogScroll();
         panel.addView(scroll, new LinearLayout.LayoutParams(-1, -2, 1));
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
@@ -1526,6 +1519,17 @@ public class MainActivity extends Activity {
         showCardDialog(dialog, panel);
     }
 
+    private ScrollView dialogScroll() {
+        return new ScrollView(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int limit = getResources().getDisplayMetrics().heightPixels / 2;
+                if (View.MeasureSpec.getMode(heightSpec) != View.MeasureSpec.UNSPECIFIED)
+                    limit = Math.min(limit, View.MeasureSpec.getSize(heightSpec));
+                super.onMeasure(widthSpec, View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST));
+            }
+        };
+    }
+
     private void showRetryOptions(ScanRecord record) {
         if (currentRecord != record || scanning || record.processingPage) {
             showTopNotice("请暂停扫描并等待当前页保存完成");
@@ -1544,9 +1548,44 @@ public class MainActivity extends Activity {
             }
         }
         if (choices.isEmpty()) return;
-        new AlertDialog.Builder(this).setTitle("选择失败项")
-                .setItems(choices.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
-                .setNegativeButton("取消", null).show();
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(20), dp(20), dp(20), dp(16));
+        panel.setBackground(shape(SURFACE, 24));
+        panel.addView(label("选择失败项", 20, INK, true));
+
+        ScrollView scroll = dialogScroll();
+        LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(-1, -2, 1);
+        scrollParams.topMargin = dp(12);
+        panel.addView(scroll, scrollParams);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(list);
+        for (int i = 0; i < choices.size(); i++) {
+            Runnable action = actions.get(i);
+            TextView item = label(choices.get(i), 14, ACCENT, true);
+            item.setGravity(Gravity.CENTER_VERTICAL);
+            item.setMinHeight(dp(50));
+            item.setPadding(dp(12), dp(8), dp(12), dp(8));
+            item.setBackground(shape(ACCENT_SOFT, 12));
+            LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(-1, -2);
+            if (i > 0) itemParams.topMargin = dp(8);
+            list.addView(item, itemParams);
+            item.setOnClickListener(v -> {
+                dialog.dismiss();
+                action.run();
+            });
+        }
+
+        Button cancel = shareButton("取消", v -> dialog.dismiss());
+        cancel.setTextColor(INK);
+        cancel.setBackground(shape(TRACK, 12));
+        LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(-1, dp(48));
+        cancelParams.topMargin = dp(12);
+        panel.addView(cancel, cancelParams);
+        showCardDialog(dialog, panel);
     }
 
     private void retryFailedMedia(ScanRecord record) {
