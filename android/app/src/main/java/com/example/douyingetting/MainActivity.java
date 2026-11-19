@@ -2899,8 +2899,8 @@ public class MainActivity extends Activity {
                 dialog.dismiss();
                 worker.execute(() -> {
                     try {
-                        boolean saved = saveToDownloads(item);
-                        runOnUiThread(() -> showSaveResult(saved ? "保存成功：" + item.file.getName() : "已保存过，已跳过重复素材"));
+                        saveToDownloads(item);
+                        runOnUiThread(() -> showSaveResult("保存成功：" + item.file.getName()));
                     } catch (Exception error) {
                         runOnUiThread(() -> showSaveResult("保存失败：" + error.getMessage()));
                     }
@@ -3036,12 +3036,11 @@ public class MainActivity extends Activity {
     private void saveMediaBatch(ArrayList<Media> items, java.util.function.Consumer<String> onResult) {
         worker.execute(() -> {
             int saved = 0;
-            int skipped = 0;
             for (Media item : items) {
-                try { if (saveToDownloads(item)) saved++; else skipped++; } catch (Exception ignored) { }
+                try { saveToDownloads(item); saved++; } catch (Exception ignored) { }
             }
             String message = items.isEmpty() ? "没有可保存的文件"
-                    : "保存结果：成功 " + saved + " 个，重复跳过 " + skipped + " 个，失败 " + (items.size() - saved - skipped) + " 个";
+                    : "保存结果：成功 " + saved + " 个，失败 " + (items.size() - saved) + " 个";
             runOnUiThread(() -> onResult.accept(message));
         });
     }
@@ -3326,14 +3325,7 @@ public class MainActivity extends Activity {
         }, 2000);
     }
 
-    private boolean saveToDownloads(Media item) throws Exception {
-        String key = "saved_media_" + item.hash;
-        String previous = getPreferences(MODE_PRIVATE).getString(key, null);
-        if (previous != null) {
-            try (android.os.ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(Uri.parse(previous), "r")) {
-                if (descriptor != null) return false;
-            } catch (Exception ignored) { }
-        }
+    private void saveToDownloads(Media item) throws Exception {
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, item.file.getName());
         values.put(MediaStore.Downloads.MIME_TYPE, item.mime);
@@ -3354,8 +3346,6 @@ public class MainActivity extends Activity {
         values.clear();
         values.put(MediaStore.MediaColumns.IS_PENDING, 0);
         getContentResolver().update(target, values, null, null);
-        getPreferences(MODE_PRIVATE).edit().putString(key, target.toString()).commit();
-        return true;
     }
 
     @Override protected void onDestroy() {
