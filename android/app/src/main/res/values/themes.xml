@@ -1,0 +1,4 @@
+<resources>
+<style name="BlueLight" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:colorAccent">#456BFF</item><item name="android:windowLightStatusBar">true</item><item name="android:windowLightNavigationBar">true</item></style>
+<style name="BlueDark" parent="android:style/Theme.Material.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:colorAccent">#708CFF</item><item name="android:windowLightStatusBar">false</item><item name="android:windowLightNavigationBar">false</item></style>
+</resources>

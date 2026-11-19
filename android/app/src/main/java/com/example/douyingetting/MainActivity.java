@@ -86,14 +86,17 @@ public class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ArrayList<Media> media = new ArrayList<>();
     private final ArrayList<ScanRecord> records = new ArrayList<>();
+    private final android.util.SparseArray<Typeface> homeFonts = new android.util.SparseArray<>();
+    private Typeface homeTitleFont;
+    private Bitmap homeRabbit;
     private ScanRecord currentRecord;
     private String activeLink;
     private boolean viewingSavedRecord;
+    private boolean resumedFromHome;
     private boolean savedRecordPageOpened;
     private boolean loadingSavedRecordPage;
     private boolean xhsMode;
     private TextView readerHeading;
-    private TextView inputHeading;
     private TextView browserHint;
     private Button codeLogin;
     private WebView browser;
@@ -156,20 +159,24 @@ public class MainActivity extends Activity {
     private String xhsCaptureScript;
     private String lastXhsPage;
     private int xhsAppRedirects;
-    private static final int BG = Color.rgb(247, 248, 246);
-    private static final int DARK = Color.rgb(25, 47, 55);
-    private static final int GREEN = Color.rgb(28, 158, 120);
-    private static final int MUTED = Color.rgb(125, 143, 143);
-    // 读取页 / 记录页设计令牌
-    private static final int SURFACE = Color.WHITE;
-    private static final int LINE = Color.rgb(233, 236, 234);
-    private static final int INK = Color.rgb(23, 37, 43);
-    private static final int INK2 = Color.rgb(95, 110, 110);
-    private static final int INK3 = Color.rgb(154, 166, 166);
-    private static final int ACCENT = Color.rgb(20, 128, 107);
-    private static final int ACCENT_SOFT = Color.rgb(232, 242, 238);
-    private static final int TRACK = Color.rgb(237, 238, 234);
-    private static final int DANGER = Color.rgb(178, 100, 92);
+    private int BG, DARK, GREEN, MUTED, SURFACE, LINE, INK, INK2, INK3, ACCENT, ACCENT_SOFT, TRACK, DANGER;
+    private boolean darkMode;
+    private boolean decodeEnabled = true;
+    private boolean motionEnabled = true;
+    private boolean titleDecoded;
+    private boolean showingMy;
+    private int currentPage = 1;
+    private int settingsOrigin = 1;
+    private int recordsOrigin = 1;
+    private LinearLayout mainShell;
+    private FrameLayout mainHost;
+    private FrameLayout navTrack;
+    private View navIndicator;
+    private final ArrayList<TextView> navLabels = new ArrayList<>();
+    private final ArrayList<ImageView> navIcons = new ArrayList<>();
+    private int mainTab = 1;
+    private boolean returningTransition;
+    private android.animation.ValueAnimator navAnimation;
 
     private static class Media {
         final File file;
@@ -245,12 +252,14 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onCreate(Bundle state) {
+        applyPalette();
+        setTheme(darkMode ? R.style.BlueDark : R.style.BlueLight);
         super.onCreate(state);
+        decodeEnabled = getPreferences(MODE_PRIVATE).getBoolean("title_decode", true);
+        motionEnabled = getPreferences(MODE_PRIVATE).getBoolean("page_motion", true);
         douyinPageDelayMs = getPreferences(MODE_PRIVATE).getInt("douyin_page_delay_ms", 2000);
         douyinReadReplies = getPreferences(MODE_PRIVATE).getBoolean("douyin_read_replies", false);
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-        getWindow().setStatusBarColor(BG);
-        getWindow().setNavigationBarColor(BG);
+        updateSystemBars();
         buildReader();
         loadRecords();
         if (Intent.ACTION_SEND.equals(getIntent().getAction())) {
@@ -265,7 +274,7 @@ public class MainActivity extends Activity {
         view.setText(value);
         view.setTextSize(size);
         view.setTextColor(color);
-        if (bold) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        view.setTypeface(Typeface.create("sans-serif", bold ? Typeface.BOLD : Typeface.NORMAL));
         return view;
     }
 
@@ -281,12 +290,14 @@ public class MainActivity extends Activity {
     }
 
     private GradientDrawable outlined(int radius, int color) {
-        GradientDrawable drawable = new GradientDrawable();
+        GradientDrawable drawable = new OutlinedCard();
         drawable.setColor(color);
         drawable.setCornerRadius(dp(radius));
         drawable.setStroke(1, LINE);
         return drawable;
     }
+
+    private static class OutlinedCard extends GradientDrawable { }
 
     private TextView segment(String text, String type, LinearLayout parent) {
         TextView button = label(text, 12, INK2, true);
@@ -299,225 +310,587 @@ public class MainActivity extends Activity {
         return button;
     }
 
-    private void showHome() {
+
+    private void applyPalette() {
+        String mode = getPreferences(MODE_PRIVATE).getString("appearance", "system");
+        darkMode = "dark".equals(mode) || ("system".equals(mode)
+                && (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES);
+        BG = Color.parseColor(darkMode ? "#0D1320" : "#F4F6FA");
+        SURFACE = Color.parseColor(darkMode ? "#1A2436" : "#FFFFFF");
+        LINE = Color.parseColor(darkMode ? "#303E55" : "#DCE2ED");
+        INK = Color.parseColor(darkMode ? "#F3F6FF" : "#0F172A");
+        INK2 = Color.parseColor(darkMode ? "#BEC9DC" : "#536176");
+        INK3 = Color.parseColor(darkMode ? "#95A6C1" : "#738198");
+        ACCENT = Color.parseColor(darkMode ? "#708CFF" : "#456BFF");
+        ACCENT_SOFT = Color.parseColor(darkMode ? "#24345C" : "#E7EDFF");
+        TRACK = Color.parseColor(darkMode ? "#222E42" : "#E9EDF4");
+        DANGER = Color.parseColor(darkMode ? "#F09791" : "#AD4741");
+        DARK = INK;
+        GREEN = ACCENT;
+        MUTED = INK3;
+    }
+
+    private void updateSystemBars() {
+        getWindow().getDecorView().setSystemUiVisibility(darkMode ? 0
+                : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        getWindow().setStatusBarColor(BG);
+        getWindow().setNavigationBarColor(BG);
+    }
+
+    private int[] palette() {
+        return new int[]{BG, SURFACE, LINE, INK, INK2, INK3, ACCENT, ACCENT_SOFT, TRACK, DANGER};
+    }
+
+    private int mappedColor(int color, int[] old, int[] updated) {
+        for (int i = 0; i < old.length; i++) if (old[i] == color) return updated[i];
+        return color;
+    }
+
+    private void retheme(View view, int[] old, int[] updated) {
+        if (view instanceof WebView) return;
+        Drawable background = view.getBackground();
+        if (background instanceof GradientDrawable) {
+            GradientDrawable gradient = (GradientDrawable) background;
+            if (gradient.getColor() != null)
+                gradient.setColor(mappedColor(gradient.getColor().getDefaultColor(), old, updated));
+            if (gradient instanceof OutlinedCard) gradient.setStroke(1, LINE);
+        } else if (background instanceof android.graphics.drawable.ColorDrawable) {
+            view.setBackgroundColor(mappedColor(((android.graphics.drawable.ColorDrawable) background).getColor(), old, updated));
+        }
+        if (view instanceof TextView) {
+            TextView text = (TextView) view;
+            // White text on action buttons and image overlays stays white.
+            if (text.getCurrentTextColor() != Color.WHITE)
+                text.setTextColor(mappedColor(text.getCurrentTextColor(), old, updated));
+            text.setHintTextColor(INK3);
+        }
+        if (view instanceof ImageView) {
+            ImageView image = (ImageView) view;
+            if (image.getImageTintList() != null)
+                image.setImageTintList(ColorStateList.valueOf(mappedColor(image.getImageTintList().getDefaultColor(), old, updated)));
+        }
+        if (view instanceof ProgressBar) ((ProgressBar) view).setIndeterminateTintList(ColorStateList.valueOf(ACCENT));
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) retheme(group.getChildAt(i), old, updated);
+        }
+    }
+
+    private LinearLayout pageRoot() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+        root.setFitsSystemWindows(true);
+        return root;
+    }
+
+    private void stopScanForNavigation() {
         retryReplyParent = null;
         if (scanning) {
             scanning = false;
             requestToken++;
             scanButton.setText("继续扫描");
         }
+        for (Animatable animation : animations) animation.stop();
+    }
+
+    private void resetPages() {
         showingReader = false;
         showingRecords = false;
         showingRecordPlatforms = false;
         showingSettings = false;
-        for (Animatable animation : animations) animation.stop();
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(BG);
-        root.setFitsSystemWindows(true);
+        showingFavorites = false;
+        showingMy = false;
+    }
+
+    private ImageView icon(int resource, int color) {
+        ImageView image = new ImageView(this);
+        image.setImageResource(resource);
+        image.setImageTintList(ColorStateList.valueOf(color));
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        return image;
+    }
+
+    private View settingsButton() {
+        ImageView button = icon(R.drawable.blue_gear, INK);
+        button.setPadding(dp(10), dp(10), dp(10), dp(10));
+        button.setContentDescription("设置");
+        button.setOnClickListener(v -> {
+            settingsOrigin = currentPage;
+            stopScanForNavigation();
+            showSettings();
+        });
+        return button;
+    }
+
+    private LinearLayout header(LinearLayout root, String title, boolean back, Runnable goBack) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(18), dp(6), dp(12), dp(6));
+        root.addView(bar, new LinearLayout.LayoutParams(-1, dp(60)));
+        if (back) {
+            TextView button = label("‹", 28, INK, false);
+            button.setGravity(Gravity.CENTER);
+            button.setContentDescription("返回");
+            button.setOnClickListener(v -> goBack.run());
+            bar.addView(button, new LinearLayout.LayoutParams(dp(36), dp(44)));
+        }
+        bar.addView(label(title, back ? 19 : 24, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        if (!back) bar.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
+        return bar;
+    }
+
+    private void ensureMainShell() {
+        if (mainShell != null) return;
+        mainShell = pageRoot();
+        mainHost = new FrameLayout(this);
+        mainShell.addView(mainHost, new LinearLayout.LayoutParams(-1, 0, 1));
+        navTrack = new FrameLayout(this);
+        navTrack.setBackground(outlined(0, SURFACE));
+        mainShell.addView(navTrack, new LinearLayout.LayoutParams(-1, dp(68)));
+        navIndicator = new View(this);
+        navIndicator.setBackground(shape(ACCENT_SOFT, 16));
+        FrameLayout.LayoutParams indicatorParams = new FrameLayout.LayoutParams(dp(94), dp(54));
+        indicatorParams.topMargin = dp(7);
+        navTrack.addView(navIndicator, indicatorParams);
+        LinearLayout tabs = new LinearLayout(this);
+        navTrack.addView(tabs, new FrameLayout.LayoutParams(-1, -1));
+        String[] names = {"收藏", "首页", "我的"};
+        int[] icons = {R.drawable.blue_star, R.drawable.blue_home, R.drawable.blue_person};
+        navLabels.clear();
+        navIcons.clear();
+        for (int i = 0; i < names.length; i++) {
+            int target = i;
+            LinearLayout tab = new LinearLayout(this);
+            tab.setOrientation(LinearLayout.VERTICAL);
+            tab.setGravity(Gravity.CENTER);
+            tab.setContentDescription(names[i] + "导航");
+            ImageView image = icon(icons[i], INK2);
+            tab.addView(image, new LinearLayout.LayoutParams(dp(24), dp(24)));
+            TextView text = homeLabel(names[i], 12, INK2, 550);
+            text.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-1, -2);
+            tp.topMargin = dp(3);
+            tab.addView(text, tp);
+            tabs.addView(tab, new LinearLayout.LayoutParams(0, -1, 1));
+            navLabels.add(text);
+            navIcons.add(image);
+            tab.setOnClickListener(v -> {
+                if (currentPage == target) return;
+                if (target == 0) openFavorites(this::showHome);
+                else if (target == 1) showHome();
+                else showMy();
+            });
+        }
+        navTrack.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> {
+            if (r - l != or - ol) positionNav(false);
+        });
+    }
+
+    private void positionNav(boolean animate) {
+        if (navTrack == null || navTrack.getWidth() == 0) return;
+        float target = navTrack.getWidth() * (mainTab + 0.5f) / 3f - dp(47);
+        if (navAnimation != null) navAnimation.cancel();
+        if (animate && motionEnabled) {
+            navAnimation = android.animation.ValueAnimator.ofFloat(navIndicator.getTranslationX(), target);
+            navAnimation.setDuration(220);
+            navAnimation.addUpdateListener(value -> navIndicator.setTranslationX((float) value.getAnimatedValue()));
+            navAnimation.start();
+        } else navIndicator.setTranslationX(target);
+        navIcons.get(0).setImageResource(mainTab == 0 ? R.drawable.blue_star_filled : R.drawable.blue_star);
+        navIcons.get(1).setImageResource(mainTab == 1 ? R.drawable.blue_home_filled : R.drawable.blue_home);
+        for (int i = 0; i < 3; i++) {
+            navLabels.get(i).setTextColor(i == mainTab ? ACCENT : INK2);
+            navIcons.get(i).setImageTintList(ColorStateList.valueOf(i == mainTab ? ACCENT : INK2));
+        }
+    }
+
+    private void showMainPage(LinearLayout root, int tab) {
+        int previous = currentPage;
+        returningTransition = false;
+        currentPage = tab;
+        ensureMainShell();
+        root.setFitsSystemWindows(false);
+        if (root.getParent() instanceof android.view.ViewGroup)
+            ((android.view.ViewGroup) root.getParent()).removeView(root);
+        mainHost.removeAllViews();
+        mainHost.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        if (mainShell.getParent() == null) setContentView(mainShell);
+        mainTab = tab;
+        positionNav(previous >= 0);
+        if (motionEnabled && previous != tab) {
+            root.setAlpha(0f);
+            root.setTranslationX(dp(previous <= tab ? 16 : -16));
+            root.animate().alpha(1).translationX(0).setDuration(220).start();
+        }
+    }
+
+    private void presentSecondary(LinearLayout root) {
+        if (root.getParent() instanceof android.view.ViewGroup)
+            ((android.view.ViewGroup) root.getParent()).removeView(root);
+        setContentView(root);
+        if (motionEnabled) {
+            root.setAlpha(0f);
+            root.setTranslationX(dp(returningTransition ? -12 : 12));
+            root.animate().alpha(1).translationX(0).setDuration(220).start();
+        }
+        returningTransition = false;
+    }
+
+    private void showHome() {
+        stopScanForNavigation();
+        resumedFromHome = false;
+        resetPages();
+        LinearLayout root = pageRoot();
+        LinearLayout top = header(root, "咻咿", false, null);
+        top.getLayoutParams().height = dp(68);
+        TextView brand = (TextView) top.getChildAt(0);
+        brand.setTextSize(26);
+        brand.setTypeface(homeTypeface(800));
         ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(8), dp(16), dp(20));
+        scroll.addView(content);
+
+        FrameLayout hero = new FrameLayout(this);
+        hero.setBackground(shape(darkMode ? ACCENT_SOFT : 0xFFEDF2FF, 16));
+        hero.setClipToOutline(true);
+        content.addView(hero, new LinearLayout.LayoutParams(-1, dp(176)));
+        if (homeRabbit == null)
+            homeRabbit = android.graphics.BitmapFactory.decodeResource(getResources(), R.drawable.home_rabbit);
+        hero.addView(new BlueHeroView(this, darkMode, homeRabbit), new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        words.setPadding(dp(18), dp(23), 0, 0);
+        hero.addView(words, new FrameLayout.LayoutParams(-1, -1));
+        TextView title = label("Xiuyi\nextraction", 35, ACCENT, true);
+        if (homeTitleFont == null)
+            homeTitleFont = new Typeface.Builder(getAssets(), "fonts/Manrope.ttf")
+                    .setFontVariationSettings("'wght' 800").setWeight(800).build();
+        title.setTypeface(homeTitleFont);
+        title.setLetterSpacing(-0.037f);
+        title.setIncludeFontPadding(false);
+        title.setMaxLines(2);
+        title.setAutoSizeTextTypeUniformWithConfiguration(24, 35, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
+        int titleWidth = Math.min(dp(222), (int) ((getResources().getDisplayMetrics().widthPixels - dp(32)) * 0.65f) - dp(18));
+        words.addView(title, new LinearLayout.LayoutParams(titleWidth, dp(88)));
+        words.addView(homeLabel("发现评论里的好表情", 14, INK, 650));
+        if (decodeEnabled && !titleDecoded) {
+            titleDecoded = true;
+            android.animation.ValueAnimator decode = android.animation.ValueAnimator.ofFloat(0, 1);
+            String finalText = "Xiuyi\nextraction";
+            String glyphs = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@$%";
+            decode.setDuration(800);
+            decode.addUpdateListener(value -> {
+                if (!title.isAttachedToWindow()) return;
+                int settled = (int) ((float) value.getAnimatedValue() * finalText.length());
+                StringBuilder text = new StringBuilder();
+                for (int i = 0; i < finalText.length(); i++) {
+                    char actual = finalText.charAt(i);
+                    text.append(i < settled || actual == '\n' ? actual : glyphs.charAt((i * 7 + (int) value.getCurrentPlayTime() / 35) % glyphs.length()));
+                }
+                title.setText(text);
+            });
+            decode.addListener(new android.animation.AnimatorListenerAdapter() {
+                @Override public void onAnimationEnd(android.animation.Animator animation) { title.setText(finalText); }
+            });
+            title.post(decode::start);
+        }
+        addHomeFeature(content, false);
+        addHomeFeature(content, true);
+        ScanRecord latest = null;
+        for (ScanRecord record : records) if (canResume(record)) { latest = record; break; }
+        if (latest != null) {
+            ScanRecord record = latest;
+            addHomeResume(content, "继续上次扫描",
+                    "已读 " + record.scanned + " 条评论", v -> {
+                        recordsFromSettings = false;
+                        showRecord(record);
+                        resumedFromHome = true;
+                        openSavedRecordPage(record);
+                    });
+        }
+        showMainPage(root, 1);
+    }
+
+    private Typeface homeTypeface(int weight) {
+        Typeface font = homeFonts.get(weight);
+        if (font == null) {
+            font = new Typeface.Builder(getAssets(), "fonts/NotoSansSC.ttf")
+                    .setFontVariationSettings("'wght' " + weight).setWeight(weight).build();
+            homeFonts.put(weight, font);
+        }
+        return font;
+    }
+
+    private TextView homeLabel(String text, int size, int color, int weight) {
+        TextView view = label(text, size, color, false);
+        view.setTypeface(homeTypeface(weight));
+        view.setIncludeFontPadding(false);
+        view.setPadding(0, dp(2), 0, dp(2));
+        return view;
+    }
+
+    private void addHomeResume(LinearLayout parent, String name, String detail, View.OnClickListener action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(10), dp(16), dp(10));
+        row.setBackground(card(15));
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, dp(72));
+        rp.topMargin = dp(20);
+        parent.addView(row, rp);
+        row.addView(icon(R.drawable.home_resume, ACCENT), new LinearLayout.LayoutParams(dp(28), dp(28)));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(0, -2, 1);
+        wp.leftMargin = dp(16);
+        row.addView(words, wp);
+        words.addView(homeLabel(name, 17, INK, 700));
+        words.addView(homeLabel(detail, 13, INK2, 400));
+        row.addView(icon(R.drawable.home_chevron, INK2), new LinearLayout.LayoutParams(dp(20), dp(20)));
+        row.setOnClickListener(action);
+    }
+
+    private void addHomeFeature(LinearLayout content, boolean xhs) {
+        LinearLayout row = new LinearLayout(this);
+        row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(card(15));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(86));
+        params.topMargin = dp(xhs ? 12 : 20);
+        content.addView(row, params);
+        ImageView image = new ImageView(this);
+        image.setImageResource(xhs ? R.drawable.home_xiaohongshu : R.drawable.home_douyin);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setBackground(shape(SURFACE, 13));
+        image.setClipToOutline(true);
+        row.addView(image, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(0, -2, 1);
+        wp.leftMargin = dp(16);
+        row.addView(words, wp);
+        words.addView(homeLabel(xhs ? "小红书提取" : "抖音提取", 20, INK, 750));
+        words.addView(homeLabel(xhs ? "图片 · 回复 · 实况" : "图片 · 动图 · 回复", 14, INK2, 400));
+        row.addView(icon(R.drawable.home_arrow, ACCENT), new LinearLayout.LayoutParams(dp(26), dp(26)));
+        row.setOnClickListener(v -> selectMode(xhs));
+    }
+
+    private void addMenuCard(LinearLayout parent, int resource, String name, String detail, View.OnClickListener action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(14), dp(14), dp(14));
+        row.setBackground(card(16));
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
+        rp.topMargin = dp(12);
+        parent.addView(row, rp);
+        row.addView(icon(resource, INK), new LinearLayout.LayoutParams(dp(27), dp(27)));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(0, -2, 1);
+        wp.leftMargin = dp(14);
+        row.addView(words, wp);
+        words.addView(label(name, 16, INK, true));
+        if (!detail.isEmpty()) words.addView(label(detail, 12, INK2, false));
+        row.addView(label("›", 23, INK3, false));
+        row.setOnClickListener(action);
+    }
+
+    private void showMy() {
+        stopScanForNavigation();
+        resetPages();
+        showingMy = true;
+        LinearLayout root = pageRoot();
+        header(root, "我的", false, null);
+        ScrollView scroll = new ScrollView(this);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(18), dp(20), dp(18), dp(32));
+        page.setPadding(dp(18), dp(12), dp(18), dp(20));
         scroll.addView(page);
-        LinearLayout hero = new LinearLayout(this);
-        hero.setGravity(Gravity.CENTER_VERTICAL);
-        hero.setBackground(shape(Color.WHITE, 26));
-        hero.setClipToOutline(true);
-        page.addView(hero, new LinearLayout.LayoutParams(-1, dp(212)));
-        ImageView artwork = new ImageView(this);
-        artwork.setImageResource(R.drawable.hero_art);
-        artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        hero.addView(artwork, new LinearLayout.LayoutParams(0, -1, 1));
-        LinearLayout heroWords = new LinearLayout(this);
-        heroWords.setOrientation(LinearLayout.VERTICAL);
-        heroWords.setPadding(dp(4), 0, dp(10), 0);
-        hero.addView(heroWords, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView tag = label("● 评论表情收藏夹", 10, GREEN, true);
-        tag.setPadding(dp(7), dp(5), dp(7), dp(5));
-        tag.setBackground(shape(Color.rgb(235, 248, 241), 12));
-        heroWords.addView(tag);
-        TextView title = label("咻咿\n提取", 31, Color.rgb(94, 105, 232), true);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, -2);
-        titleParams.topMargin = dp(12);
-        heroWords.addView(title, titleParams);
-        TextView subtitle = label("评论素材提取\n预览后再保存", 11, MUTED, false);
-        LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(-1, -2);
-        subtitleParams.topMargin = dp(8);
-        heroWords.addView(subtitle, subtitleParams);
+        page.addView(label("管理本机素材与记录", 13, INK2, false));
+        LinearLayout stats = new LinearLayout(this);
+        stats.setBackground(card(16));
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-1, dp(88));
+        sp.topMargin = dp(18);
+        page.addView(stats, sp);
+        TextView favoriteCount = label("收藏素材\n…", 15, ACCENT, true);
+        favoriteCount.setGravity(Gravity.CENTER);
+        stats.addView(favoriteCount, new LinearLayout.LayoutParams(0, -1, 1));
+        TextView recordCount = label("扫描记录\n" + records.size(), 15, ACCENT, true);
+        recordCount.setGravity(Gravity.CENTER);
+        stats.addView(recordCount, new LinearLayout.LayoutParams(0, -1, 1));
+        worker.execute(() -> {
+            File[] files = new File(getFilesDir(), "favorites").listFiles();
+            int count = 0;
+            if (files != null) for (File file : files) if (file.isFile() && !file.getName().endsWith(".tmp")) count++;
+            int total = count;
+            runOnUiThread(() -> favoriteCount.setText("收藏素材\n" + total));
+        });
+        favoriteCount.setOnClickListener(v -> openFavorites(this::showMy));
+        recordCount.setOnClickListener(v -> openRecordsFromMy());
+        addMenuCard(page, R.drawable.blue_history, "扫描记录", "按平台查看与继续扫描", v -> openRecordsFromMy());
+        addMenuCard(page, R.drawable.blue_storage, "本机存储", "查看暂存与收藏占用", v -> {
+            worker.execute(() -> {
+                String size = storageSize();
+                runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("本机存储")
+                        .setMessage("暂存与收藏占用 " + size + "\n可在扫描记录或收藏夹中管理文件。")
+                        .setPositiveButton("关闭", null).show());
+            });
+        });
+        addMenuCard(page, R.drawable.blue_folder, "保存位置", "下载 / DouYinGetting", v ->
+                new AlertDialog.Builder(this).setTitle("保存位置").setMessage("文件保存到系统下载目录下的 DouYinGetting 文件夹，可用文件管理器查看。")
+                        .setPositiveButton("关闭", null).show());
+        addMenuCard(page, R.drawable.blue_info, "关于咻咿", "版本信息与使用说明", v ->
+                new AlertDialog.Builder(this).setTitle("咻咿提取 " + versionName())
+                        .setMessage("登录在平台网页内完成。素材先暂存到本机，保存后写入下载目录。平台验证和评论可用性由平台决定。")
+                        .setPositiveButton("关闭", null).show());
+        showMainPage(root, 2);
+    }
 
-        TextView heading = label("选择功能", 20, DARK, true);
-        LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(-1, -2);
-        headingParams.topMargin = dp(28);
-        page.addView(heading, headingParams);
-        TextView description = label("从你想读取的平台开始", 12, MUTED, false);
-        LinearLayout.LayoutParams descriptionParams = new LinearLayout.LayoutParams(-1, -2);
-        descriptionParams.topMargin = dp(3);
-        descriptionParams.bottomMargin = dp(18);
-        page.addView(description, descriptionParams);
-        LinearLayout features = new LinearLayout(this);
-        features.setGravity(Gravity.TOP);
-        page.addView(features);
-        LinearLayout douyin = homeFeature(false);
-        LinearLayout.LayoutParams first = new LinearLayout.LayoutParams(0, dp(178), 1);
-        first.rightMargin = dp(9);
-        features.addView(douyin, first);
-        LinearLayout xhs = homeFeature(true);
-        LinearLayout.LayoutParams second = new LinearLayout.LayoutParams(0, dp(178), 1);
-        second.leftMargin = dp(9);
-        features.addView(xhs, second);
+    private void openRecordsFromMy() {
+        recordsOrigin = 2;
+        recordsFromSettings = true;
+        showRecordPlatforms();
+    }
 
-        FrameLayout navArea = new FrameLayout(this);
-        root.addView(navArea, new LinearLayout.LayoutParams(-1, dp(96)));
-        LinearLayout dock = new LinearLayout(this);
-        dock.setGravity(Gravity.CENTER_VERTICAL);
-        dock.setPadding(dp(18), dp(9), dp(18), 0);
-        dock.setBackground(shape(Color.WHITE, 26));
-        navArea.addView(dock, new FrameLayout.LayoutParams(-1, dp(74), Gravity.BOTTOM));
-        dock.addView(favoritesNavItem(), new LinearLayout.LayoutParams(0, -1, 1));
-        dock.addView(new View(this), new LinearLayout.LayoutParams(0, -1, 1));
-        LinearLayout settingsNav = new LinearLayout(this);
-        settingsNav.setOrientation(LinearLayout.VERTICAL);
-        settingsNav.setGravity(Gravity.CENTER);
-        TextView settingsIcon = label("⚙", 26, MUTED, false);
-        settingsIcon.setGravity(Gravity.CENTER);
-        settingsNav.addView(settingsIcon, new LinearLayout.LayoutParams(-1, dp(30)));
-        TextView settingsLabel = label("设置", 12, MUTED, true);
-        settingsLabel.setGravity(Gravity.CENTER);
-        settingsNav.addView(settingsLabel);
-        settingsNav.setOnClickListener(v -> showSettings());
-        dock.addView(settingsNav, new LinearLayout.LayoutParams(0, -1, 1));
-        ImageView homeIcon = new ImageView(this);
-        homeIcon.setImageResource(R.drawable.home_nav);
-        homeIcon.setElevation(dp(5));
-        navArea.addView(homeIcon, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.TOP | Gravity.CENTER_HORIZONTAL));
-        TextView homeLabel = label("首页", 13, Color.rgb(94, 105, 232), true);
-        homeLabel.setGravity(Gravity.CENTER);
-        navArea.addView(homeLabel, new FrameLayout.LayoutParams(dp(80), dp(28), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
-        setContentView(root);
+    private void returnToRecordsOrigin() {
+        if (recordsOrigin == 2) showMy();
+        else showSettings();
+    }
+
+    private void returnFromSettings() {
+        returningTransition = true;
+        switch (settingsOrigin) {
+            case 0: showFavorites(); break;
+            case 2: showMy(); break;
+            case -1: showReader(); break;
+            case -2: showRecords(); break;
+            case -3: showRecordPlatforms(); break;
+            default: showHome(); break;
+        }
     }
 
     private void showSettings() {
-        showingFavorites = false;
+        resetPages();
         showingSettings = true;
-        showingReader = false;
-        showingRecords = false;
-        showingRecordPlatforms = false;
-        for (Animatable animation : animations) animation.stop();
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(BG);
-        root.setFitsSystemWindows(true);
-
-        LinearLayout toolbar = new LinearLayout(this);
-        toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
-        root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
-        TextView back = label("‹", 22, INK, false);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(card(10));
-        back.setOnClickListener(v -> showHome());
-        toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
-        TextView title = label("设置", 16, INK, true);
-        title.setGravity(Gravity.CENTER);
-        toolbar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        toolbar.addView(new View(this), new LinearLayout.LayoutParams(dp(34), dp(34)));
-
+        currentPage = -4;
+        LinearLayout root = pageRoot();
+        header(root, "设置", true, this::returnFromSettings);
         ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(20), dp(2), dp(20), dp(20));
+        page.setPadding(dp(18), dp(8), dp(18), dp(24));
         scroll.addView(page);
-
-        page.addView(groupTitle("扫描", 6));
-        LinearLayout scanCard = new LinearLayout(this);
-        scanCard.setOrientation(LinearLayout.VERTICAL);
-        scanCard.setPadding(dp(16), dp(16), dp(16), dp(16));
-        scanCard.setBackground(card(16));
-        page.addView(scanCard);
-        LinearLayout scanHead = new LinearLayout(this);
-        scanHead.setGravity(Gravity.CENTER_VERTICAL);
-        scanCard.addView(scanHead);
-        scanHead.addView(label("翻页间隔", 14, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
-        scanHead.addView(label("抖音评论", 11, INK3, false));
-        LinearLayout speedSwitch = new LinearLayout(this);
-        speedSwitch.setOrientation(LinearLayout.HORIZONTAL);
-        speedSwitch.setPadding(dp(3), dp(3), dp(3), dp(3));
-        speedSwitch.setBackground(shape(TRACK, 10));
-        LinearLayout.LayoutParams speedParams = new LinearLayout.LayoutParams(-1, dp(38));
-        speedParams.topMargin = dp(12);
-        scanCard.addView(speedSwitch, speedParams);
-        addSpeedSegment(speedSwitch, 2000, "稳定 · 2 秒");
-        addSpeedSegment(speedSwitch, 350, "快速 · 0.35 秒");
-        TextView speedNote = label("快速模式扫描更快，但更容易触发评论接口暂停。选择会立即保存。", 11, INK3, false);
-        speedNote.setLineSpacing(0, 1.35f);
-        LinearLayout.LayoutParams speedNoteParams = new LinearLayout.LayoutParams(-1, -2);
-        speedNoteParams.topMargin = dp(10);
-        scanCard.addView(speedNote, speedNoteParams);
-        LinearLayout replyRow = new LinearLayout(this);
-        replyRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams replyParams = new LinearLayout.LayoutParams(-1, -2);
-        replyParams.topMargin = dp(16);
-        scanCard.addView(replyRow, replyParams);
-        replyRow.addView(label("读取评论回复", 14, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
-        Switch replySwitch = new Switch(this);
-        replySwitch.setChecked(douyinReadReplies);
-        replySwitch.setOnCheckedChangeListener((button, checked) -> {
-            douyinReadReplies = checked;
-            getPreferences(MODE_PRIVATE).edit().putBoolean("douyin_read_replies", checked).apply();
+        page.addView(groupTitle("外观", 8));
+        LinearLayout modes = new LinearLayout(this);
+        modes.setPadding(dp(3), dp(3), dp(3), dp(3));
+        modes.setBackground(shape(TRACK, 12));
+        page.addView(modes, new LinearLayout.LayoutParams(-1, dp(44)));
+        String selected = getPreferences(MODE_PRIVATE).getString("appearance", "system");
+        String[] names = {"浅色", "深色", "跟随系统"};
+        String[] keys = {"light", "dark", "system"};
+        for (int i = 0; i < keys.length; i++) {
+            String key = keys[i];
+            TextView button = label(names[i], 13, selected.equals(key) ? Color.WHITE : INK2, true);
+            button.setGravity(Gravity.CENTER);
+            if (selected.equals(key)) button.setBackground(shape(ACCENT, 10));
+            modes.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
+            button.setOnClickListener(v -> {
+                getPreferences(MODE_PRIVATE).edit().putString("appearance", key).apply();
+                int[] old = palette();
+                applyPalette();
+                setTheme(darkMode ? R.style.BlueDark : R.style.BlueLight);
+                updateSystemBars();
+                retheme(readerRoot, old, palette());
+                mainShell = null;
+                showSettings();
+            });
+        }
+        page.addView(groupTitle("扫描偏好", 22));
+        LinearLayout scanningCards = new LinearLayout(this);
+        page.addView(scanningCards, new LinearLayout.LayoutParams(-1, -2));
+        addToggleCard(scanningCards, R.drawable.blue_reply, "读取回复", "读取抖音主评论下的回复", douyinReadReplies, enabled -> {
+            douyinReadReplies = enabled;
+            getPreferences(MODE_PRIVATE).edit().putBoolean("douyin_read_replies", enabled).apply();
+            if (currentRecord == null) configureReaderMode();
         });
-        replyRow.addView(replySwitch);
-        scanCard.addView(label("开启后会逐条读取抖音主评论下的回复，扫描时间会增加。", 11, INK3, false));
+        addToggleCard(scanningCards, R.drawable.blue_bolt, "快速扫描", "缩短抖音翻页等待", douyinPageDelayMs == 350, enabled -> {
+            douyinPageDelayMs = enabled ? 350 : 2000;
+            getPreferences(MODE_PRIVATE).edit().putInt("douyin_page_delay_ms", douyinPageDelayMs).apply();
+        });
+        TextView warning = label("快速模式可能频繁暂停", 12, DANGER, false);
+        LinearLayout.LayoutParams warningParams = new LinearLayout.LayoutParams(-1, -2);
+        warningParams.topMargin = dp(10);
+        page.addView(warning, warningParams);
+        page.addView(groupTitle("动效", 22));
+        LinearLayout motionCards = new LinearLayout(this);
+        page.addView(motionCards, new LinearLayout.LayoutParams(-1, -2));
+        addToggleCard(motionCards, R.drawable.blue_info, "标题解码", "首页标题逐字解码", decodeEnabled, enabled -> {
+            decodeEnabled = enabled;
+            if (enabled) titleDecoded = false;
+            getPreferences(MODE_PRIVATE).edit().putBoolean("title_decode", enabled).apply();
+        });
+        addToggleCard(motionCards, R.drawable.blue_motion, "页面动效", "切换页面时平滑过渡", motionEnabled, enabled -> {
+            motionEnabled = enabled;
+            getPreferences(MODE_PRIVATE).edit().putBoolean("page_motion", enabled).apply();
+        });
+        presentSecondary(root);
+    }
 
-        page.addView(groupTitle("本机数据", 18));
-        LinearLayout dataCard = new LinearLayout(this);
-        dataCard.setOrientation(LinearLayout.VERTICAL);
-        dataCard.setBackground(card(16));
-        page.addView(dataCard);
-        dataCard.addView(settingRow("扫描记录", records.size() + " 条", true, v -> {
-            recordsFromSettings = true;
-            showRecordPlatforms();
-        }));
-        dataCard.addView(rowDivider());
-        dataCard.addView(settingRow("收藏夹", "查看收藏", true, v -> openFavorites(this::showSettings)));
-        dataCard.addView(rowDivider());
-        dataCard.addView(settingRow("暂存占用", storageSize(), false, null));
-        dataCard.addView(rowDivider());
-        dataCard.addView(settingRow("保存位置", "下载 / DouYinGetting", false, null));
-
-        page.addView(groupTitle("说明", 18));
-        LinearLayout aboutCard = new LinearLayout(this);
-        aboutCard.setOrientation(LinearLayout.VERTICAL);
-        aboutCard.setPadding(dp(16), dp(16), dp(16), dp(16));
-        aboutCard.setBackground(card(16));
-        page.addView(aboutCard);
-        TextView note1 = label("登录在抖音 / 小红书的网页内完成，App 不读取手机上的账号；未登录时只能看到公开的少量评论。", 11, INK2, false);
-        note1.setLineSpacing(0, 1.4f);
-        aboutCard.addView(note1);
-        TextView note2 = label("素材先暂存在 App 内，点「保存」后才写入下载目录。", 11, INK2, false);
-        note2.setLineSpacing(0, 1.4f);
-        LinearLayout.LayoutParams note2Params = new LinearLayout.LayoutParams(-1, -2);
-        note2Params.topMargin = dp(8);
-        aboutCard.addView(note2, note2Params);
-
-        page.addView(groupTitle("关于", 18));
-        LinearLayout aboutRowCard = new LinearLayout(this);
-        aboutRowCard.setOrientation(LinearLayout.VERTICAL);
-        aboutRowCard.setBackground(card(16));
-        page.addView(aboutRowCard);
-        aboutRowCard.addView(settingRow("版本", versionName(), false, null));
-
-        TextView footnote = label("咻咿提取 · 仅处理你在网页中已登录可见的评论", 11, INK3, false);
-        LinearLayout.LayoutParams footnoteParams = new LinearLayout.LayoutParams(-1, -2);
-        footnoteParams.topMargin = dp(22);
-        page.addView(footnote, footnoteParams);
-
-        setContentView(root);
+    private void addToggleCard(LinearLayout row, int resource, String title, String detail, boolean enabled,
+                               java.util.function.Consumer<Boolean> changed) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(14), dp(12), dp(14), dp(14));
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -2, 1);
+        if (row.getChildCount() > 0) cp.leftMargin = dp(10);
+        row.addView(card, cp);
+        FrameLayout head = new FrameLayout(this);
+        card.addView(head, new LinearLayout.LayoutParams(-1, dp(38)));
+        ImageView image = icon(resource, enabled ? Color.WHITE : INK);
+        head.addView(image, new FrameLayout.LayoutParams(dp(26), dp(26), Gravity.START | Gravity.CENTER_VERTICAL));
+        Switch toggle = new Switch(this);
+        toggle.setChecked(enabled);
+        toggle.setClickable(false);
+        toggle.setEnabled(false);
+        toggle.setFocusable(false);
+        toggle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        toggle.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
+        head.addView(toggle, new FrameLayout.LayoutParams(-2, -2, Gravity.END | Gravity.CENTER_VERTICAL));
+        TextView name = label(title, 16, enabled ? Color.WHITE : INK, true);
+        LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
+        np.topMargin = dp(10);
+        card.addView(name, np);
+        TextView description = label(detail, 12, enabled ? Color.WHITE : INK2, false);
+        description.setMinLines(2);
+        card.addView(description);
+        boolean[] state = {enabled};
+        Runnable paint = () -> {
+            card.setBackground(outlined(16, state[0] ? ACCENT : SURFACE));
+            name.setTextColor(state[0] ? Color.WHITE : INK);
+            description.setTextColor(state[0] ? Color.WHITE : INK2);
+            image.setImageTintList(ColorStateList.valueOf(state[0] ? Color.WHITE : INK));
+            toggle.setChecked(state[0]);
+            toggle.setTrackTintList(ColorStateList.valueOf(state[0] ? Color.argb(100, 255, 255, 255) : INK3));
+            card.setSelected(state[0]);
+            card.setContentDescription(title + (state[0] ? "，已开启" : "，已关闭"));
+        };
+        paint.run();
+        card.setOnClickListener(v -> {
+            state[0] = !state[0];
+            changed.accept(state[0]);
+            paint.run();
+            if (motionEnabled) {
+                card.setScaleX(0.97f);
+                card.setScaleY(0.97f);
+                card.animate().scaleX(1).scaleY(1).setDuration(150).start();
+            }
+        });
     }
 
     private TextView groupTitle(String text, int topMargin) {
@@ -561,6 +934,8 @@ public class MainActivity extends Activity {
             if (files == null) continue;
             for (File file : files) if (file.isFile()) bytes += file.length();
         }
+        File[] favorites = new File(getFilesDir(), "favorites").listFiles();
+        if (favorites != null) for (File file : favorites) if (file.isFile() && !file.getName().endsWith(".tmp")) bytes += file.length();
         if (bytes <= 0) return "0 MB";
         double mb = bytes / (1024d * 1024d);
         return String.format(Locale.US, mb >= 10 ? "%.0f MB" : "%.1f MB", mb);
@@ -574,65 +949,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void addSpeedSegment(LinearLayout parent, int delay, String text) {
-        boolean selected = douyinPageDelayMs == delay;
-        TextView button = label(text, 12, selected ? INK : INK2, true);
-        button.setGravity(Gravity.CENTER);
-        button.setBackground(selected ? shape(SURFACE, 8) : null);
-        parent.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
-        button.setOnClickListener(v -> {
-            douyinPageDelayMs = delay;
-            getPreferences(MODE_PRIVATE).edit().putInt("douyin_page_delay_ms", delay).apply();
-            showSettings();
-            if (delay == 350) Toast.makeText(this, "快速模式可能频繁暂停", Toast.LENGTH_LONG).show();
-        });
-    }
-
-    private LinearLayout favoritesNavItem() {
-        LinearLayout item = new LinearLayout(this);
-        item.setOrientation(LinearLayout.VERTICAL);
-        item.setGravity(Gravity.CENTER);
-        TextView icon = label("☆", 26, MUTED, false);
-        icon.setGravity(Gravity.CENTER);
-        item.addView(icon, new LinearLayout.LayoutParams(-1, dp(30)));
-        TextView name = label("收藏", 12, MUTED, true);
-        name.setGravity(Gravity.CENTER);
-        item.addView(name);
-        item.setOnClickListener(v -> openFavorites(this::showHome));
-        return item;
-    }
-
-    private LinearLayout homeFeature(boolean xhs) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(14), dp(14), dp(12));
-        card.setBackground(shape(xhs ? Color.rgb(255, 236, 232) : Color.rgb(232, 233, 255), 24));
-        card.setOnClickListener(v -> selectMode(xhs));
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(xhs ? R.drawable.xhs_feature : R.drawable.douyin_feature);
-        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        card.addView(icon, new LinearLayout.LayoutParams(dp(64), dp(64)));
-        TextView name = label(xhs ? "小红书链接读取" : "抖音链接读取", 16, DARK, true);
-        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, -2);
-        nameParams.topMargin = dp(6);
-        card.addView(name, nameParams);
-        card.addView(label(xhs ? "图片 · 回复 · 实况" : "表情包 · 图片 · GIF", 11, MUTED, false));
-        LinearLayout footer = new LinearLayout(this);
-        footer.setGravity(Gravity.RIGHT | Gravity.BOTTOM);
-        card.addView(footer, new LinearLayout.LayoutParams(-1, 0, 1));
-        TextView arrow = label("→", 20, xhs ? Color.rgb(243, 125, 106) : Color.rgb(94, 105, 232), true);
-        arrow.setGravity(Gravity.CENTER);
-        arrow.setBackground(shape(Color.WHITE, 18));
-        footer.addView(arrow, new LinearLayout.LayoutParams(dp(42), dp(27)));
-        return card;
-    }
-
     private void selectMode(boolean xhs) {
         scanning = false;
         requestToken++;
         xhsMode = xhs;
         currentRecord = null;
         viewingSavedRecord = false;
+        resumedFromHome = false;
         activeLink = null;
         input.setText("");
         clearMediaSelection();
@@ -657,7 +980,6 @@ public class MainActivity extends Activity {
                 ? Math.min(dp(400), (int) (getResources().getDisplayMetrics().heightPixels * 0.48f)) : dp(290);
         browser.requestLayout();
         readerHeading.setText(xhsMode ? "小红书链接读取" : "抖音链接读取");
-        inputHeading.setText(xhsMode ? "笔记链接" : "作品链接");
         input.setHint(xhsMode ? "粘贴小红书笔记链接或分享文案" : "粘贴抖音作品链接或分享文案");
         browserHint.setText(xhsMode ? "在网页中登录并打开笔记评论，扫描时会读取评论素材" : douyinReadReplies
                 ? "在网页中登录并打开评论区，然后扫描主评论与回复" : "在网页中登录并打开评论区，然后扫描主评论");
@@ -667,10 +989,13 @@ public class MainActivity extends Activity {
     }
 
     private void showRecordPlatforms() {
+        currentPage = -3;
+        showingMy = false;
         showingReader = false;
         showingRecords = false;
         showingSettings = false;
         showingRecordPlatforms = true;
+        showingFavorites = false;
         int douyinCount = 0;
         int xhsCount = 0;
         for (ScanRecord record : records) {
@@ -689,12 +1014,11 @@ public class MainActivity extends Activity {
         TextView back = label("‹", 22, INK, false);
         back.setGravity(Gravity.CENTER);
         back.setBackground(card(10));
-        back.setOnClickListener(v -> showSettings());
+        back.setOnClickListener(v -> returnToRecordsOrigin());
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
         TextView heading = label("选择平台", 16, INK, true);
         heading.setGravity(Gravity.CENTER);
         toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        toolbar.addView(new View(this), new LinearLayout.LayoutParams(dp(34), dp(34)));
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -716,10 +1040,13 @@ public class MainActivity extends Activity {
             xhsMode = true;
             showRecords();
         }));
-        setContentView(root);
+        presentSecondary(root);
     }
 
     private void showRecords() {
+        currentPage = -2;
+        showingSettings = false;
+        showingMy = false;
         retryReplyParent = null;
         if (scanning) {
             scanning = false;
@@ -728,6 +1055,7 @@ public class MainActivity extends Activity {
         }
         showingReader = false;
         showingRecords = true;
+        showingFavorites = false;
         showingRecordPlatforms = false;
         for (Animatable animation : animations) animation.stop();
 
@@ -764,7 +1092,7 @@ public class MainActivity extends Activity {
         page.setPadding(dp(20), dp(6), dp(20), dp(28));
         scroll.addView(page);
         addRecordCards(page);
-        setContentView(root);
+        presentSecondary(root);
     }
 
     private void leaveRecords() {
@@ -808,7 +1136,7 @@ public class MainActivity extends Activity {
             icon.setImageResource(xhsRecord ? R.drawable.xhs_nav : R.drawable.douyin_nav);
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
             icon.setPadding(dp(9), dp(9), dp(9), dp(9));
-            icon.setBackground(shape(xhsRecord ? Color.rgb(255, 237, 232) : ACCENT_SOFT, 11));
+            icon.setBackground(shape(ACCENT_SOFT, 11));
             head.addView(icon, new LinearLayout.LayoutParams(dp(38), dp(38)));
 
             LinearLayout info = new LinearLayout(this);
@@ -883,6 +1211,7 @@ public class MainActivity extends Activity {
     }
 
     private void showRecord(ScanRecord record) {
+        resumedFromHome = false;
         xhsMode = isXhsLink(record.link);
         configureReaderMode();
         currentRecord = record;
@@ -945,16 +1274,16 @@ public class MainActivity extends Activity {
                                   String cancelLabel, String confirmLabel, Runnable onCancel, Runnable onConfirm) {
         android.app.Dialog dialog = new android.app.Dialog(this);
         dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
-        int accent = destructive ? Color.rgb(173, 71, 65) : ACCENT;
+        int accent = destructive ? DANGER : ACCENT;
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(22), dp(20), dp(22), dp(20));
-        panel.setBackground(shape(Color.WHITE, 24));
+        panel.setBackground(shape(SURFACE, 24));
 
         ImageView icon = new ImageView(this);
         icon.setImageResource(iconRes);
         icon.setImageTintList(ColorStateList.valueOf(accent));
-        icon.setBackground(shape(destructive ? Color.rgb(250, 228, 222) : ACCENT_SOFT, 20));
+        icon.setBackground(shape(destructive ? (darkMode ? Color.rgb(64, 37, 40) : Color.rgb(250, 228, 222)) : ACCENT_SOFT, 20));
         icon.setPadding(dp(9), dp(9), dp(9), dp(9));
         panel.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
 
@@ -997,7 +1326,7 @@ public class MainActivity extends Activity {
         android.view.Window window = dialog.getWindow();
         window.setBackgroundDrawableResource(android.R.color.transparent);
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-        window.setDimAmount(0.38f);
+        window.setDimAmount(darkMode ? 0.65f : 0.38f);
         dialog.show();
         window.setLayout(Math.min(dp(360), getResources().getDisplayMetrics().widthPixels - dp(40)), -2);
     }
@@ -1032,9 +1361,13 @@ public class MainActivity extends Activity {
 
     private void showReader() {
         showingReader = true;
+        showingSettings = false;
+        showingFavorites = false;
+        showingMy = false;
+        currentPage = -1;
         showingRecords = false;
         showingRecordPlatforms = false;
-        setContentView(readerRoot);
+        presentSecondary(readerRoot);
         updateScanCard();
         for (Animatable animation : animations) animation.start();
     }
@@ -1051,10 +1384,7 @@ public class MainActivity extends Activity {
         TextView back = label("‹", 22, INK, false);
         back.setGravity(Gravity.CENTER);
         back.setBackground(card(10));
-        back.setOnClickListener(v -> {
-            if (viewingSavedRecord) showRecords();
-            else showHome();
-        });
+        back.setOnClickListener(v -> leaveReader());
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
         readerHeading = label("抖音链接读取", 16, INK, true);
         readerHeading.setGravity(Gravity.CENTER);
@@ -1066,7 +1396,7 @@ public class MainActivity extends Activity {
             recordsFromSettings = false;
             showRecords();
         });
-        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(dp(58), dp(32)));
+        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(dp(48), dp(36)));
 
         FrameLayout scrollArea = new FrameLayout(this);
         readerRoot.addView(scrollArea, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -1079,7 +1409,7 @@ public class MainActivity extends Activity {
         readerScroll.addView(content);
         TextView scrollTop = label("↑ 置顶", 13, GREEN, true);
         scrollTop.setGravity(Gravity.CENTER);
-        scrollTop.setBackground(shape(Color.WHITE, 22));
+        scrollTop.setBackground(shape(SURFACE, 22));
         scrollTop.setElevation(dp(4));
         scrollTop.setOnClickListener(v -> readerScroll.smoothScrollTo(0, 0));
         FrameLayout.LayoutParams scrollTopParams = new FrameLayout.LayoutParams(dp(90), dp(42), Gravity.RIGHT | Gravity.BOTTOM);
@@ -1088,30 +1418,14 @@ public class MainActivity extends Activity {
 
         LinearLayout inputCard = new LinearLayout(this);
         inputCard.setOrientation(LinearLayout.VERTICAL);
-        inputCard.setPadding(dp(16), dp(16), dp(16), dp(16));
+        inputCard.setPadding(dp(12), dp(12), dp(12), dp(12));
         inputCard.setBackground(card(16));
         content.addView(inputCard);
-        LinearLayout inputHead = new LinearLayout(this);
-        inputHead.setGravity(Gravity.CENTER_VERTICAL);
-        inputCard.addView(inputHead);
-        inputHeading = label("作品链接", 14, INK, true);
-        inputHead.addView(inputHeading, new LinearLayout.LayoutParams(0, -2, 1));
-        LinearLayout connection = new LinearLayout(this);
-        connection.setGravity(Gravity.CENTER_VERTICAL);
-        View connectionDot = new View(this);
-        connectionDot.setBackground(shape(ACCENT, 3));
-        connection.addView(connectionDot, new LinearLayout.LayoutParams(dp(5), dp(5)));
-        TextView connectionText = label("网页已登录", 11, ACCENT, true);
-        LinearLayout.LayoutParams connectionParams = new LinearLayout.LayoutParams(-2, -2);
-        connectionParams.leftMargin = dp(5);
-        connection.addView(connectionText, connectionParams);
-        inputHead.addView(connection);
         LinearLayout urlBox = new LinearLayout(this);
         urlBox.setGravity(Gravity.CENTER_VERTICAL);
         urlBox.setPadding(dp(10), 0, dp(6), 0);
-        urlBox.setBackground(outlined(10, Color.rgb(247, 248, 246)));
+        urlBox.setBackground(outlined(10, BG));
         LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(-1, dp(44));
-        urlParams.topMargin = dp(12);
         inputCard.addView(urlBox, urlParams);
         input = new EditText(this);
         input.setSingleLine(true);
@@ -1145,24 +1459,20 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(dp(40), dp(32));
         copyParams.leftMargin = dp(6);
         urlBox.addView(copy, copyParams);
-        TextView hint = label("支持分享文案、短链接与作品地址", 11, INK3, false);
-        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
-        hintParams.topMargin = dp(10);
-        inputCard.addView(hint, hintParams);
         Button open = new Button(this);
         open.setAllCaps(false);
         open.setText("打开作品");
-        open.setTextColor(Color.WHITE);
+        open.setTextColor(ACCENT);
         open.setTextSize(15);
         open.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        open.setBackground(shape(ACCENT, 12));
+        open.setBackground(outlined(12, SURFACE));
         open.setMinHeight(0);
         open.setStateListAnimator(null);
         open.setOnClickListener(v -> openLink());
         LinearLayout actionRow = new LinearLayout(this);
         actionRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-1, dp(46));
-        actionParams.topMargin = dp(12);
+        actionParams.topMargin = dp(10);
         inputCard.addView(actionRow, actionParams);
         actionRow.addView(open, new LinearLayout.LayoutParams(0, -1, 1));
 
@@ -1214,7 +1524,7 @@ public class MainActivity extends Activity {
         webToggleRow.setGravity(Gravity.CENTER_VERTICAL);
         webToggleRow.setPadding(dp(16), 0, dp(14), 0);
         webToggleRow.setBackground(card(14));
-        LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(-1, dp(54));
+        LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(-1, dp(44));
         toggleParams.topMargin = dp(12);
         content.addView(webToggleRow, toggleParams);
         webToggle = label("网页操作", 15, INK, true);
@@ -3025,6 +3335,7 @@ public class MainActivity extends Activity {
 
     private void showFavorites() {
         showingFavorites = true;
+        showingMy = false;
         showingReader = false;
         showingRecords = false;
         showingRecordPlatforms = false;
@@ -3052,6 +3363,9 @@ public class MainActivity extends Activity {
         private final HashSet<Media> selected = new HashSet<>();
         private final String[] categories = {"全部", "图片", "动图", "视频"};
         private final TextView[] filters = new TextView[categories.length];
+        private FrameLayout filterTrack;
+        private View filterIndicator;
+        private android.animation.ValueAnimator filterAnimation;
         private LinearLayout actions;
         private TextView title;
         private Button select;
@@ -3071,29 +3385,50 @@ public class MainActivity extends Activity {
             header.setGravity(Gravity.CENTER_VERTICAL);
             header.setPadding(dp(20), 0, dp(20), 0);
             root.addView(header, new LinearLayout.LayoutParams(-1, dp(54)));
-            TextView back = label("‹", 24, INK, true);
-            back.setGravity(Gravity.CENTER);
-            back.setOnClickListener(v -> back());
-            header.addView(back, new LinearLayout.LayoutParams(dp(44), -1));
-            title = label("收藏夹", 18, INK, true);
+
+            title = homeLabel("收藏", 26, INK, 800);
             header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
             select = shareButton("多选", v -> setSelecting(!selecting));
+            select.setTypeface(homeTypeface(700));
             header.addView(select, new LinearLayout.LayoutParams(dp(68), dp(44)));
             select.setEnabled(false);
+            header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
 
+            filterTrack = new FrameLayout(MainActivity.this);
+            filterTrack.setPadding(dp(3), dp(3), dp(3), dp(3));
+            filterTrack.setBackground(shape(TRACK, 10));
+            filterIndicator = new View(MainActivity.this);
+            filterIndicator.setBackground(shape(ACCENT, 8));
+            filterTrack.addView(filterIndicator, new FrameLayout.LayoutParams(0, -1));
             LinearLayout tabs = new LinearLayout(MainActivity.this);
-            tabs.setPadding(dp(3), dp(3), dp(3), dp(3));
-            tabs.setBackground(shape(TRACK, 10));
+            filterTrack.addView(tabs, new FrameLayout.LayoutParams(-1, -1));
+            filterTrack.addOnLayoutChangeListener((v, l, t, r, bottom, ol, ot, or, ob) -> {
+                if (r - l != or - ol) positionFilter(false);
+            });
             LinearLayout.LayoutParams tabParams = new LinearLayout.LayoutParams(-1, dp(44));
             tabParams.setMargins(dp(20), dp(8), dp(20), 0);
-            root.addView(tabs, tabParams);
+            root.addView(filterTrack, tabParams);
             for (int i = 0; i < categories.length; i++) {
                 int target = i;
-                TextView tab = label(categories[i], 13, INK2, true);
+                TextView tab = homeLabel(categories[i], 13, INK2, 700);
+                tab.setSingleLine(true);
+                tab.setAutoSizeTextTypeUniformWithConfiguration(10, 13, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
                 tab.setGravity(Gravity.CENTER);
                 tab.setOnClickListener(v -> {
+                    if (category == target) return;
+                    int previous = category;
                     category = target;
+                    positionFilter(motionEnabled);
+                    list.animate().cancel();
                     render();
+                    if (motionEnabled) {
+                        list.setAlpha(0f);
+                        list.setTranslationX(dp(previous < target ? 12 : -12));
+                        list.animate().alpha(1f).translationX(0f).setDuration(220).start();
+                    } else {
+                        list.setAlpha(1f);
+                        list.setTranslationX(0f);
+                    }
                 });
                 filters[i] = tab;
                 tabs.addView(tab, new LinearLayout.LayoutParams(0, -1, 1));
@@ -3121,7 +3456,7 @@ public class MainActivity extends Activity {
             remove = addAction("取消收藏", v -> confirmRemove());
             remove.setTextColor(DANGER);
             favoriteScreen = this;
-            setContentView(root);
+            showMainPage(root, 0);
             render();
 
             worker.execute(() -> {
@@ -3133,6 +3468,23 @@ public class MainActivity extends Activity {
                     render();
                 });
             });
+        }
+
+        private void positionFilter(boolean animate) {
+            int width = filterTrack.getWidth() - filterTrack.getPaddingLeft() - filterTrack.getPaddingRight();
+            if (width <= 0) return;
+            int slot = width / categories.length;
+            android.view.ViewGroup.LayoutParams params = filterIndicator.getLayoutParams();
+            params.width = slot;
+            filterIndicator.setLayoutParams(params);
+            float target = (float) slot * category;
+            if (filterAnimation != null) filterAnimation.cancel();
+            if (animate) {
+                filterAnimation = android.animation.ValueAnimator.ofFloat(filterIndicator.getTranslationX(), target);
+                filterAnimation.setDuration(220);
+                filterAnimation.addUpdateListener(value -> filterIndicator.setTranslationX((float) value.getAnimatedValue()));
+                filterAnimation.start();
+            } else filterIndicator.setTranslationX(target);
         }
 
         private Button addAction(String text, View.OnClickListener action) {
@@ -3166,10 +3518,15 @@ public class MainActivity extends Activity {
         }
 
         private void render() {
+            int[] counts = new int[categories.length];
+            counts[0] = items.size();
+            for (Media item : items) counts[type(item)]++;
             for (int i = 0; i < filters.length; i++) {
-                filters[i].setSelected(category == i);
-                filters[i].setTextColor(category == i ? INK : INK2);
-                filters[i].setBackground(category == i ? shape(SURFACE, 8) : null);
+                boolean active = category == i;
+                filters[i].setSelected(active);
+                filters[i].setText(categories[i] + (active ? " " + counts[i] : ""));
+                filters[i].setTextColor(active ? Color.WHITE : INK2);
+                filters[i].setBackground(null);
             }
             list.removeAllViews();
             LinearLayout row = null;
@@ -3195,7 +3552,7 @@ public class MainActivity extends Activity {
                 tile.addView(image, new FrameLayout.LayoutParams(-1, -1));
                 if (type(item) != 1) {
                     TextView badge = label(categories[type(item)], 10, Color.WHITE, true);
-                    badge.setBackground(shape(DARK, 6));
+                    badge.setBackground(shape(type(item) == 2 ? ACCENT : DARK, 6));
                     badge.setPadding(dp(6), dp(2), dp(6), dp(2));
                     FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
                     badgeParams.setMargins(dp(6), 0, 0, dp(6));
@@ -3234,6 +3591,9 @@ public class MainActivity extends Activity {
         private void updateTile(FrameLayout tile, TextView check, Media item) {
             boolean checked = selected.contains(item);
             tile.setSelected(checked);
+            GradientDrawable border = shape(Color.TRANSPARENT, 10);
+            if (checked) border.setStroke(dp(2), ACCENT);
+            tile.setForeground(border);
             tile.setContentDescription((selecting ? checked ? "已选 " : "选择 " : "预览 ")
                     + categories[type(item)] + " " + item.file.getName());
             check.setText(checked ? "✓" : "");
@@ -3241,8 +3601,11 @@ public class MainActivity extends Activity {
         }
 
         private void updateActions() {
-            title.setText(selecting ? "已选 " + selected.size() + " 项" : "收藏夹 · " + items.size());
+            title.setText(selecting ? "已选 " + selected.size() + " 项" : "收藏");
             select.setText(selecting ? "完成" : "多选");
+            select.setSelected(selecting);
+            select.setBackground(shape(selecting ? ACCENT : ACCENT_SOFT, 12));
+            select.setTextColor(selecting ? Color.WHITE : ACCENT);
             select.setEnabled(selecting || !items.isEmpty());
             actions.setVisibility(selecting ? View.VISIBLE : View.GONE);
             for (Button button : new Button[]{share, save, remove}) {
@@ -3312,7 +3675,7 @@ public class MainActivity extends Activity {
         notice.setGravity(Gravity.CENTER);
         notice.setMaxWidth(dp(320));
         notice.setPadding(dp(16), dp(11), dp(16), dp(11));
-        notice.setBackground(shape(DARK, 12));
+        notice.setBackground(shape(darkMode ? Color.rgb(45, 62, 97) : Color.rgb(15, 23, 42), 12));
         PopupWindow popup = new PopupWindow(notice, -2, -2);
         popup.setElevation(dp(8));
         noticePopup = popup;
@@ -3367,15 +3730,18 @@ public class MainActivity extends Activity {
         if (showingReader) for (Animatable animation : animations) animation.start();
     }
 
+    private void leaveReader() {
+        if (viewingSavedRecord && !resumedFromHome) showRecords();
+        else showHome();
+    }
+
     @Override public void onBackPressed() {
         if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
-        else if (showingRecordPlatforms) showSettings();
-        else if (showingReader) {
-            if (viewingSavedRecord) showRecords();
-            else showHome();
-        }
-        else if (showingSettings) showHome();
+        else if (showingRecordPlatforms) returnToRecordsOrigin();
+        else if (showingReader) leaveReader();
+        else if (showingSettings) returnFromSettings();
+        else if (showingMy) showHome();
         else super.onBackPressed();
     }
 }
