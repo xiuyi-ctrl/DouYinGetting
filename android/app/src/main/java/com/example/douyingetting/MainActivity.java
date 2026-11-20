@@ -1,7 +1,6 @@
 package com.example.douyingetting;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.Manifest;
 import android.content.ContentValues;
 import android.content.ClipData;
@@ -111,8 +110,6 @@ public class MainActivity extends Activity {
     private LinearLayout results;
     private Button scanButton;
     private PopupWindow noticePopup;
-    private PopupWindow copiedBanner;
-    private View favoriteNotice;
     private LinearLayout readerRoot;
     private FrameLayout stage;
     private FrameLayout pageLayer;
@@ -1010,7 +1007,7 @@ public class MainActivity extends Activity {
         }
         updateScanCard();
         updateScanStrip();
-        showTopNotice(record != null && record.complete ? "扫描完成" : "已结束扫描，素材已保留");
+        showBottomNotice(record != null && record.complete ? "扫描完成" : "已结束扫描，素材已保留");
     }
 
     private void showHome() {
@@ -1218,32 +1215,38 @@ public class MainActivity extends Activity {
         addMenuCard(page, R.drawable.blue_history, "扫描记录", "按平台查看与继续扫描", v -> openRecordsFromMy());
         addMenuCard(page, R.drawable.extract_download, "导出扫描记录", "备份两平台记录、进度及素材原文件", v -> pickRecordArchive(true));
         addMenuCard(page, R.drawable.record_import, "导入扫描记录", "从 ZIP 备份恢复，重复记录自动跳过", v -> pickRecordArchive(false));
-        addMenuCard(page, R.drawable.blue_storage, "本机存储", "查看暂存与收藏占用", v -> {
-            worker.execute(() -> {
-                String size = storageSize();
-                runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("本机存储")
-                        .setMessage("暂存与收藏占用 " + size + "\n可在扫描记录或收藏夹中管理文件。")
-                        .setPositiveButton("关闭", null).show());
-            });
-        });
-        addMenuCard(page, R.drawable.blue_folder, "保存位置", "下载 / DouYinGetting", v ->
-                new AlertDialog.Builder(this).setTitle("保存位置").setMessage("文件保存到系统下载目录下的 DouYinGetting 文件夹，可用文件管理器查看。")
-                        .setPositiveButton("关闭", null).show());
-        addMenuCard(page, R.drawable.blue_info, "关于咻咿", "版本信息与使用说明", v ->
-                new AlertDialog.Builder(this).setTitle("咻咿提取 " + versionName())
-                        .setMessage("登录在平台网页内完成。素材先暂存到本机，保存后写入下载目录。平台验证和评论可用性由平台决定。")
-                        .setPositiveButton("关闭", null).show());
+        addMenuCard(page, R.drawable.blue_info, "关于咻咿", "版本信息与使用说明", v -> showAbout());
         showMainPage(root, 2);
+    }
+
+    private void showAbout() {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(0, false, "咻咿提取", "从评论中发现、预览和保存素材。");
+        ImageView brand = new ImageView(this);
+        brand.setImageResource(R.mipmap.ic_launcher);
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(52), dp(52));
+        logoParams.gravity = Gravity.CENTER_HORIZONTAL;
+        logoParams.bottomMargin = dp(13);
+        panel.addView(brand, 0, logoParams);
+        ((TextView) panel.getChildAt(1)).setGravity(Gravity.CENTER);
+        ((TextView) panel.getChildAt(2)).setGravity(Gravity.CENTER);
+        TextView version = homeLabel("版本 " + versionName(), 12, INK2, 450);
+        version.setGravity(Gravity.CENTER);
+        panel.addView(version, 2);
+        dialogNote(panel, "登录与验证\n在抖音或小红书网页内完成");
+        dialogNote(panel, "素材保存\n先暂存到本机，保存后写入下载目录");
+        dialogActions(dialog, panel, null, "知道了", false, null, null);
+        showCardDialog(dialog, panel);
     }
 
     private void pickRecordArchive(boolean exporting) {
         if (recordTransferBusy) return;
         if (exporting && records.isEmpty()) {
-            Toast.makeText(this, "暂无可导出的扫描记录", Toast.LENGTH_SHORT).show();
+            showTopNotice("暂无可导出的扫描记录");
             return;
         }
         if (exporting && (scanning || (currentRecord != null && currentRecord.processingPage))) {
-            Toast.makeText(this, "请先暂停扫描，等待当前页处理完成后再导出", Toast.LENGTH_LONG).show();
+            showTopNotice("请先暂停扫描，等待当前页处理完成后再导出");
             return;
         }
         Intent intent = new Intent(exporting ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT);
@@ -1253,7 +1256,7 @@ public class MainActivity extends Activity {
                 + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".zip");
         try { startActivityForResult(intent, exporting ? EXPORT_RECORDS : IMPORT_RECORDS); }
         catch (android.content.ActivityNotFoundException error) {
-            Toast.makeText(this, "当前设备没有可用的系统文件选择器", Toast.LENGTH_LONG).show();
+            showTopNotice("当前设备没有可用的系统文件选择器");
         }
     }
 
@@ -1286,7 +1289,7 @@ public class MainActivity extends Activity {
         if (recordTransferBusy) return;
         boolean exporting = request == EXPORT_RECORDS;
         if (exporting && (scanning || (currentRecord != null && currentRecord.processingPage))) {
-            Toast.makeText(this, "扫描仍在进行，请暂停后重新导出", Toast.LENGTH_LONG).show();
+            showTopNotice("扫描仍在进行，请暂停后重新导出");
             return;
         }
         Uri uri = data.getData();
@@ -1300,14 +1303,23 @@ public class MainActivity extends Activity {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setGravity(Gravity.CENTER);
         panel.setPadding(dp(24), dp(24), dp(24), dp(24));
-        panel.setBackground(card(20));
+        panel.setBackground(card(24));
         ProgressBar spinner = new ProgressBar(this);
         spinner.setIndeterminateTintList(ColorStateList.valueOf(ACCENT));
         panel.addView(spinner, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        panel.addView(homeLabel(exporting ? "正在导出记录与素材…" : "正在检查并导入备份…", 15, INK, 650));
+        TextView progressTitle = homeLabel(exporting ? "正在导出备份…" : "正在导入备份…", 18, INK, 750);
+        progressTitle.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(-1, -2);
+        progressParams.topMargin = dp(16);
+        panel.addView(progressTitle, progressParams);
+        TextView progressDetail = homeLabel(exporting ? "正在打包扫描记录与素材原文件。\n文件较多时，请稍候。" : "正在检查备份并恢复记录与素材。", 13, INK2, 400);
+        progressDetail.setGravity(Gravity.CENTER);
+        progressDetail.setPadding(0, dp(8), 0, 0);
+        panel.addView(progressDetail);
         showCardDialog(progress, panel);
         worker.execute(() -> {
             String message;
+            boolean succeeded = false;
             ArrayList<ScanRecord> imported = new ArrayList<>();
             try {
                 if (exporting) {
@@ -1332,15 +1344,16 @@ public class MainActivity extends Activity {
                     imported = readRecords(restored.added);
                     message = "导入成功：" + imported.size() + " 条；跳过重复记录 " + restored.skipped + " 条";
                 }
+                succeeded = true;
             } catch (Exception error) {
                 if (exporting) {
                     try { android.provider.DocumentsContract.deleteDocument(getContentResolver(), uri); }
                     catch (Exception ignored) { }
                 }
-                message = (exporting ? "导出失败：" : "导入失败：")
-                        + (error.getMessage() == null ? "备份文件无法处理" : error.getMessage());
+                message = archiveFailureReason(error, exporting);
             }
             String report = message;
+            boolean success = succeeded;
             ArrayList<ScanRecord> added = imported;
             runOnUiThread(() -> {
                 recordTransferBusy = false;
@@ -1349,8 +1362,12 @@ public class MainActivity extends Activity {
                 records.addAll(added);
                 records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
                 if (showingMy) showMy();
-                showConfirmation(R.drawable.blue_history, false, exporting ? "记录导出结果" : "记录导入结果",
-                        report, "关闭", "查看记录", null, this::openRecordsFromMy);
+                if (success) {
+                    if (exporting) showBottomNotice(report);
+                    else showBottomNotice(report, "查看记录", this::openRecordsFromMy);
+                } else showConfirmation(R.drawable.dialog_file, false, exporting ? "备份未能导出" : "无法导入这个备份",
+                        report, "取消", "重新选择", null, () -> pickRecordArchive(exporting),
+                        exporting ? "扫描记录和素材仍保留在本机" : "本机现有记录未被覆盖");
             });
         });
     }
@@ -1433,7 +1450,77 @@ public class MainActivity extends Activity {
             motionEnabled = enabled;
             getPreferences(MODE_PRIVATE).edit().putBoolean("page_motion", enabled).apply();
         });
+        page.addView(settingsGroupTitle("存储", 22));
+        LinearLayout storage = new LinearLayout(this);
+        storage.setOrientation(LinearLayout.VERTICAL);
+        storage.setBackground(card(16));
+        page.addView(storage, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout usage = new LinearLayout(this);
+        usage.setGravity(Gravity.CENTER_VERTICAL);
+        usage.setPadding(dp(14), dp(14), dp(14), dp(14));
+        storage.addView(usage, new LinearLayout.LayoutParams(-1, -2));
+        usage.addView(icon(R.drawable.blue_storage, ACCENT), new LinearLayout.LayoutParams(dp(22), dp(22)));
+        LinearLayout usageWords = new LinearLayout(this);
+        usageWords.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams usageParams = new LinearLayout.LayoutParams(0, -2, 1);
+        usageParams.leftMargin = dp(12);
+        usage.addView(usageWords, usageParams);
+        usageWords.addView(homeLabel("本机存储", 14, INK, 700));
+        usageWords.addView(homeLabel("暂存记录与收藏", 12, INK2, 400));
+        TextView storageValue = homeLabel("计算中…", 14, ACCENT, 700);
+        usage.addView(storageValue, new LinearLayout.LayoutParams(-2, -2));
+        storage.addView(rowDivider());
+
+        LinearLayout location = new LinearLayout(this);
+        location.setGravity(Gravity.CENTER_VERTICAL);
+        location.setPadding(dp(14), dp(14), dp(14), dp(14));
+        storage.addView(location, new LinearLayout.LayoutParams(-1, -2));
+        location.addView(icon(R.drawable.blue_folder, ACCENT), new LinearLayout.LayoutParams(dp(22), dp(22)));
+        LinearLayout locationWords = new LinearLayout(this);
+        locationWords.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams locationParams = new LinearLayout.LayoutParams(0, -2, 1);
+        locationParams.leftMargin = dp(12);
+        location.addView(locationWords, locationParams);
+        locationWords.addView(homeLabel("保存位置", 14, INK, 700));
+        locationWords.addView(homeLabel("下载 / DouYinGetting", 12, INK2, 400));
+        TextView openFolder = homeLabel("打开文件夹", 12, ACCENT, 700);
+        openFolder.setGravity(Gravity.CENTER);
+        openFolder.setSingleLine(true);
+        openFolder.setPadding(dp(12), 0, dp(12), 0);
+        openFolder.setBackground(shape(ACCENT_SOFT, 10));
+        openFolder.setOnClickListener(v -> openSavedFolder());
+        pressFeedback(openFolder);
+        LinearLayout.LayoutParams openFolderParams = new LinearLayout.LayoutParams(-2, dp(40));
+        openFolderParams.leftMargin = dp(8);
+        location.addView(openFolder, openFolderParams);
+        ArrayList<ScanRecord> storageRecords = new ArrayList<>(records);
+        worker.execute(() -> {
+            String size = storageSize(storageRecords);
+            runOnUiThread(() -> storageValue.setText(size));
+        });
         presentSecondary(root);
+    }
+
+    private void openSavedFolder() {
+        Uri folder = android.provider.DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents", "primary:Download/DouYinGetting");
+        Intent browse = new Intent(Intent.ACTION_VIEW).setDataAndType(folder,
+                android.provider.DocumentsContract.Document.MIME_TYPE_DIR);
+        try {
+            startActivity(browse);
+        } catch (android.content.ActivityNotFoundException | SecurityException error) {
+            Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            picker.addCategory(Intent.CATEGORY_OPENABLE);
+            picker.setType("*/*");
+            picker.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, folder);
+            try {
+                startActivity(picker);
+                showBottomNotice("已打开系统文件选择器，可浏览保存文件夹");
+            } catch (android.content.ActivityNotFoundException | SecurityException unavailable) {
+                showBottomNotice("无法打开文件管理器，请手动前往下载 / DouYinGetting");
+            }
+        }
     }
 
     private void changeAppearance(String key, View control) {
@@ -1615,9 +1702,9 @@ public class MainActivity extends Activity {
         return divider;
     }
 
-    private String storageSize() {
+    private String storageSize(ArrayList<ScanRecord> snapshot) {
         long bytes = 0;
-        for (ScanRecord record : records) {
+        for (ScanRecord record : snapshot) {
             File[] files = record.folder.listFiles();
             if (files == null) continue;
             for (File file : files) if (file.isFile()) bytes += file.length();
@@ -1883,7 +1970,7 @@ public class MainActivity extends Activity {
                 copyParams.leftMargin = dp(12);
                 copy.setOnClickListener(v -> {
                     if (copyLink(record.link)) flashCopied(copy, "复制链接");
-                    else Toast.makeText(this, "复制失败：剪贴板不可用", Toast.LENGTH_SHORT).show();
+                    else showTopNotice("复制失败：剪贴板不可用");
                 });
                 actions.addView(copy, copyParams);
             }
@@ -1971,70 +2058,129 @@ public class MainActivity extends Activity {
         }));
     }
 
-    private void showConfirmation(int iconRes, boolean destructive, String title, String message,
-                                  String cancelLabel, String confirmLabel, Runnable onCancel, Runnable onConfirm) {
-        android.app.Dialog dialog = new android.app.Dialog(this);
-        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
-        int accent = destructive ? DANGER : ACCENT;
+    private LinearLayout dialogPanel(int iconRes, boolean destructive, String title, String message) {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(22), dp(20), dp(22), dp(20));
-        panel.setBackground(shape(SURFACE, 24));
+        panel.setPadding(dp(22), dp(22), dp(22), dp(22));
+        panel.setBackground(card(24));
+        if (iconRes != 0) {
+            ImageView badge = icon(iconRes, destructive ? Color.parseColor(darkMode ? "#FF8290" : "#D94855") : ACCENT);
+            badge.setPadding(dp(9), dp(9), dp(9), dp(9));
+            badge.setBackground(shape(destructive ? Color.parseColor(darkMode ? "#422B3B" : "#FFF0F1") : ACCENT_SOFT, 14));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(42), dp(42));
+            params.bottomMargin = dp(13);
+            panel.addView(badge, params);
+        }
+        panel.addView(homeLabel(title, 19, INK, 750));
+        if (message != null && !message.isEmpty()) {
+            TextView detail = homeLabel(message, 14, INK2, 400);
+            detail.setLineSpacing(dp(4), 1f);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.topMargin = dp(8);
+            panel.addView(detail, params);
+        }
+        return panel;
+    }
 
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(iconRes);
-        icon.setImageTintList(ColorStateList.valueOf(accent));
-        icon.setBackground(shape(destructive ? (darkMode ? Color.rgb(64, 37, 40) : Color.rgb(250, 228, 222)) : ACCENT_SOFT, 20));
-        icon.setPadding(dp(9), dp(9), dp(9), dp(9));
-        panel.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
+    private void dialogNote(LinearLayout panel, String message) {
+        TextView note = homeLabel(message, 12, INK2, 450);
+        note.setPadding(dp(12), dp(10), dp(12), dp(10));
+        note.setBackground(shape(TRACK, 10));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(12);
+        panel.addView(note, params);
+    }
 
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, -2);
-        titleParams.topMargin = dp(12);
-        panel.addView(label(title, 20, INK, true), titleParams);
-        TextView detail = label(message, 14, INK2, false);
-        detail.setLineSpacing(dp(3), 1f);
-        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
-        detailParams.topMargin = dp(8);
-        panel.addView(detail, detailParams);
+    private void dismissCardDialog(android.app.Dialog dialog, Runnable after) {
+        if (motionEnabled && dialog.isShowing()) {
+            View content = dialog.findViewById(android.R.id.content);
+            content.animate().alpha(0f).scaleX(0.97f).scaleY(0.97f).setDuration(140).withEndAction(() -> {
+                dialog.dismiss();
+                if (after != null) after.run();
+            }).start();
+        } else {
+            dialog.dismiss();
+            if (after != null) after.run();
+        }
+    }
 
+    private void dialogActions(android.app.Dialog dialog, LinearLayout panel, String cancelLabel,
+                               String confirmLabel, boolean destructive, Runnable onCancel, Runnable onConfirm) {
         LinearLayout buttons = new LinearLayout(this);
         LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
-        rowParams.topMargin = dp(20);
+        rowParams.topMargin = dp(22);
         panel.addView(buttons, rowParams);
-        Button cancel = shareButton(cancelLabel, v -> {
-            dialog.dismiss();
-            if (onCancel != null) onCancel.run();
-        });
-        cancel.setTextColor(INK);
-        cancel.setBackground(shape(TRACK, 12));
-        buttons.addView(cancel, new LinearLayout.LayoutParams(0, dp(48), 1));
-        Button confirm = shareButton(confirmLabel, v -> {
-            dialog.dismiss();
-            onConfirm.run();
-        });
-        confirm.setTextColor(Color.WHITE);
-        confirm.setBackground(shape(accent, 12));
-        LinearLayout.LayoutParams confirmParams = new LinearLayout.LayoutParams(0, dp(48), 1);
-        confirmParams.leftMargin = dp(8);
-        buttons.addView(confirm, confirmParams);
+        if (cancelLabel != null) {
+            Button cancel = dialogButton(cancelLabel, false, false,
+                    v -> dismissCardDialog(dialog, onCancel));
+            buttons.addView(cancel, new LinearLayout.LayoutParams(0, -2, 1));
+        }
+        if (confirmLabel != null) {
+            Button confirm = dialogButton(confirmLabel, true, destructive,
+                    v -> dismissCardDialog(dialog, onConfirm));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+            if (cancelLabel != null) params.leftMargin = dp(10);
+            buttons.addView(confirm, params);
+        }
+    }
 
+    private Button dialogButton(String text, boolean primary, boolean destructive, View.OnClickListener action) {
+        Button button = shareButton(text, action);
+        button.setAllCaps(false);
+        button.setTypeface(homeTypeface(650));
+        button.setTextSize(13);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinHeight(dp(44));
+        button.setMinimumHeight(dp(44));
+        button.setPadding(dp(8), dp(8), dp(8), dp(8));
+        button.setTextColor(primary ? Color.WHITE : INK);
+        button.setBackground(shape(primary ? (destructive ? Color.parseColor(darkMode ? "#DF5869" : "#D94855") : ACCENT) : TRACK, 12));
+        pressFeedback(button);
+        return button;
+    }
+
+    private void showConfirmation(int iconRes, boolean destructive, String title, String message,
+                                  String cancelLabel, String confirmLabel, Runnable onCancel, Runnable onConfirm) {
+        showConfirmation(iconRes, destructive, title, message, cancelLabel, confirmLabel, onCancel, onConfirm, null);
+    }
+
+    private void showConfirmation(int iconRes, boolean destructive, String title, String message,
+                                  String cancelLabel, String confirmLabel, Runnable onCancel, Runnable onConfirm, String note) {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        LinearLayout panel = dialogPanel(iconRes, destructive, title, message);
+        if (note != null) dialogNote(panel, note);
+        dialogActions(dialog, panel, cancelLabel, confirmLabel, destructive, onCancel, onConfirm);
         if (onCancel != null) dialog.setOnCancelListener(ignored -> onCancel.run());
         showCardDialog(dialog, panel);
     }
 
+    private void showMessage(int icon, String title, String message) {
+        showConfirmation(icon, false, title, message, null, "知道了", null, null);
+    }
+
     private void showCardDialog(android.app.Dialog dialog, View panel) {
+        if (isFinishing() || isDestroyed()) return;
         dialog.setContentView(panel);
         android.view.Window window = dialog.getWindow();
         window.setBackgroundDrawableResource(android.R.color.transparent);
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-        window.setDimAmount(darkMode ? 0.65f : 0.38f);
+        window.setDimAmount(darkMode ? 0.55f : 0.28f);
+        window.setWindowAnimations(0);
         dialog.show();
-        window.setLayout(Math.min(dp(360), getResources().getDisplayMetrics().widthPixels - dp(40)), -2);
+        window.setLayout(Math.min(dp(320), getResources().getDisplayMetrics().widthPixels - dp(48)), -2);
+        if (motionEnabled) {
+            panel.setAlpha(0f);
+            panel.setScaleX(0.97f);
+            panel.setScaleY(0.97f);
+            panel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180).start();
+        }
     }
 
     private void confirmDelete(ScanRecord record) {
-        showConfirmation(android.R.drawable.ic_menu_delete, true, "删除扫描记录？",
-                "这条记录及其中暂存的素材将被删除。\n已保存到下载目录的文件仍会保留。",
+        showConfirmation(R.drawable.dialog_trash, true, "删除这条扫描记录？",
+                "这条记录及暂存素材将被删除。\n已保存到下载目录的文件不受影响。",
                 "保留记录", "删除记录", null, () -> {
             if (currentRecord == record) {
                 scanning = false;
@@ -2052,8 +2198,10 @@ public class MainActivity extends Activity {
                     if (deleted) {
                         records.remove(record);
                         showRecords();
+                        showBottomNotice("记录已删除");
                     } else {
-                        new AlertDialog.Builder(this).setMessage("删除失败，请重试").setPositiveButton("确定", null).show();
+                        showMessage(R.drawable.dialog_trash, "记录未能完全删除",
+                                "部分暂存文件未能删除，请稍后重试。已保存到下载目录的文件不受影响。");
                     }
                 });
             });
@@ -2150,8 +2298,10 @@ public class MainActivity extends Activity {
         pressFeedback(paste);
         paste.setOnClickListener(v -> {
             ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip().getItemCount() > 0)
+            if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip().getItemCount() > 0) {
                 input.setText(clipboard.getPrimaryClip().getItemAt(0).coerceToText(this));
+                showBottomNotice("链接已粘贴");
+            } else showTopNotice("剪贴板中没有可粘贴的内容");
         });
         LinearLayout.LayoutParams pasteParams = new LinearLayout.LayoutParams(dp(36), dp(40));
         pasteParams.leftMargin = dp(6);
@@ -2167,11 +2317,11 @@ public class MainActivity extends Activity {
             String link = extractLink(input.getText().toString(), xhsMode);
             if (link == null && input.getText().length() == 0) link = activeLink;
             if (link == null) {
-                showSaveResult("没有可复制的链接");
+                showTopNotice("没有可复制的链接");
             } else if (copyLink(link)) {
                 flashCopied(copy);
             } else {
-                showSaveResult("复制失败：剪贴板不可用");
+                showTopNotice("复制失败：剪贴板不可用");
             }
         });
         LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(dp(36), dp(40));
@@ -2456,7 +2606,7 @@ public class MainActivity extends Activity {
         saveButton.setOnClickListener(v -> {
             ArrayList<Media> snapshot = new ArrayList<>();
             for (Media item : media) if (!selectingMedia || selectedMedia.contains(item)) snapshot.add(item);
-            saveMediaBatch(snapshot, this::showSaveResult);
+            saveMediaBatch(snapshot, this::showSaveBatchResult);
         });
         saveBar.addView(saveButton, new LinearLayout.LayoutParams(dp(118), dp(40)));
         shareSelectedButton = shareButton("分享", v -> {
@@ -2539,63 +2689,33 @@ public class MainActivity extends Activity {
         }
         android.app.Dialog dialog = new android.app.Dialog(this);
         dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(20), dp(20), dp(20), dp(16));
-        panel.setBackground(shape(SURFACE, 24));
-        panel.addView(label("扫描明细", 20, INK, true));
-
+        LinearLayout panel = dialogPanel(R.drawable.extract_history, false, "扫描明细", "查看已读取的评论与本次异常。");
         ScrollView scroll = dialogScroll();
         panel.addView(scroll, new LinearLayout.LayoutParams(-1, -2, 1));
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(0, dp(12), 0, dp(4));
         scroll.addView(body);
-
         String state = record.complete ? "扫描已完成" : scanning && currentRecord == record ? "扫描进行中" : "扫描未完成";
-        TextView summary = label(state + " · " + mediaCount + " 个素材\n" + scanCounts(record), 14, INK, true);
-        summary.setLineSpacing(dp(4), 1f);
-        summary.setPadding(dp(12), dp(10), dp(12), dp(10));
-        summary.setBackground(shape(ACCENT_SOFT, 12));
-        body.addView(summary, new LinearLayout.LayoutParams(-1, -2));
-
+        body.addView(homeLabel(state, 12, INK2, 450));
+        if (record.mainScanned + record.replyScanned == 0 && record.scanned > 0) {
+            dialogStats(body, new String[]{"已读评论", "素材"},
+                    new String[]{String.valueOf(record.scanned), String.valueOf(mediaCount)}, false);
+        } else dialogStats(body, new String[]{"主评论", "回复", "素材"},
+                new String[]{String.valueOf(record.mainScanned), String.valueOf(record.replyScanned), String.valueOf(mediaCount)}, false);
         boolean canRetry = mediaFailures + replyFailures > 0;
-        if (canRetry) body.addView(groupTitle("待重试 · 素材 " + mediaFailures + " · 回复组 " + replyFailures, 12));
-        body.addView(groupTitle("异常记录 · " + (issueCount + olderEmpty) + " 条", 12));
-        if (issueCount > issues.size()) body.addView(label("显示最近 " + issues.size() + " 条", 12, INK2, false));
-        if (olderEmpty > 0) issues.add(0, "旧记录中有 " + olderEmpty + " 组回复未返回数据");
-        if (issues.isEmpty()) {
-            body.addView(label("暂无已记录的异常", 13, INK2, false));
-        } else {
-            for (String issue : issues) {
-                TextView line = label(issue, 13, INK2, false);
-                line.setPadding(dp(10), dp(8), dp(10), dp(8));
-                line.setBackground(shape(BG, 8));
-                LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(-1, -2);
-                lineParams.topMargin = dp(6);
-                body.addView(line, lineParams);
-            }
-        }
-
-        LinearLayout buttons = new LinearLayout(this);
-        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, dp(48));
-        rowParams.topMargin = dp(12);
-        panel.addView(buttons, rowParams);
-        Button close = shareButton("关闭", v -> dialog.dismiss());
-        close.setTextColor(INK);
-        close.setBackground(shape(TRACK, 12));
-        buttons.addView(close, new LinearLayout.LayoutParams(0, -1, 1));
         if (canRetry) {
-            Button retry = shareButton("重试失败项", v -> {
-                dialog.dismiss();
-                showRetryOptions(record);
-            });
-            retry.setTextColor(Color.WHITE);
-            retry.setBackground(shape(ACCENT, 12));
-            LinearLayout.LayoutParams retryParams = new LinearLayout.LayoutParams(0, -1, 1);
-            retryParams.leftMargin = dp(8);
-            buttons.addView(retry, retryParams);
+            body.addView(groupTitle("待处理", 14));
+            if (mediaFailures > 0) dialogNote(body, mediaFailures + " 个素材下载失败\n可重新下载未成功的文件");
+            if (replyFailures > 0) dialogNote(body, replyFailures + " 组回复读取中断\n此前读取的结果已保留");
         }
+        body.addView(groupTitle("异常记录 · " + (issueCount + olderEmpty) + " 条", 14));
+        if (issueCount > issues.size()) body.addView(homeLabel("显示最近 " + issues.size() + " 条", 11, INK2, 400));
+        if (olderEmpty > 0) issues.add(0, "旧记录中有 " + olderEmpty + " 组回复未返回数据");
+        if (issues.isEmpty()) body.addView(homeLabel("本次未记录异常", 13, INK2, 400));
+        else for (String issue : issues) dialogNote(body, issue);
+        dialogActions(dialog, panel, "关闭", canRetry ? "重试失败项" : null, false, null,
+                () -> showRetryOptions(record));
         showCardDialog(dialog, panel);
     }
 
@@ -2615,27 +2735,15 @@ public class MainActivity extends Activity {
             showTopNotice("请暂停扫描并等待当前页保存完成");
             return;
         }
-        ArrayList<String> choices = new ArrayList<>();
-        ArrayList<Runnable> actions = new ArrayList<>();
+        ArrayList<String> parents;
+        int mediaFailures;
         synchronized (record) {
-            if (!record.failedMedia.isEmpty()) {
-                choices.add("重试失败素材（" + record.failedMedia.size() + " 个）");
-                actions.add(() -> retryFailedMedia(record));
-            }
-            for (String parent : record.failedReplies.keySet()) {
-                choices.add("重试回复组 · " + parent);
-                actions.add(() -> retryFailedReply(record, parent));
-            }
+            mediaFailures = record.failedMedia.size();
+            parents = new ArrayList<>(record.failedReplies.keySet());
         }
-        if (choices.isEmpty()) return;
+        if (mediaFailures == 0 && parents.isEmpty()) return;
         android.app.Dialog dialog = new android.app.Dialog(this);
-        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(20), dp(20), dp(20), dp(16));
-        panel.setBackground(shape(SURFACE, 24));
-        panel.addView(label("选择失败项", 20, INK, true));
-
+        LinearLayout panel = dialogPanel(R.drawable.dialog_retry, false, "选择重试内容", "只处理失败项，保留已有结果。");
         ScrollView scroll = dialogScroll();
         LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(-1, -2, 1);
         scrollParams.topMargin = dp(12);
@@ -2643,29 +2751,39 @@ public class MainActivity extends Activity {
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(list);
-        for (int i = 0; i < choices.size(); i++) {
-            Runnable action = actions.get(i);
-            TextView item = label(choices.get(i), 14, ACCENT, true);
-            item.setGravity(Gravity.CENTER_VERTICAL);
-            item.setMinHeight(dp(50));
-            item.setPadding(dp(12), dp(8), dp(12), dp(8));
-            item.setBackground(shape(ACCENT_SOFT, 12));
-            LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(-1, -2);
-            if (i > 0) itemParams.topMargin = dp(8);
-            list.addView(item, itemParams);
-            item.setOnClickListener(v -> {
-                dialog.dismiss();
-                action.run();
-            });
+        if (mediaFailures > 0) addRetryChoice(list, "失败素材 · " + mediaFailures + " 个", "重新下载未成功的文件",
+                R.drawable.extract_download, () -> dismissCardDialog(dialog, () -> retryFailedMedia(record)));
+        for (int i = 0; i < parents.size(); i++) {
+            String parent = parents.get(i);
+            addRetryChoice(list, "回复组 " + (i + 1), "从上次中断的位置继续", R.drawable.dialog_retry,
+                    () -> dismissCardDialog(dialog, () -> retryFailedReply(record, parent)));
         }
-
-        Button cancel = shareButton("取消", v -> dialog.dismiss());
-        cancel.setTextColor(INK);
-        cancel.setBackground(shape(TRACK, 12));
-        LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(-1, dp(48));
-        cancelParams.topMargin = dp(12);
-        panel.addView(cancel, cancelParams);
+        dialogNote(panel, "点击一项即可开始重试");
+        dialogActions(dialog, panel, "关闭", null, false, null, null);
         showCardDialog(dialog, panel);
+    }
+
+    private void addRetryChoice(LinearLayout list, String title, String detail, int resource, Runnable action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(12), dp(12), dp(12));
+        row.setMinimumHeight(dp(62));
+        row.setBackground(shape(TRACK, 13));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        if (list.getChildCount() > 0) params.topMargin = dp(10);
+        list.addView(row, params);
+        row.addView(icon(resource, ACCENT), new LinearLayout.LayoutParams(dp(20), dp(20)));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(0, -2, 1);
+        wp.leftMargin = dp(10);
+        wp.rightMargin = dp(8);
+        row.addView(words, wp);
+        words.addView(homeLabel(title, 13, INK, 650));
+        words.addView(homeLabel(detail, 11, INK2, 400));
+        row.addView(icon(R.drawable.extract_chevron, INK2), new LinearLayout.LayoutParams(dp(14), dp(14)));
+        row.setOnClickListener(v -> action.run());
+        pressFeedback(row);
     }
 
     private void retryFailedMedia(ScanRecord record) {
@@ -3054,16 +3172,16 @@ public class MainActivity extends Activity {
             request.deny();
             return;
         }
-        showConfirmation(android.R.drawable.ic_menu_camera, false, "抖音网页请求相机",
-                "验证页面 " + request.getOrigin().getHost() + " 请求使用相机。请选择是否允许刷脸验证使用相机。",
-                "拒绝", "允许", request::deny, () -> {
+        showConfirmation(R.drawable.dialog_camera, false, "允许网页使用相机？",
+                "当前网页请求使用相机进行身份验证。",
+                "暂不允许", "允许使用", request::deny, () -> {
                     if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                         request.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
                     } else {
                         pendingCameraRequest = request;
                         requestPermissions(new String[]{Manifest.permission.CAMERA}, 1001);
                     }
-                });
+                }, "请求方：" + request.getOrigin().getHost());
     }
 
     @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] grants) {
@@ -3141,35 +3259,7 @@ public class MainActivity extends Activity {
     }
 
     private void showCopiedBanner() {
-        View decor = getWindow().getDecorView();
-        if (copiedBanner != null) copiedBanner.dismiss();
-        TextView banner = label("已复制", 12, Color.WHITE, true);
-        banner.setGravity(Gravity.CENTER);
-        banner.setPadding(dp(16), 0, dp(16), 0);
-        banner.setBackground(shape(Color.rgb(23, 37, 43), 17));
-        PopupWindow popup = new PopupWindow(banner, -2, dp(34));
-        popup.setElevation(dp(8));
-        popup.setFocusable(false);
-        popup.setTouchable(false);
-        popup.setOutsideTouchable(false);
-        copiedBanner = popup;
-        int[] location = new int[2];
-        decor.getLocationOnScreen(location);
-        Rect frame = new Rect();
-        decor.getWindowVisibleDisplayFrame(frame);
-        int top = Math.max(dp(10), frame.top - location[1] + dp(10));
-        popup.showAtLocation(decor, Gravity.TOP | Gravity.CENTER_HORIZONTAL, 0, top);
-        banner.setAlpha(0f);
-        banner.animate().alpha(1f).setDuration(120).start();
-        decor.postDelayed(() -> {
-            if (copiedBanner != popup) return;
-            banner.animate().alpha(0f).setDuration(200).withEndAction(() -> {
-                if (copiedBanner == popup) {
-                    copiedBanner = null;
-                    popup.dismiss();
-                }
-            }).start();
-        }, 800);
+        showBottomNotice("链接已复制");
     }
 
     private void flashCopied(ImageView button) {
@@ -3351,12 +3441,8 @@ public class MainActivity extends Activity {
         status.setText("已扫描 " + record.scanned + " 条评论（主评论 " + record.mainScanned + "、回复 " + record.replyScanned + "），找到 " + media.size() + " 个不同媒体（扫描完成）");
         browserPanel.setVisibility(View.GONE);
         updateWebToggle();
-        if (showingReader) new AlertDialog.Builder(this)
-                .setTitle("小红书评论扫描完成")
-                .setMessage("已扫描 " + record.scanned + " 条评论（主评论 " + record.mainScanned + "、回复 " + record.replyScanned + "），提取 " + media.size() + " 个不同素材。结果已暂存。")
-                .setPositiveButton("查看结果", (dialog, which) -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()))
-                .show();
-        else showTopNotice("扫描完成 · 已提取 " + media.size() + " 个素材");
+        showBottomNotice("扫描完成 · 主评论 " + record.mainScanned + " · 回复 " + record.replyScanned
+                + " · 素材 " + media.size());
     }
 
     private void startPage() {
@@ -3533,9 +3619,10 @@ public class MainActivity extends Activity {
         recordScanPause(reason + "（重试后仍失败）");
         status.setText(reason + "，扫描已暂停；已提取的素材仍在暂存记录中");
         updateScanCard();
-        if (showingReader) showConfirmation(android.R.drawable.ic_popup_sync, false, "评论扫描已暂停",
-                "当前页连续重试后仍无法读取。已提取的素材仍在暂存记录中，可以继续扫描当前页。",
-                "稍后再试", "继续扫描", null, () -> scanButton.performClick());
+        if (showingReader) showConfirmation(R.drawable.extract_pause, false, "扫描暂时中断",
+                "当前页多次读取失败。\n已提取素材已保留，可从当前页继续。",
+                "稍后再试", "继续扫描", null, () -> scanButton.performClick(),
+                "已读 " + currentRecord.scanned + " 条评论 · 已提取 " + currentRecord.items.size() + " 个素材");
     }
 
     private static JSONObject javascriptObject(String value) throws Exception {
@@ -3674,14 +3761,9 @@ public class MainActivity extends Activity {
         browserPanel.setVisibility(View.GONE);
         updateWebToggle();
         readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
-        if (showingReader) new AlertDialog.Builder(this)
-                .setTitle(record.includeReplies ? "评论扫描完成" : "主评论扫描完成")
-                .setMessage((record.includeReplies ? "主评论 " + record.mainScanned + " 条，回复 " + record.replyScanned + " 条"
-                        : "主评论 " + record.mainScanned + " 条") + "，提取 " + media.size() + " 个不同素材。结果已暂存。"
-                        + (record.emptyReplyLists > 0 ? "\n" + record.emptyReplyLists + " 组回复未返回数据，未计入扫描数。" : ""))
-                .setPositiveButton("查看结果", (dialog, which) -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()))
-                .show();
-        else showTopNotice("扫描完成 · 已提取 " + media.size() + " 个素材");
+        showBottomNotice("扫描完成 · 主评论 " + record.mainScanned + " · 回复 " + record.replyScanned
+                + " · 素材 " + media.size()
+                + (record.emptyReplyLists > 0 ? "；" + record.emptyReplyLists + " 组回复未返回数据，可查看明细" : ""));
     }
 
     private boolean download(ScanRecord record, String source, String commentId, String kind) {
@@ -4012,80 +4094,109 @@ public class MainActivity extends Activity {
             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(Intent.createChooser(send, "分享素材"));
         } catch (java.io.IOException | RuntimeException error) {
-            Toast.makeText(this, "无法分享，请确认素材仍在本机", Toast.LENGTH_SHORT).show();
+            showTopNotice("无法分享，请确认素材仍在本机");
         }
     }
 
-    private void addPreviewAction(LinearLayout row, String text, View.OnClickListener action) {
-        Button button = new Button(row.getContext(), null, android.R.attr.borderlessButtonStyle);
-        button.setText(text);
-        button.setTextColor(ACCENT);
-        button.setMaxLines(1);
-        button.setMinWidth(0);
-        button.setMinimumWidth(0);
-        button.setPadding(dp(2), 0, dp(2), 0);
-        button.setAutoSizeTextTypeUniformWithConfiguration(10, 14, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
-        button.setOnClickListener(action);
-        row.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
+    private void addPreviewAction(LinearLayout row, String text, int resource, boolean primary, View.OnClickListener action) {
+        Button button = dialogButton(text, primary, false, action);
+        button.setTextSize(11);
+        button.setSingleLine(true);
+        button.setAutoSizeTextTypeUniformWithConfiguration(7, 11, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
+        button.setPadding(dp(2), dp(8), dp(2), dp(8));
+        if (text.length() <= 2) {
+            Drawable drawable = getDrawable(resource).mutate();
+            drawable.setTint(primary ? Color.WHITE : INK2);
+            drawable.setBounds(0, 0, dp(14), dp(14));
+            button.setCompoundDrawablesRelative(drawable, null, null, null);
+            button.setCompoundDrawablePadding(dp(3));
+        }
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        if (row.getChildCount() > 0) params.leftMargin = dp(5);
+        row.addView(button, params);
     }
 
     private void preview(Media item) {
+        android.app.Dialog dialog = new android.app.Dialog(this);
         try {
-            boolean isVideo = "video/mp4".equals(item.mime);
-            AlertDialog dialog = new AlertDialog.Builder(this).setTitle(item.file.getName()).create();
-            LinearLayout panel = new LinearLayout(dialog.getContext());
-            panel.setOrientation(LinearLayout.VERTICAL);
+            boolean isVideo = item.mime.startsWith("video/");
+            LinearLayout panel = dialogPanel(0, false, "素材预览", null);
+            String formatName = item.mime.substring(item.mime.indexOf('/') + 1).toUpperCase(Locale.ROOT);
+            TextView info = homeLabel(formatName, 11, INK2, 400);
+            panel.addView(info);
+            int limit = Math.min(dp(320), getResources().getDisplayMetrics().heightPixels / 3);
+            FrameLayout frame = new FrameLayout(this);
+            frame.setBackground(shape(ACCENT_SOFT, 16));
+            frame.setClipToOutline(true);
+            LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(-1, limit);
+            fp.topMargin = dp(16);
+            panel.addView(frame, fp);
+            String size = android.text.format.Formatter.formatShortFileSize(this, item.file.length());
             Animatable animation = null;
             if (isVideo) {
+                info.setText(formatName + " · " + size);
                 VideoView video = new VideoView(this);
                 video.setVideoPath(item.file.getAbsolutePath());
-                video.setOnPreparedListener(player -> video.start());
+                video.setOnPreparedListener(player -> {
+                    int width = player.getVideoWidth(), height = player.getVideoHeight();
+                    info.setText(formatName + (width > 0 && height > 0 ? " · " + width + " × " + height : "") + " · " + size);
+                    video.start();
+                });
                 video.setOnErrorListener((player, what, extra) -> {
-                    showSaveResult("视频无法播放，可能是设备不支持该编码");
+                    dismissCardDialog(dialog, () -> showMessage(R.drawable.extract_play, "暂时无法播放",
+                            "当前设备未能播放这段视频。可以先保存文件，再用其他播放器打开。"));
                     return true;
                 });
                 video.setMediaController(new MediaController(this));
-                panel.addView(video, new LinearLayout.LayoutParams(-1, dp(260), 1));
+                frame.addView(video, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
                 dialog.setOnDismissListener(ignored -> video.stopPlayback());
             } else {
-                Drawable drawable = ImageDecoder.decodeDrawable(ImageDecoder.createSource(item.file));
+                int[] dimensions = new int[2];
+                Drawable drawable = ImageDecoder.decodeDrawable(ImageDecoder.createSource(item.file), (decoder, imageInfo, source) -> {
+                    dimensions[0] = imageInfo.getSize().getWidth();
+                    dimensions[1] = imageInfo.getSize().getHeight();
+                    int longest = Math.max(dimensions[0], dimensions[1]);
+                    if (longest > 1600) decoder.setTargetSize(Math.max(1, dimensions[0] * 1600 / longest),
+                            Math.max(1, dimensions[1] * 1600 / longest));
+                });
+                info.setText(formatName + " · " + dimensions[0] + " × " + dimensions[1] + " · " + size);
                 ImageView image = new ImageView(this);
+                image.setScaleType(ImageView.ScaleType.FIT_CENTER);
                 image.setImageDrawable(drawable);
-                image.setAdjustViewBounds(true);
-                panel.addView(image, new LinearLayout.LayoutParams(-1, -2, 1));
+                frame.addView(image, new FrameLayout.LayoutParams(-1, -1));
                 if (drawable instanceof Animatable) {
-                    Animatable animatedImage = (Animatable) drawable;
-                    animation = animatedImage;
-                    dialog.setOnDismissListener(ignored -> animatedImage.stop());
+                    Animatable animated = (Animatable) drawable;
+                    animation = animated;
+                    dialog.setOnDismissListener(ignored -> animated.stop());
                 }
             }
-
-            LinearLayout actions = new LinearLayout(dialog.getContext());
-            actions.setOrientation(LinearLayout.HORIZONTAL);
-            actions.setPadding(dp(8), 0, dp(8), 0);
-            panel.addView(actions, new LinearLayout.LayoutParams(-1, dp(52)));
-            addPreviewAction(actions, isFavorite(item) ? "取消收藏" : "收藏", v -> {
-                dialog.dismiss();
-                toggleFavorite(item);
-            });
-            addPreviewAction(actions, "分享", v -> shareMedia(Collections.singletonList(item)));
-            addPreviewAction(actions, "关闭", v -> dialog.dismiss());
-            addPreviewAction(actions, isVideo ? "保存此段" : "保存此张", v -> {
-                dialog.dismiss();
+            LinearLayout actions = new LinearLayout(this);
+            LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(-1, -2);
+            ap.topMargin = dp(16);
+            panel.addView(actions, ap);
+            addPreviewAction(actions, isFavorite(item) ? "取消收藏" : "收藏", R.drawable.dialog_heart, false,
+                    v -> dismissCardDialog(dialog, () -> toggleFavorite(item)));
+            addPreviewAction(actions, "分享", R.drawable.dialog_share, false, v -> shareMedia(Collections.singletonList(item)));
+            addPreviewAction(actions, "关闭", R.drawable.dialog_close, false, v -> dismissCardDialog(dialog, null));
+            addPreviewAction(actions, "保存", R.drawable.extract_download, true, v -> dismissCardDialog(dialog, () -> {
                 worker.execute(() -> {
                     try {
                         saveToDownloads(item);
-                        runOnUiThread(() -> showSaveResult("保存成功：" + item.file.getName()));
+                        runOnUiThread(() -> {
+                            status.setText("已保存 " + item.file.getName());
+                            showBottomNotice("保存成功");
+                        });
                     } catch (Exception error) {
-                        runOnUiThread(() -> showSaveResult("保存失败：" + error.getMessage()));
+                        runOnUiThread(() -> showMessage(R.drawable.extract_download, "这项素材未保存",
+                                fileFailureReason(error) + "素材仍在本机，可稍后重新保存。"));
                     }
                 });
-            });
-            dialog.setView(panel);
-            dialog.show();
+            }));
+            showCardDialog(dialog, panel);
             if (animation != null) animation.start();
         } catch (Exception error) {
-            status.setText("预览失败：" + error.getMessage());
+            dialog.dismiss();
+            showMessage(R.drawable.extract_info, "暂时无法预览", "未能读取这项素材，请确认文件仍在本机。");
         }
     }
 
@@ -4124,48 +4235,14 @@ public class MainActivity extends Activity {
                     showFavoriteNotice();
                     return;
                 }
-                Toast.makeText(this, result, Toast.LENGTH_SHORT).show();
                 if (showingFavorites) showFavorites();
+                showBottomNotice(result);
             });
         });
     }
 
     private void showFavoriteNotice() {
-        FrameLayout area = (FrameLayout) readerScroll.getParent();
-        if (favoriteNotice != null) area.removeView(favoriteNotice);
-
-        LinearLayout notice = new LinearLayout(this);
-        notice.setGravity(Gravity.CENTER_VERTICAL);
-        notice.setPadding(dp(16), dp(4), dp(6), dp(4));
-        notice.setBackground(card(14));
-        notice.setElevation(dp(6));
-        notice.addView(label("已收藏", 14, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
-
-        TextView action = label("查看收藏", 12, ACCENT, true);
-        action.setGravity(Gravity.CENTER);
-        action.setPadding(dp(12), 0, dp(12), 0);
-        action.setBackground(shape(ACCENT_SOFT, 10));
-        action.setOnClickListener(v -> {
-            area.removeView(notice);
-            favoriteNotice = null;
-            openFavorites(this::returnToReaderFromFavorites);
-        });
-        LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-2, dp(40));
-        actionParams.setMarginStart(dp(16));
-        notice.addView(action, actionParams);
-
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(192), -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        params.bottomMargin = dp(62);
-        favoriteNotice = notice;
-        area.addView(notice, params);
-        notice.setTranslationY(dp(16));
-        notice.setAlpha(0f);
-        notice.animate().translationY(0).alpha(1f).setDuration(150).start();
-        getWindow().getDecorView().postDelayed(() -> {
-            if (favoriteNotice != notice) return;
-            area.removeView(notice);
-            favoriteNotice = null;
-        }, 2000);
+        showBottomNotice("已收藏", "查看收藏", () -> openFavorites(this::returnToReaderFromFavorites));
     }
 
     private void openFavorites(Runnable onBack) {
@@ -4203,15 +4280,14 @@ public class MainActivity extends Activity {
         new FavoritesScreen().show();
     }
 
-    private void saveMediaBatch(ArrayList<Media> items, java.util.function.Consumer<String> onResult) {
+    private void saveMediaBatch(ArrayList<Media> items, java.util.function.BiConsumer<Integer, Integer> onResult) {
         worker.execute(() -> {
             int saved = 0;
             for (Media item : items) {
                 try { saveToDownloads(item); saved++; } catch (Exception ignored) { }
             }
-            String message = items.isEmpty() ? "没有可保存的文件"
-                    : "保存结果：成功 " + saved + " 个，失败 " + (items.size() - saved) + " 个";
-            runOnUiThread(() -> onResult.accept(message));
+            int success = saved, failed = items.size() - saved;
+            runOnUiThread(() -> onResult.accept(success, failed));
         });
     }
 
@@ -4306,10 +4382,10 @@ public class MainActivity extends Activity {
             save = addAction("保存", v -> {
                 busy = true;
                 updateActions();
-                saveMediaBatch(selection(), message -> {
+                saveMediaBatch(selection(), (saved, failed) -> {
                     busy = false;
                     updateActions();
-                    Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                    showSaveBatchResult(saved, failed);
                 });
             });
             remove = addAction("取消收藏", v -> confirmRemove());
@@ -4475,8 +4551,8 @@ public class MainActivity extends Activity {
 
         private void confirmRemove() {
             ArrayList<Media> snapshot = selection();
-            showConfirmation(R.drawable.ic_remove_favorite, true, "取消收藏 " + snapshot.size() + " 项？",
-                    "这 " + snapshot.size() + " 项将从收藏夹移除。\n扫描记录和已保存的文件仍会保留。",
+            showConfirmation(R.drawable.dialog_heart, true, "取消收藏这 " + snapshot.size() + " 项？",
+                    "选中素材将从收藏夹移除。\n扫描记录和已保存的文件仍会保留。",
                     "保留收藏", "取消收藏", null, () -> {
                 busy = true;
                 updateActions();
@@ -4494,8 +4570,10 @@ public class MainActivity extends Activity {
                             render();
                         }
                         int failed = snapshot.size() - removed.size();
-                        Toast.makeText(MainActivity.this, "已取消收藏 " + removed.size() + " 项"
-                                + (failed > 0 ? "，失败 " + failed + " 项" : ""), Toast.LENGTH_SHORT).show();
+                        String result = "已取消收藏 " + removed.size() + " 项";
+                        if (failed == 0) showBottomNotice(result);
+                        else showMessage(R.drawable.dialog_heart, "有 " + failed + " 项未移除",
+                                result + "，剩余 " + failed + " 项暂未移除，可重新选择后重试。");
                     });
                 });
             });
@@ -4523,28 +4601,150 @@ public class MainActivity extends Activity {
         return items;
     }
 
-    private void showSaveResult(String message) {
-        status.setText(message);
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+    private String fileFailureReason(Exception error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof android.system.ErrnoException
+                    && ((android.system.ErrnoException) cause).errno == android.system.OsConstants.ENOSPC)
+                return "设备可用空间不足，请清理后重试。";
+        }
+        if (error instanceof java.io.FileNotFoundException) return "文件或保存位置暂时无法访问。";
+        if (error instanceof SecurityException) return "无法访问所选文件或位置，请重新选择。";
+        return "当前无法完成文件操作，请稍后重试。";
+    }
+
+    private String archiveFailureReason(Exception error, boolean exporting) {
+        String message = error.getMessage() == null ? "" : error.getMessage();
+        if (exporting) {
+            if (message.contains("超过 2 GB")) return "备份超过 2 GB，请清理不需要的记录后重试。";
+            if (message.contains("记录素材缺失")) return "部分暂存素材已不存在，请检查扫描记录后重试。";
+            if (message.contains("暂存失败")) return "扫描记录暂存失败，请稍后重试。";
+            return fileFailureReason(error) + "可更换保存位置后重试。";
+        }
+        if (message.contains("素材缺失") || message.contains("清单缺失"))
+            return "备份文件不完整，缺少记录或素材。请重新选择完整的备份文件。";
+        if (message.contains("过大")) return "备份过大或文件无效，请重新选择受支持的记录备份。";
+        if (error instanceof SecurityException || error instanceof java.io.FileNotFoundException)
+            return fileFailureReason(error);
+        return "备份文件无法读取或格式不受支持。请选择完整的咻咿提取备份文件。";
+    }
+
+    private void dialogStats(LinearLayout panel, String[] names, String[] values, boolean lastFailed) {
+        LinearLayout stats = new LinearLayout(this);
+        stats.setBackground(shape(ACCENT_SOFT, 12));
+        stats.setPadding(dp(6), dp(12), dp(6), dp(12));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(14);
+        panel.addView(stats, params);
+        for (int i = 0; i < names.length; i++) {
+            LinearLayout column = new LinearLayout(this);
+            column.setOrientation(LinearLayout.VERTICAL);
+            column.setGravity(Gravity.CENTER);
+            stats.addView(column, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView value = homeLabel(values[i], 20, lastFailed && i == names.length - 1
+                    ? Color.parseColor(darkMode ? "#FF8290" : "#D94855") : ACCENT, 750);
+            value.setGravity(Gravity.CENTER);
+            column.addView(value);
+            TextView name = homeLabel(names[i], 11, INK2, 450);
+            name.setGravity(Gravity.CENTER);
+            column.addView(name);
+        }
+    }
+
+    private void showSaveBatchResult(int saved, int failed) {
+        String result = saved + failed == 0 ? "没有可保存的文件" : "已保存 " + saved + " 项";
+        status.setText(failed == 0 ? result : result + "，另有 " + failed + " 项未保存");
+        if (failed == 0) {
+            showBottomNotice(result);
+            return;
+        }
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.extract_download, false,
+                saved == 0 ? "本次保存未成功" : "有 " + failed + " 项未保存",
+                (saved == 0 ? "文件未能写入下载目录。" : "部分文件未能写入下载目录。")
+                        + "\n素材仍在本机，可稍后重新保存。");
+        dialogStats(panel, new String[]{"保存成功", "保存失败"}, new String[]{saved + " 项", failed + " 项"}, true);
+        dialogActions(dialog, panel, null, "知道了", false, null, null);
+        showCardDialog(dialog, panel);
     }
 
     private void showTopNotice(String message) {
+        showTopNotice(message, null, null);
+    }
+
+    private void showTopNotice(String message, String actionLabel, Runnable action) {
+        showNotice(message, actionLabel, action, false);
+    }
+
+    private void showBottomNotice(String message) {
+        showBottomNotice(message, null, null);
+    }
+
+    private void showBottomNotice(String message, String actionLabel, Runnable action) {
+        showNotice(message, actionLabel, action, true);
+    }
+
+    private void showNotice(String message, String actionLabel, Runnable action, boolean bottom) {
+        if (isFinishing() || isDestroyed()) return;
         if (noticePopup != null) noticePopup.dismiss();
-        TextView notice = label(message, 13, Color.WHITE, true);
-        notice.setGravity(Gravity.CENTER);
-        notice.setMaxWidth(dp(320));
-        notice.setPadding(dp(16), dp(11), dp(16), dp(11));
-        notice.setBackground(shape(darkMode ? Color.rgb(45, 62, 97) : Color.rgb(15, 23, 42), 12));
+        View decor = getWindow().getDecorView();
+        LinearLayout notice = new LinearLayout(this);
+        notice.setGravity(Gravity.CENTER_VERTICAL);
+        notice.setPadding(dp(16), dp(6), dp(action == null ? 16 : 8), dp(6));
+        notice.setMinimumHeight(dp(44));
+        notice.setBackground(card(14));
+        TextView text = label(message, 13, INK, true);
+        text.setGravity(Gravity.CENTER_VERTICAL);
+        notice.addView(text, new LinearLayout.LayoutParams(-2, -2));
+        int maxWidth = Math.min(dp(360), (decor.getWidth() > 0 ? decor.getWidth()
+                : getResources().getDisplayMetrics().widthPixels) - dp(40));
+        int actionWidth = 0;
         PopupWindow popup = new PopupWindow(notice, -2, -2);
         popup.setElevation(dp(8));
+        popup.setFocusable(false);
+        popup.setTouchable(action != null);
+        popup.setOutsideTouchable(false);
+        popup.setTouchModal(false);
+        if (action != null) {
+            TextView button = label(actionLabel, 12, ACCENT, true);
+            button.setGravity(Gravity.CENTER);
+            button.setPadding(dp(12), 0, dp(12), 0);
+            button.setBackground(shape(ACCENT_SOFT, 10));
+            button.setOnClickListener(v -> {
+                popup.dismiss();
+                if (noticePopup == popup) noticePopup = null;
+                action.run();
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, dp(40));
+            params.leftMargin = dp(12);
+            button.measure(View.MeasureSpec.makeMeasureSpec(maxWidth, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(dp(40), View.MeasureSpec.EXACTLY));
+            actionWidth = button.getMeasuredWidth() + params.leftMargin;
+            notice.addView(button, params);
+        }
+        text.setMaxWidth(Math.max(dp(40), maxWidth - notice.getPaddingLeft()
+                - notice.getPaddingRight() - actionWidth));
+        notice.measure(View.MeasureSpec.makeMeasureSpec(maxWidth, View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        popup.setWidth(notice.getMeasuredWidth());
         noticePopup = popup;
-        popup.showAtLocation(readerRoot, Gravity.TOP | Gravity.CENTER_HORIZONTAL, 0, dp(64));
-        readerRoot.postDelayed(() -> {
+        int[] location = new int[2];
+        decor.getLocationOnScreen(location);
+        Rect frame = new Rect();
+        decor.getWindowVisibleDisplayFrame(frame);
+        int offset = bottom ? Math.max(dp(86), decor.getHeight() + location[1] - frame.bottom + dp(86))
+                : Math.max(dp(12), frame.top - location[1] + dp(12));
+        popup.showAtLocation(decor, (bottom ? Gravity.BOTTOM : Gravity.TOP) | Gravity.CENTER_HORIZONTAL, 0, offset);
+        if (motionEnabled) {
+            notice.setAlpha(0f);
+            notice.setTranslationY(dp(bottom ? 8 : -8));
+            notice.animate().alpha(1f).translationY(0).setDuration(150).start();
+        }
+        decor.postDelayed(() -> {
             if (noticePopup == popup) {
                 popup.dismiss();
                 noticePopup = null;
             }
-        }, 2000);
+        }, action == null ? 2000 : 4000);
     }
 
     private void saveToDownloads(Media item) throws Exception {
