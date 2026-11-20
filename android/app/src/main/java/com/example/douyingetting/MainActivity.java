@@ -100,7 +100,6 @@ public class MainActivity extends Activity {
     private boolean xhsMode;
     private TextView readerHeading;
     private TextView browserHint;
-    private Button codeLogin;
     private WebView browser;
     private EditText input;
     private TextView status;
@@ -1759,7 +1758,6 @@ public class MainActivity extends Activity {
         input.setHint(xhsMode ? "粘贴小红书笔记链接或分享文案" : "粘贴抖音作品链接或分享文案");
         browserHint.setText(xhsMode ? "在网页中登录并打开笔记评论，扫描时会读取评论素材" : douyinReadReplies
                 ? "在网页中登录并打开评论区，然后扫描主评论与回复" : "在网页中登录并打开评论区，然后扫描主评论");
-        codeLogin.setVisibility(xhsMode ? View.GONE : View.VISIBLE);
         scanButton.setText(xhsMode || douyinReadReplies ? "扫描评论" : "扫描主评论");
         status.setText(xhsMode ? "粘贴笔记链接，打开网页后进入评论区" : "粘贴作品链接，打开网页后进入评论区");
     }
@@ -1861,7 +1859,7 @@ public class MainActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(20), dp(6), dp(20), dp(28));
         scroll.addView(page);
-        addRecordCards(page);
+        addRecordCards(page, total);
         presentSecondary(root);
     }
 
@@ -1871,7 +1869,7 @@ public class MainActivity extends Activity {
         else showReader();
     }
 
-    private void addRecordCards(LinearLayout page) {
+    private void addRecordCards(LinearLayout page, TextView total) {
         TextView hint = label("本机暂存 · 删除记录不会影响已保存到下载目录的文件", 11, INK3, false);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
         hintParams.topMargin = dp(2);
@@ -1977,7 +1975,17 @@ public class MainActivity extends Activity {
             TextView delete = label("删除记录", 12, DANGER, true);
             LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(-2, -2);
             deleteParams.leftMargin = dp(12);
-            delete.setOnClickListener(v -> confirmDelete(record));
+            delete.setOnClickListener(v -> confirmDelete(record, () -> {
+                if (!showingRecords || !page.isAttachedToWindow()) return;
+                page.removeView(card);
+                int remaining = 0;
+                for (ScanRecord item : records) if (isXhsLink(item.link) == xhsRecord) remaining++;
+                total.setText("共 " + remaining + " 条");
+                if (remaining == 0) {
+                    page.removeAllViews();
+                    addRecordCards(page, total);
+                }
+            }));
             actions.addView(delete, deleteParams);
 
             card.setOnClickListener(v -> showRecord(record));
@@ -2178,7 +2186,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void confirmDelete(ScanRecord record) {
+    private void confirmDelete(ScanRecord record, Runnable onDeleted) {
         showConfirmation(R.drawable.dialog_trash, true, "删除这条扫描记录？",
                 "这条记录及暂存素材将被删除。\n已保存到下载目录的文件不受影响。",
                 "保留记录", "删除记录", null, () -> {
@@ -2197,7 +2205,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (deleted) {
                         records.remove(record);
-                        showRecords();
+                        onDeleted.run();
                         showBottomNotice("记录已删除");
                     } else {
                         showMessage(R.drawable.dialog_trash, "记录未能完全删除",
@@ -2429,20 +2437,6 @@ public class MainActivity extends Activity {
         browserPanel.addView(browserHint);
         setupBrowser();
         browserPanel.addView(browser, new LinearLayout.LayoutParams(-1, dp(290)));
-        codeLogin = new Button(this);
-        codeLogin.setAllCaps(false);
-        codeLogin.setText("验证码登录");
-        codeLogin.setTextColor(INK2);
-        codeLogin.setTextSize(13);
-        codeLogin.setBackground(card(10));
-        codeLogin.setMinHeight(0);
-        codeLogin.setStateListAnimator(null);
-        codeLogin.setOnClickListener(v -> browser.evaluateJavascript(
-                "(() => {const tab=[...document.querySelectorAll('button,div,span')].find(x=>x.children.length===0&&x.textContent.trim()==='验证码登录'&&x.getBoundingClientRect().width>0);if(tab){tab.click();return true}return false})()",
-                found -> showTopNotice("true".equals(found) ? "请在抖音网页中输入手机号和验证码" : "请先在网页中点登录，再选择验证码登录")));
-        LinearLayout.LayoutParams loginParams = new LinearLayout.LayoutParams(-1, dp(44));
-        loginParams.topMargin = dp(8);
-        browserPanel.addView(codeLogin, loginParams);
         scanButton = new Button(this);
         scanButton.setAllCaps(false);
         scanButton.setText("扫描评论");
