@@ -12,7 +12,7 @@ $out  = Join-Path $dir 'png'
 $tmp  = Join-Path $env:TEMP 'dsh-dyui'
 New-Item -ItemType Directory -Force $out, $tmp | Out-Null
 $base = 'file:///' + ($dir -replace '\\', '/')
-$screens = @('home', 'reader-scan', 'reader-results', 'records')
+$screens = @('home', 'reader-scan', 'reader-results', 'records', 'settings')
 if ($Only) { $screens = @($Only) }
 
 foreach ($f in $screens) {
@@ -36,7 +36,7 @@ foreach ($f in $screens) {
 if (-not $Only) {
   $png = Join-Path $out 'preview.png'
   $all = @('--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-           "--user-data-dir=$tmp\profile-preview", '--window-size=1700,966', '--force-device-scale-factor=1.5',
+           "--user-data-dir=$tmp\profile-preview", '--window-size=2130,966', '--force-device-scale-factor=1.5',
            '--hide-scrollbars', "--screenshot=$png", "$base/preview.html")
   Start-Process -FilePath $Chrome -Wait -RedirectStandardError (Join-Path $tmp 'preview-shot.err') -ArgumentList $all | Out-Null
   $psize = 0

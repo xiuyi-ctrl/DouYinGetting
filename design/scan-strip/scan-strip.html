@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>咻咿提取 · 扫描计时条</title>
+<style>
+  @font-face {
+    font-family: "Manrope"; src: url("../home-blue-v2/assets/Manrope.ttf") format("truetype");
+    font-weight: 200 800; font-display: block;
+  }
+  @font-face {
+    font-family: "NotoSansSC"; src: url("../home-blue-v2/assets/NotoSansSC.ttf") format("truetype");
+    font-weight: 100 900; font-display: block;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1282px;
+    padding: 30px 32px 34px;
+    background: #DDE3EE;
+    color: #0F172A;
+    font-family: "NotoSansSC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .head { margin: 0 0 20px 4px; }
+  .head h1 { margin: 0; font-size: 25px; font-weight: 800; letter-spacing: .2px; }
+  .head p { margin: 7px 0 0; font-size: 12.5px; color: #536176; }
+  .head .chips { margin-top: 11px; display: flex; gap: 8px; }
+  .chip {
+    height: 25px; padding: 0 11px; border-radius: 999px;
+    background: #FFFFFF; border: 1px solid #D6DCE8;
+    font-size: 11.5px; font-weight: 700; color: #536176;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .chip i { width: 6px; height: 6px; border-radius: 50%; background: #456BFF; }
+
+  .theme-row { margin-top: 6px; }
+  .theme-label {
+    display: flex; align-items: center; gap: 9px; margin: 16px 0 11px 4px;
+    font-size: 12px; font-weight: 800; color: #536176; letter-spacing: .6px;
+  }
+  .theme-label b { color: #0F172A; font-size: 14px; }
+  .theme-label span { font-family: "Manrope"; font-weight: 800; font-size: 11px; color: #8A94A6; letter-spacing: 1px; }
+  .theme-label .rule { flex: 1; height: 1px; background: #CDD5E3; }
+  .swatch { width: 16px; height: 16px; border-radius: 5px; border: 1px solid rgba(15,23,42,.18); }
+
+  .row { display: flex; gap: 24px; }
+  figure { margin: 0; }
+
+  /* ---------- 面板 ---------- */
+  .slab {
+    width: 390px; height: 210px; border-radius: 18px; padding: 8px 16px 16px;
+    background: #F4F6FA; position: relative; overflow: hidden;
+    border: 1px solid rgba(15, 23, 42, .10);
+  }
+  .dark .slab { background: #0D1320; border-color: rgba(255, 255, 255, .10); }
+
+  /* 收起 / 暂停 */
+  .strip {
+    height: 30px; border-radius: 15px; background: #FFFFFF;
+    border: 1px solid #DCE2ED;
+    display: flex; align-items: center; gap: 8px; padding: 0 12px;
+  }
+  .dark .strip { background: #1A2436; border-color: #303E55; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: #456BFF; flex: none; position: relative; }
+  .dot::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; background: rgba(69, 107, 255, .16); }
+  .dark .dot { background: #708CFF; }
+  .dark .dot::after { background: rgba(112, 140, 255, .18); }
+  .strip.paused .dot { background: #738198; }
+  .strip.paused .dot::after { background: rgba(115, 129, 152, .16); }
+  .dark .strip.paused .dot { background: #95A6C1; }
+  .dark .strip.paused .dot::after { background: rgba(149, 166, 193, .16); }
+
+  .time {
+    font-family: "Manrope"; font-size: 12px; font-weight: 700; color: #0F172A;
+    font-variant-numeric: tabular-nums; letter-spacing: .3px;
+  }
+  .dark .time { color: #F3F6FF; }
+  .meta { font-size: 11px; font-weight: 500; color: #536176; }
+  .dark .meta { color: #BEC9DC; }
+  .grow { flex: 1; }
+  .chev { display: flex; color: #738198; }
+  .dark .chev { color: #95A6C1; }
+  .resume {
+    height: 22px; padding: 0 10px; border-radius: 999px; background: #E7EDFF;
+    color: #456BFF; font-size: 11px; font-weight: 800;
+    display: inline-flex; align-items: center;
+  }
+  .dark .resume { background: #24345C; color: #708CFF; }
+
+  /* 展开 */
+  .card-strip {
+    height: 112px; border-radius: 16px; background: #FFFFFF;
+    border: 1px solid #DCE2ED;
+    padding: 12px 14px; display: flex; flex-direction: column;
+  }
+  .dark .card-strip { background: #1A2436; border-color: #303E55; }
+  .cs-top { display: flex; align-items: center; gap: 8px; height: 20px; }
+  .cs-top b { font-size: 12px; font-weight: 800; color: #0F172A; }
+  .dark .cs-top b { color: #F3F6FF; }
+  .cs-time { font-family: "Manrope"; font-size: 12px; font-weight: 700; color: #536176; font-variant-numeric: tabular-nums; letter-spacing: .3px; }
+  .dark .cs-time { color: #BEC9DC; }
+  .cs-counts { margin-top: 2px; height: 16px; font-size: 11px; color: #536176; }
+  .dark .cs-counts { color: #BEC9DC; }
+  .track { margin-top: 8px; height: 3px; border-radius: 2px; background: #E9EDF4; overflow: hidden; flex: none; }
+  .dark .track { background: #222E42; }
+  .track i { display: block; height: 100%; width: 25%; border-radius: 2px; background: #456BFF; }
+  .dark .track i { background: #708CFF; }
+  .cs-actions { margin-top: auto; display: flex; gap: 10px; height: 28px; }
+  .cs-actions button {
+    flex: 1; height: 28px; border-radius: 12px; font: 700 12px/1 "NotoSansSC", "Microsoft YaHei", sans-serif;
+    border: 1px solid transparent;
+  }
+  .btn-ghost { background: #FFFFFF; border-color: #DCE2ED; color: #536176; }
+  .dark .btn-ghost { background: #1A2436; border-color: #303E55; color: #BEC9DC; }
+  .btn-soft { background: #E7EDFF; color: #315AFF; }
+  .dark .btn-soft { background: #24345C; color: #708CFF; }
+
+  /* 底图占位 */
+  .ph { margin-top: 10px; border-radius: 14px; background: #FFFFFF; border: 1px solid #DCE2ED; padding: 12px 14px; }
+  .dark .ph { background: #1A2436; border-color: #303E55; }
+  .ph i { display: block; height: 9px; border-radius: 5px; background: #E9EDF4; }
+  .dark .ph i { background: #222E42; }
+  .ph i + i { margin-top: 7px; }
+  .ph i.w60 { width: 60%; }
+  .ph i.w35 { width: 35%; }
+
+  figcaption { margin-top: 11px; width: 390px; font-size: 12px; line-height: 1.55; color: #536176; }
+  figcaption b { display: block; color: #0F172A; font-size: 13.5px; font-weight: 800; margin-bottom: 3px; }
+  figcaption b em { font-style: normal; font-family: "Manrope"; font-weight: 800; color: #456BFF; margin-right: 6px; }
+  figcaption u { text-decoration: none; font-weight: 700; color: #0F172A; }
+
+  /* ---------- 规格 ---------- */
+  .spec { margin-top: 26px; display: flex; gap: 24px; }
+  .spec-col { background: #FFFFFF; border: 1px solid #DCE2ED; border-radius: 18px; padding: 18px 20px; }
+  .spec-col h3 { margin: 0 0 12px; font-size: 13px; font-weight: 800; letter-spacing: .3px; }
+  .spec-col h3 span { color: #8A94A6; font-weight: 600; margin-left: 6px; font-size: 11px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; font-size: 12px; padding: 6px 10px 6px 0; vertical-align: top; }
+  th { color: #8A94A6; font-weight: 700; font-size: 11px; border-bottom: 1px solid #E7EDF6; }
+  td { color: #0F172A; border-bottom: 1px solid #F0F4FA; }
+  tr:last-child td { border-bottom: 0; }
+  td.k { color: #536176; white-space: nowrap; }
+  td.v { font-family: "Manrope", "NotoSansSC"; font-weight: 700; white-space: nowrap; }
+  td.hex { font-family: "Manrope"; font-weight: 700; font-size: 11.5px; white-space: nowrap; }
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; border: 1px solid rgba(15,23,42,.14); vertical-align: -1px; margin-right: 5px; }
+  ul { margin: 0; padding: 0; list-style: none; }
+  li { font-size: 12px; color: #536176; line-height: 1.8; padding-left: 14px; position: relative; }
+  li::before { content: ""; position: absolute; left: 0; top: 8px; width: 5px; height: 5px; border-radius: 50%; background: #C3CCDC; }
+  li b { color: #0F172A; font-weight: 800; }
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>扫描计时条 · 组件稿</h1>
+  <p>配合 4.0 蓝色界面 · 390dp 基准 · 浅色 / 深色双套 · 同一时间只保留一个扫描会话</p>
+  <div class="chips">
+    <span class="chip"><i></i>收起 30dp</span>
+    <span class="chip">展开 112dp</span>
+    <span class="chip">暂停即收起</span>
+    <span class="chip">回读取页隐藏</span>
+  </div>
+</div>
+
+<!-- ============ 浅色 ============ -->
+<div class="theme-row">
+  <div class="theme-label">
+    <span class="swatch" style="background:#F4F6FA"></span><b>浅色</b><span>LIGHT</span><span class="rule"></span>
+  </div>
+  <div class="row">
+    <figure>
+      <div class="slab">
+        <div class="strip">
+          <span class="dot"></span>
+          <span class="time">00:42</span>
+          <span class="meta">已读 459 条</span>
+          <span class="grow"></span>
+          <span class="chev">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </div>
+        <div class="ph"><i class="w60"></i><i class="w35"></i></div>
+        <div class="ph"><i class="w35"></i></div>
+      </div>
+      <figcaption><b><em>01</em>扫描中 · 收起</b>高 <u>30dp</u>，圆角 15，左右 16、上下 8；点击整条展开。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="slab">
+        <div class="card-strip">
+          <div class="cs-top">
+            <span class="dot"></span>
+            <b>正在扫描 · 回复</b>
+            <span class="grow"></span>
+            <span class="cs-time">00:42</span>
+            <span class="chev">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>
+            </span>
+          </div>
+          <div class="cs-counts">主评论 459 · 回复组 3/12</div>
+          <div class="track"><i></i></div>
+          <div class="cs-actions">
+            <button class="btn-ghost">暂停</button>
+            <button class="btn-soft">结束</button>
+          </div>
+        </div>
+        <div class="ph"><i class="w60"></i><i class="w35"></i></div>
+      </div>
+      <figcaption><b><em>02</em>展开 · 操作卡</b>高 <u>112dp</u>，圆角 16；主评论阶段用不定进度，回复阶段按 <u>3/12</u> 确定进度。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="slab">
+        <div class="strip paused">
+          <span class="dot"></span>
+          <span class="time">00:42</span>
+          <span class="meta">已暂停 · 已读 459 条</span>
+          <span class="grow"></span>
+          <span class="resume">继续</span>
+        </div>
+        <div class="ph"><i class="w60"></i><i class="w35"></i></div>
+        <div class="ph"><i class="w35"></i></div>
+      </div>
+      <figcaption><b><em>03</em>已暂停</b>点暂停立刻收回成一条，点变灰、计时冻结；右侧「继续」恢复同一会话。</figcaption>
+    </figure>
+  </div>
+</div>
+
+<!-- ============ 深色 ============ -->
+<div class="theme-row dark">
+  <div class="theme-label">
+    <span class="swatch" style="background:#0D1320"></span><b>深色</b><span>DARK</span><span class="rule"></span>
+  </div>
+  <div class="row">
+    <figure>
+      <div class="slab">
+        <div class="strip">
+          <span class="dot"></span>
+          <span class="time">00:42</span>
+          <span class="meta">已读 459 条</span>
+          <span class="grow"></span>
+          <span class="chev">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </div>
+        <div class="ph"><i class="w60"></i><i class="w35"></i></div>
+        <div class="ph"><i class="w35"></i></div>
+      </div>
+      <figcaption><b><em>01</em>扫描中 · 收起</b>卡片 #1A2436、描边 #303E55，主色换 #708CFF，层级靠明度差而不是阴影。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="slab">
+        <div class="card-strip">
+          <div class="cs-top">
+            <span class="dot"></span>
+            <b>正在扫描 · 回复</b>
+            <span class="grow"></span>
+            <span class="cs-time">00:42</span>
+            <span class="chev">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>
+            </span>
+          </div>
+          <div class="cs-counts">主评论 459 · 回复组 3/12</div>
+          <div class="track"><i></i></div>
+          <div class="cs-actions">
+            <button class="btn-ghost">暂停</button>
+            <button class="btn-soft">结束</button>
+          </div>
+        </div>
+        <div class="ph"><i class="w60"></i><i class="w35"></i></div>
+      </div>
+      <figcaption><b><em>02</em>展开 · 操作卡</b>按钮高度与圆角同浅色；「结束」用主色浅底，不用警示红。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="slab">
+        <div class="strip paused">
+          <span class="dot"></span>
+          <span class="time">00:42</span>
+          <span class="meta">已暂停 · 已读 459 条</span>
+          <span class="grow"></span>
+          <span class="resume">继续</span>
+        </div>
+        <div class="ph"><i class="w60"></i><i class="w35"></i></div>
+        <div class="ph"><i class="w35"></i></div>
+      </div>
+      <figcaption><b><em>03</em>已暂停</b>暂停态和深色主题共用同一套结构，只换令牌，颜色不写死。</figcaption>
+    </figure>
+  </div>
+</div>
+
+<!-- ============ 规格 ============ -->
+<div class="spec">
+  <div class="spec-col" style="width: 597px">
+    <h3>尺寸<span>dp / sp</span></h3>
+    <table>
+      <tr><th>元素</th><th>规格</th><th>说明</th></tr>
+      <tr><td class="k">条高</td><td class="v">30</td><td>圆角 15；左右边距 16，上下留白 8</td></tr>
+      <tr><td class="k">展开卡</td><td class="v">112</td><td>圆角 16；内边距 12 / 14</td></tr>
+      <tr><td class="k">呼吸点</td><td class="v">6</td><td>外圈 14，主色 16%（深色 18%）</td></tr>
+      <tr><td class="k">进度轨</td><td class="v">3</td><td>圆角 2；不确定进度时用活动光带</td></tr>
+      <tr><td class="k">时间</td><td class="v">12 / 700</td><td>Manrope，等宽数字，字距 .3</td></tr>
+      <tr><td class="k">说明</td><td class="v">11 / 500</td><td>Noto Sans SC，次文字色</td></tr>
+      <tr><td class="k">按钮</td><td class="v">28 / 12</td><td>字 12 / 700；两键等宽、间距 10</td></tr>
+      <tr><td class="k">出现宽度</td><td class="v">96 → 屏宽−32</td><td>从胶囊横向撑满，300ms ease-out</td></tr>
+    </table>
+  </div>
+
+  <div class="spec-col" style="width: 597px">
+    <h3>颜色<span>跟随主题令牌</span></h3>
+    <table>
+      <tr><th>用途</th><th>浅色</th><th>深色</th></tr>
+      <tr><td class="k">条 / 卡底</td><td class="hex"><span class="sw" style="background:#FFFFFF"></span>#FFFFFF</td><td class="hex"><span class="sw" style="background:#1A2436"></span>#1A2436</td></tr>
+      <tr><td class="k">描边</td><td class="hex"><span class="sw" style="background:#DCE2ED"></span>#DCE2ED</td><td class="hex"><span class="sw" style="background:#303E55"></span>#303E55</td></tr>
+      <tr><td class="k">主色</td><td class="hex"><span class="sw" style="background:#456BFF"></span>#456BFF</td><td class="hex"><span class="sw" style="background:#708CFF"></span>#708CFF</td></tr>
+      <tr><td class="k">主色浅底</td><td class="hex"><span class="sw" style="background:#E7EDFF"></span>#E7EDFF</td><td class="hex"><span class="sw" style="background:#24345C"></span>#24345C</td></tr>
+      <tr><td class="k">进度轨</td><td class="hex"><span class="sw" style="background:#E9EDF4"></span>#E9EDF4</td><td class="hex"><span class="sw" style="background:#222E42"></span>#222E42</td></tr>
+      <tr><td class="k">主文字</td><td class="hex"><span class="sw" style="background:#0F172A"></span>#0F172A</td><td class="hex"><span class="sw" style="background:#F3F6FF"></span>#F3F6FF</td></tr>
+      <tr><td class="k">次文字</td><td class="hex"><span class="sw" style="background:#536176"></span>#536176</td><td class="hex"><span class="sw" style="background:#BEC9DC"></span>#BEC9DC</td></tr>
+      <tr><td class="k">三级 / 箭头</td><td class="hex"><span class="sw" style="background:#738198"></span>#738198</td><td class="hex"><span class="sw" style="background:#95A6C1"></span>#95A6C1</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="spec" style="margin-top: 24px">
+  <div class="spec-col" style="width: 597px">
+    <h3>状态规则</h3>
+    <ul>
+      <li><b>收起</b>：扫描中且不在读取页；点条展开</li>
+      <li><b>展开</b>：暂停 / 结束；4s 无操作自动收回，内容同步下移 82dp</li>
+      <li><b>已暂停</b>：点暂停立刻收回成一条，右侧「继续」恢复</li>
+      <li><b>结束</b>：停扫并收回，记录留在未完成，可在记录页继续</li>
+      <li><b>隐藏</b>：回到读取页 / 扫描完成，由页面内状态卡接管</li>
+      <li>同一时间只有一个扫描；开始新扫描前先结束旧会话</li>
+    </ul>
+  </div>
+
+  <div class="spec-col" style="width: 597px">
+    <h3>动效</h3>
+    <ul>
+      <li>出现：96 → 屏宽−32，300ms ease-out，同时淡入</li>
+      <li>展开 / 收回：高度 30 ↔ 112，300ms，内容一起位移，无回弹</li>
+      <li>呼吸点：1.6s 循环，透明度 .35 → 1；暂停时停住</li>
+      <li>主评论不定进度：1.4s 光带循环；回复阶段切确定进度</li>
+      <li>计时：SystemClock.elapsedRealtime() 累计，暂停不计，重建界面后继续</li>
+      <li>文字与图标不参与缩放，只做位移和透明度</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+  addEventListener('load', () => {
+    const de = document.documentElement;
+    document.title = `sheet ${de.scrollWidth}x${de.scrollHeight}`;
+  });
+</script>
+</body>
+</html>

@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.ImageDecoder;
 import android.graphics.Bitmap;
+import android.graphics.Rect;
 import android.graphics.drawable.Animatable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
@@ -93,6 +94,8 @@ public class MainActivity extends Activity {
     private String activeLink;
     private boolean viewingSavedRecord;
     private boolean resumedFromHome;
+    private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102;
+    private boolean recordTransferBusy;
     private boolean savedRecordPageOpened;
     private boolean loadingSavedRecordPage;
     private boolean xhsMode;
@@ -108,11 +111,51 @@ public class MainActivity extends Activity {
     private LinearLayout results;
     private Button scanButton;
     private PopupWindow noticePopup;
+    private PopupWindow copiedBanner;
     private View favoriteNotice;
     private LinearLayout readerRoot;
+    private FrameLayout stage;
+    private FrameLayout pageLayer;
+    private FrameLayout stripHost;
+    private LinearLayout stripBar;
+    private LinearLayout stripPausedBar;
+    private LinearLayout stripCard;
+    private TextView stripTime;
+    private TextView stripCount;
+    private TextView stripPausedText;
+    private TextView stripCardTitle;
+    private TextView stripCardTime;
+    private TextView stripCardCount;
+    private View stripDot;
+    private View stripCardFill;
+    private View stripCardTrack;
+    private final android.os.Handler stripHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private boolean stripExpanded;
+    private boolean stripPaused;
+    private boolean stripWasRunning;
+    private long stripAccum;
+    private long stripResumeAt;
+    private String stripRecordId;
+    private String stripLastClock;
+    private String stripLastCount;
+    private String stripLastPaused;
+    private String stripLastCard;
+    private Runnable stripCollapse;
+    private float stripPhase;
+    private final Runnable stripTick = new Runnable() {
+        @Override public void run() {
+            updateScanStrip();
+            stripHandler.postDelayed(this, 500);
+        }
+    };
     private LinearLayout browserPanel;
     private TextView webToggle;
-    private TextView webToggleArrow;
+    private ImageView webToggleArrow;
+    private ImageView scanStatusIcon;
+    private TextView scanStateLabel;
+    private FrameLayout readerFilterTrack;
+    private View readerFilterIndicator;
+    private android.animation.ValueAnimator readerFilterAnimation;
     private LinearLayout resultRow;
     private ScrollView readerScroll;
     private TextView countLabel;
@@ -163,6 +206,7 @@ public class MainActivity extends Activity {
     private boolean darkMode;
     private boolean decodeEnabled = true;
     private boolean motionEnabled = true;
+    private android.animation.ValueAnimator themeAnimation;
     private boolean titleDecoded;
     private boolean showingMy;
     private int currentPage = 1;
@@ -261,12 +305,14 @@ public class MainActivity extends Activity {
         douyinReadReplies = getPreferences(MODE_PRIVATE).getBoolean("douyin_read_replies", false);
         updateSystemBars();
         buildReader();
+        buildStage();
         loadRecords();
         if (Intent.ACTION_SEND.equals(getIntent().getAction())) {
             String shared = getIntent().getStringExtra(Intent.EXTRA_TEXT);
             if (shared != null) input.setText(shared);
         }
         showHome();
+        updateSystemBars();
     }
 
     private TextView label(String value, int size, int color, boolean bold) {
@@ -300,14 +346,83 @@ public class MainActivity extends Activity {
     private static class OutlinedCard extends GradientDrawable { }
 
     private TextView segment(String text, String type, LinearLayout parent) {
-        TextView button = label(text, 12, INK2, true);
+        TextView button = homeLabel(text, 12, INK2, 650);
         button.setGravity(Gravity.CENTER);
         parent.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
         button.setOnClickListener(v -> {
+            if (selectedFilter.equals(type)) return;
+            int previous = readerFilterIndex();
             selectedFilter = type;
+            positionReaderFilter(motionEnabled);
+            results.animate().cancel();
             renderResults();
+            updateResultLabels();
+            if (motionEnabled) {
+                results.setAlpha(0f);
+                results.setTranslationX(dp(previous < readerFilterIndex() ? 9 : -9));
+                results.animate().alpha(1f).translationX(0f).setDuration(220).start();
+            } else {
+                results.setAlpha(1f);
+                results.setTranslationX(0f);
+            }
         });
+        pressFeedback(button);
         return button;
+    }
+
+    private int readerFilterIndex() {
+        return "all".equals(selectedFilter) ? 0 : "gif".equals(selectedFilter) ? 1 : 2;
+    }
+
+    private void positionReaderFilter(boolean animate) {
+        if (readerFilterTrack == null) return;
+        int width = readerFilterTrack.getWidth() - readerFilterTrack.getPaddingLeft() - readerFilterTrack.getPaddingRight();
+        if (width <= 0) return;
+        android.view.ViewGroup.LayoutParams params = readerFilterIndicator.getLayoutParams();
+        params.width = width / 3;
+        readerFilterIndicator.setLayoutParams(params);
+        float target = (float) params.width * readerFilterIndex();
+        if (readerFilterAnimation != null) readerFilterAnimation.cancel();
+        if (animate) {
+            readerFilterAnimation = android.animation.ValueAnimator.ofFloat(readerFilterIndicator.getTranslationX(), target);
+            readerFilterAnimation.setDuration(220);
+            readerFilterAnimation.addUpdateListener(value -> readerFilterIndicator.setTranslationX((float) value.getAnimatedValue()));
+            readerFilterAnimation.start();
+        } else readerFilterIndicator.setTranslationX(target);
+    }
+
+    private void pressFeedback(View view) {
+        view.setOnTouchListener((v, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN && motionEnabled)
+                v.animate().scaleX(0.96f).scaleY(0.96f).setDuration(80).start();
+            else if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL)
+                v.animate().scaleX(1f).scaleY(1f).setDuration(motionEnabled ? 120 : 0).start();
+            return false;
+        });
+    }
+
+    private void readerIcon(TextView view, int resource, int size) {
+        view.setIncludeFontPadding(false);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(view.getPaddingLeft(), 0, view.getPaddingRight(), 0);
+        Drawable drawable = getDrawable(resource).mutate();
+        drawable.setTint(view.getCurrentTextColor());
+        drawable.setBounds(0, 0, dp(size), dp(size));
+        view.setCompoundDrawablesRelative(drawable, null, null, null);
+        view.setCompoundDrawablePadding(dp(7));
+        Runnable align = () -> {
+            int padding = Math.max(dp(4), (view.getWidth() - dp(size + 7)
+                    - (int) view.getPaint().measureText(view.getText().toString())) / 2);
+            if (view.getWidth() > 0 && view.getPaddingLeft() != padding)
+                view.setPadding(padding, view.getPaddingTop(), padding, view.getPaddingBottom());
+        };
+        view.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> align.run());
+        view.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable text) { view.post(align); }
+        });
+        pressFeedback(view);
     }
 
 
@@ -332,14 +447,24 @@ public class MainActivity extends Activity {
     }
 
     private void updateSystemBars() {
-        getWindow().getDecorView().setSystemUiVisibility(darkMode ? 0
-                : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        View decor = getWindow().getDecorView();
+        android.view.WindowInsetsController controller = android.os.Build.VERSION.SDK_INT >= 30
+                ? decor.getWindowInsetsController() : null;
+        if (controller != null) {
+            int mask = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            controller.setSystemBarsAppearance(darkMode ? 0 : mask, mask);
+        } else {
+            int mask = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            decor.setSystemUiVisibility((decor.getSystemUiVisibility() & ~mask) | (darkMode ? 0 : mask));
+        }
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
     }
 
     private int[] palette() {
-        return new int[]{BG, SURFACE, LINE, INK, INK2, INK3, ACCENT, ACCENT_SOFT, TRACK, DANGER};
+        return new int[]{BG, SURFACE, LINE, INK, INK2, INK3, ACCENT, ACCENT_SOFT, TRACK, DANGER,
+                darkMode ? 0xFFFFB571 : 0xFFE46A10};
     }
 
     private int mappedColor(int color, int[] old, int[] updated) {
@@ -354,7 +479,9 @@ public class MainActivity extends Activity {
             GradientDrawable gradient = (GradientDrawable) background;
             if (gradient.getColor() != null)
                 gradient.setColor(mappedColor(gradient.getColor().getDefaultColor(), old, updated));
-            if (gradient instanceof OutlinedCard) gradient.setStroke(1, LINE);
+            if (gradient instanceof OutlinedCard) gradient.setStroke(
+                    "reader-primary-outline".equals(view.getTag()) ? dp(1) : 1,
+                    "reader-primary-outline".equals(view.getTag()) ? ACCENT : LINE);
         } else if (background instanceof android.graphics.drawable.ColorDrawable) {
             view.setBackgroundColor(mappedColor(((android.graphics.drawable.ColorDrawable) background).getColor(), old, updated));
         }
@@ -363,7 +490,15 @@ public class MainActivity extends Activity {
             // White text on action buttons and image overlays stays white.
             if (text.getCurrentTextColor() != Color.WHITE)
                 text.setTextColor(mappedColor(text.getCurrentTextColor(), old, updated));
+            for (Drawable drawable : text.getCompoundDrawablesRelative())
+                if (drawable != null) drawable.setTint(text.getCurrentTextColor());
             text.setHintTextColor(INK3);
+        }
+        if (view instanceof Switch) {
+            Switch toggle = (Switch) view;
+            if (toggle.getTrackTintList() != null)
+                toggle.setTrackTintList(ColorStateList.valueOf(mappedColor(
+                        toggle.getTrackTintList().getDefaultColor(), old, updated)));
         }
         if (view instanceof ImageView) {
             ImageView image = (ImageView) view;
@@ -386,13 +521,8 @@ public class MainActivity extends Activity {
     }
 
     private void stopScanForNavigation() {
-        retryReplyParent = null;
-        if (scanning) {
-            scanning = false;
-            requestToken++;
-            scanButton.setText("继续扫描");
-        }
         for (Animatable animation : animations) animation.stop();
+        updateScanStrip();
     }
 
     private void resetPages() {
@@ -516,7 +646,7 @@ public class MainActivity extends Activity {
             ((android.view.ViewGroup) root.getParent()).removeView(root);
         mainHost.removeAllViews();
         mainHost.addView(root, new FrameLayout.LayoutParams(-1, -1));
-        if (mainShell.getParent() == null) setContentView(mainShell);
+        showLayerPage(mainShell);
         mainTab = tab;
         positionNav(previous >= 0);
         if (motionEnabled && previous != tab) {
@@ -527,15 +657,360 @@ public class MainActivity extends Activity {
     }
 
     private void presentSecondary(LinearLayout root) {
-        if (root.getParent() instanceof android.view.ViewGroup)
-            ((android.view.ViewGroup) root.getParent()).removeView(root);
-        setContentView(root);
+        if (root == readerRoot) {
+            readerRoot.setVisibility(View.VISIBLE);
+            if (pageLayer != null) pageLayer.setVisibility(View.GONE);
+        } else {
+            showLayerPage(root);
+        }
         if (motionEnabled) {
             root.setAlpha(0f);
             root.setTranslationX(dp(returningTransition ? -12 : 12));
             root.animate().alpha(1).translationX(0).setDuration(220).start();
         }
         returningTransition = false;
+        updateScanStrip();
+    }
+
+    private void showLayerPage(View root) {
+        if (root.getParent() instanceof android.view.ViewGroup)
+            ((android.view.ViewGroup) root.getParent()).removeView(root);
+        pageLayer.removeAllViews();
+        pageLayer.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        root.requestApplyInsets();
+        pageLayer.setVisibility(View.VISIBLE);
+        pageLayer.bringToFront();
+        if (stripHost != null) stripHost.bringToFront();
+        updateScanStrip();
+    }
+
+    private int statusBarHeight() {
+        int resource = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        return resource > 0 ? getResources().getDimensionPixelSize(resource) : dp(24);
+    }
+
+    private void buildStage() {
+        stage = new FrameLayout(this);
+        stage.setBackgroundColor(BG);
+        stage.addView(readerRoot, new FrameLayout.LayoutParams(-1, -1));
+        pageLayer = new FrameLayout(this);
+        pageLayer.setBackgroundColor(BG);
+        stage.addView(pageLayer, new FrameLayout.LayoutParams(-1, -1));
+        buildScanStrip();
+        setContentView(stage);
+        stripHandler.postDelayed(stripTick, 500);
+    }
+
+    private void buildScanStrip() {
+        stripHost = new FrameLayout(this);
+        stripHost.setClipChildren(false);
+        stage.addView(stripHost, new FrameLayout.LayoutParams(-1, -1));
+        stripHost.setVisibility(View.GONE);
+        int top = statusBarHeight() + dp(8);
+
+        stripBar = new LinearLayout(this);
+        stripBar.setOrientation(LinearLayout.HORIZONTAL);
+        stripBar.setGravity(Gravity.CENTER_VERTICAL);
+        stripBar.setPadding(dp(12), 0, dp(10), 0);
+        stripBar.setBackground(outlined(15, SURFACE));
+        stripBar.setElevation(dp(2));
+        FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(-1, dp(30));
+        barParams.setMargins(dp(16), top, dp(16), 0);
+        stripHost.addView(stripBar, barParams);
+        stripDot = new View(this);
+        stripDot.setBackground(shape(ACCENT, 3));
+        stripBar.addView(stripDot, new LinearLayout.LayoutParams(dp(6), dp(6)));
+        stripTime = stripClock(12);
+        LinearLayout.LayoutParams timeParams = new LinearLayout.LayoutParams(-2, -2);
+        timeParams.leftMargin = dp(8);
+        stripBar.addView(stripTime, timeParams);
+        stripCount = label("", 11, INK2, false);
+        LinearLayout.LayoutParams countParams = new LinearLayout.LayoutParams(0, -2, 1);
+        countParams.leftMargin = dp(6);
+        stripBar.addView(stripCount, countParams);
+        TextView chevron = label("⌄", 13, INK3, true);
+        chevron.setGravity(Gravity.CENTER);
+        stripBar.addView(chevron, new LinearLayout.LayoutParams(dp(22), -1));
+        stripBar.setOnClickListener(v -> expandScanStrip());
+
+        stripPausedBar = new LinearLayout(this);
+        stripPausedBar.setOrientation(LinearLayout.HORIZONTAL);
+        stripPausedBar.setGravity(Gravity.CENTER_VERTICAL);
+        stripPausedBar.setPadding(dp(12), 0, dp(6), 0);
+        stripPausedBar.setBackground(outlined(15, SURFACE));
+        stripPausedBar.setElevation(dp(2));
+        FrameLayout.LayoutParams pausedParams = new FrameLayout.LayoutParams(-1, dp(30));
+        pausedParams.setMargins(dp(16), top, dp(16), 0);
+        stripHost.addView(stripPausedBar, pausedParams);
+        View pausedDot = new View(this);
+        pausedDot.setBackground(shape(INK3, 3));
+        stripPausedBar.addView(pausedDot, new LinearLayout.LayoutParams(dp(6), dp(6)));
+        stripPausedText = label("已暂停", 11, INK2, false);
+        LinearLayout.LayoutParams pausedTextParams = new LinearLayout.LayoutParams(0, -2, 1);
+        pausedTextParams.leftMargin = dp(8);
+        stripPausedBar.addView(stripPausedText, pausedTextParams);
+        TextView resume = label("继续", 11, ACCENT, true);
+        resume.setGravity(Gravity.CENTER);
+        resume.setBackground(shape(ACCENT_SOFT, 9));
+        resume.setOnClickListener(v -> resumeScanFromStrip());
+        stripPausedBar.addView(resume, new LinearLayout.LayoutParams(dp(44), dp(22)));
+        stripPausedBar.setVisibility(View.GONE);
+
+        stripCard = new LinearLayout(this);
+        stripCard.setOrientation(LinearLayout.VERTICAL);
+        stripCard.setPadding(dp(12), dp(9), dp(10), dp(9));
+        stripCard.setBackground(card(16));
+        stripCard.setElevation(dp(4));
+        FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(-1, dp(112));
+        cardParams.setMargins(dp(16), top, dp(16), 0);
+        stripHost.addView(stripCard, cardParams);
+        stripCard.setVisibility(View.GONE);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        stripCard.addView(head);
+        stripCardTitle = label("正在扫描", 13, INK, true);
+        head.addView(stripCardTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        stripCardTime = stripClock(11);
+        stripCardTime.setTextColor(INK3);
+        LinearLayout.LayoutParams cardTimeParams = new LinearLayout.LayoutParams(-2, -2);
+        cardTimeParams.leftMargin = dp(8);
+        head.addView(stripCardTime, cardTimeParams);
+        TextView fold = label("⌃", 13, INK3, true);
+        fold.setGravity(Gravity.CENTER);
+        fold.setOnClickListener(v -> collapseScanStrip());
+        head.addView(fold, new LinearLayout.LayoutParams(dp(24), dp(24)));
+
+        stripCardCount = label("", 12, INK2, false);
+        LinearLayout.LayoutParams cardCountParams = new LinearLayout.LayoutParams(-1, -2);
+        cardCountParams.topMargin = dp(5);
+        stripCard.addView(stripCardCount, cardCountParams);
+
+        FrameLayout track = new FrameLayout(this);
+        track.setBackground(shape(TRACK, 2));
+        stripCardTrack = track;
+        LinearLayout.LayoutParams trackParams = new LinearLayout.LayoutParams(-1, dp(3));
+        trackParams.topMargin = dp(9);
+        stripCard.addView(track, trackParams);
+        stripCardFill = new View(this);
+        stripCardFill.setBackground(shape(ACCENT, 2));
+        track.addView(stripCardFill, new FrameLayout.LayoutParams(0, -1));
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams buttonsParams = new LinearLayout.LayoutParams(-1, dp(28));
+        buttonsParams.topMargin = dp(9);
+        stripCard.addView(buttons, buttonsParams);
+        TextView pause = label("暂停", 12, INK2, true);
+        pause.setGravity(Gravity.CENTER);
+        pause.setBackground(outlined(9, SURFACE));
+        pause.setOnClickListener(v -> pauseScanFromStrip());
+        buttons.addView(pause, new LinearLayout.LayoutParams(0, -1, 1));
+        TextView end = label("结束", 12, ACCENT, true);
+        end.setGravity(Gravity.CENTER);
+        end.setBackground(shape(ACCENT_SOFT, 9));
+        end.setOnClickListener(v -> endScanFromStrip());
+        LinearLayout.LayoutParams endParams = new LinearLayout.LayoutParams(0, -1, 1);
+        endParams.leftMargin = dp(8);
+        buttons.addView(end, endParams);
+    }
+
+    private TextView stripClock(int size) {
+        TextView view = label("00:00", size, INK, true);
+        view.setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.BOLD));
+        view.setIncludeFontPadding(false);
+        return view;
+    }
+
+    private void updatePageInset(boolean inset) {
+        if (pageLayer == null || pageLayer.getChildCount() == 0 || stage == null) return;
+        int stageHeight = stage.getHeight();
+        if (stageHeight <= 0) return;
+        View child = pageLayer.getChildAt(0);
+        if (!(child.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) child.getLayoutParams();
+        int shift = inset ? dp(38) : 0;
+        int target = stageHeight - shift;
+        if (params.height != target) {
+            params.height = target;
+            child.setLayoutParams(params);
+        }
+        if (child.getTranslationY() != shift) child.setTranslationY(shift);
+    }
+
+    private void updateScanStrip() {
+        if (stripHost == null) return;
+        ScanRecord record = currentRecord;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (record == null) {
+            stripHost.setVisibility(View.GONE);
+            stripExpanded = false;
+            stripPaused = false;
+            stripRecordId = null;
+            stripAccum = 0;
+            stripWasRunning = false;
+            updatePageInset(false);
+            return;
+        }
+        if (!record.id.equals(stripRecordId)) {
+            stripRecordId = record.id;
+            stripAccum = 0;
+            stripResumeAt = now;
+            stripWasRunning = scanning;
+            stripExpanded = false;
+            stripPaused = false;
+            stripLastClock = null;
+            stripLastCount = null;
+            stripLastPaused = null;
+            stripLastCard = null;
+        }
+        if (scanning && !stripWasRunning) {
+            stripResumeAt = now;
+            stripWasRunning = true;
+        } else if (!scanning && stripWasRunning) {
+            stripAccum += now - stripResumeAt;
+            stripResumeAt = now;
+            stripWasRunning = false;
+        }
+        if (!(scanning || stripPaused) || showingReader) {
+            stripHost.setVisibility(View.GONE);
+            stripExpanded = false;
+            updatePageInset(false);
+            return;
+        }
+        stripHost.setVisibility(View.VISIBLE);
+        updatePageInset(pageLayer.getVisibility() == View.VISIBLE);
+        long total = stripAccum + (scanning ? now - stripResumeAt : 0);
+        String clock = String.format(Locale.US, "%02d:%02d", total / 60000, (total / 1000) % 60);
+        if (!clock.equals(stripLastClock)) {
+            stripLastClock = clock;
+            stripTime.setText(clock);
+            stripCardTime.setText(clock);
+        }
+        String countText = "已读 " + record.scanned + " 条";
+        if (!countText.equals(stripLastCount)) {
+            stripLastCount = countText;
+            stripCount.setText(countText);
+        }
+        String pausedText = "已暂停 · 已读 " + record.scanned + " 条";
+        if (!pausedText.equals(stripLastPaused)) {
+            stripLastPaused = pausedText;
+            stripPausedText.setText(pausedText);
+        }
+        String cardCountText = scanCounts(record);
+        if (!cardCountText.equals(stripLastCard)) {
+            stripLastCard = cardCountText;
+            stripCardCount.setText(cardCountText);
+        }
+        if (scanning) stripDot.setAlpha(0.45f + 0.55f * (float) (0.5 + 0.5 * Math.sin(now / 320.0)));
+        else if (stripDot.getAlpha() != 1f) stripDot.setAlpha(1f);
+        boolean determinate = record.mainDone && record.includeReplies && !record.replyParents.isEmpty();
+        int trackWidth = stripCardTrack.getWidth();
+        if (trackWidth > 0) {
+            int fill;
+            if (determinate) {
+                float part = (float) record.replyIndex / record.replyParents.size();
+                stripCardFill.setTranslationX(0);
+                fill = Math.max(dp(4), (int) (trackWidth * part));
+            } else {
+                stripPhase += 0.06f;
+                if (stripPhase > 1f) stripPhase -= 1f;
+                fill = Math.max(dp(44), trackWidth / 4);
+                stripCardFill.setTranslationX((trackWidth - fill) * stripPhase);
+            }
+            FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) stripCardFill.getLayoutParams();
+            if (params.width != fill) {
+                params.width = fill;
+                stripCardFill.setLayoutParams(params);
+            }
+        }
+        if (stripPaused) {
+            stripPausedBar.setVisibility(View.VISIBLE);
+            stripBar.setVisibility(View.GONE);
+            stripCard.setVisibility(View.GONE);
+        } else if (stripExpanded) {
+            stripPausedBar.setVisibility(View.GONE);
+            stripBar.setVisibility(View.GONE);
+            stripCard.setVisibility(View.VISIBLE);
+        } else {
+            stripPausedBar.setVisibility(View.GONE);
+            stripBar.setVisibility(View.VISIBLE);
+            stripCard.setVisibility(View.GONE);
+        }
+    }
+
+    private void expandScanStrip() {
+        if (currentRecord == null) return;
+        stripExpanded = true;
+        updateScanStrip();
+        scheduleStripCollapse();
+    }
+
+    private void collapseScanStrip() {
+        stripExpanded = false;
+        if (stripCollapse != null) stripHandler.removeCallbacks(stripCollapse);
+        updateScanStrip();
+    }
+
+    private void scheduleStripCollapse() {
+        if (stripCollapse != null) stripHandler.removeCallbacks(stripCollapse);
+        stripCollapse = () -> {
+            stripExpanded = false;
+            updateScanStrip();
+        };
+        stripHandler.postDelayed(stripCollapse, 4000);
+    }
+
+    private void pauseScanFromStrip() {
+        ScanRecord record = currentRecord;
+        if (!scanning || record == null) return;
+        scanning = false;
+        requestToken++;
+        stripPaused = true;
+        stripExpanded = false;
+        if (stripCollapse != null) stripHandler.removeCallbacks(stripCollapse);
+        if (scanButton != null) scanButton.setText("继续扫描");
+        if (status != null) status.setText("扫描已暂停，已提取素材保留在暂存记录中");
+        recordScanPause("已手动暂停扫描", false);
+        updateScanCard();
+        updateScanStrip();
+    }
+
+    private void resumeScanFromStrip() {
+        ScanRecord record = currentRecord;
+        if (record == null || scanning || record.complete) return;
+        stripPaused = false;
+        stripExpanded = false;
+        if (isXhsLink(record.link)) {
+            toggleXhsScan();
+        } else {
+            scanning = true;
+            requestWaits = 0;
+            pageRetries = 0;
+            if (scanButton != null) scanButton.setText("暂停扫描");
+            if (status != null) status.setText("正在继续扫描…");
+            startPage();
+        }
+        updateScanStrip();
+    }
+
+    private void endScanFromStrip() {
+        ScanRecord record = currentRecord;
+        scanning = false;
+        requestToken++;
+        stripPaused = false;
+        stripExpanded = false;
+        if (stripCollapse != null) stripHandler.removeCallbacks(stripCollapse);
+        if (record != null) {
+            recordScanPause("已手动结束扫描", false);
+            final ScanRecord done = record;
+            worker.execute(() -> persistRecord(done));
+            if (scanButton != null) scanButton.setText(done.complete ? "扫描完成" : "继续扫描");
+            if (status != null) status.setText(done.complete ? "扫描完成" : "扫描已结束，已提取的素材保留在暂存记录中");
+        }
+        updateScanCard();
+        updateScanStrip();
+        showTopNotice(record != null && record.complete ? "扫描完成" : "已结束扫描，素材已保留");
     }
 
     private void showHome() {
@@ -602,15 +1077,23 @@ public class MainActivity extends Activity {
         addHomeFeature(content, false);
         addHomeFeature(content, true);
         ScanRecord latest = null;
-        for (ScanRecord record : records) if (canResume(record)) { latest = record; break; }
+        for (ScanRecord record : records) {
+            if (record != null && extractLink(record.link, isXhsLink(record.link)) != null) {
+                latest = record;
+                break;
+            }
+        }
         if (latest != null) {
             ScanRecord record = latest;
-            addHomeResume(content, "继续上次扫描",
-                    "已读 " + record.scanned + " 条评论", v -> {
+            boolean resumable = canResume(record);
+            addHomeResume(content, resumable ? "继续上次扫描" : "查看上次扫描",
+                    resumable ? "已读 " + record.scanned + " 条评论"
+                            : "已完成 · " + record.items.size() + " 个素材", v -> {
                         recordsFromSettings = false;
+                        boolean live = isLiveRecord(record);
                         showRecord(record);
                         resumedFromHome = true;
-                        openSavedRecordPage(record);
+                        if (resumable && !live) openSavedRecordPage(record);
                     });
         }
         showMainPage(root, 1);
@@ -733,6 +1216,8 @@ public class MainActivity extends Activity {
         favoriteCount.setOnClickListener(v -> openFavorites(this::showMy));
         recordCount.setOnClickListener(v -> openRecordsFromMy());
         addMenuCard(page, R.drawable.blue_history, "扫描记录", "按平台查看与继续扫描", v -> openRecordsFromMy());
+        addMenuCard(page, R.drawable.extract_download, "导出扫描记录", "备份两平台记录、进度及素材原文件", v -> pickRecordArchive(true));
+        addMenuCard(page, R.drawable.record_import, "导入扫描记录", "从 ZIP 备份恢复，重复记录自动跳过", v -> pickRecordArchive(false));
         addMenuCard(page, R.drawable.blue_storage, "本机存储", "查看暂存与收藏占用", v -> {
             worker.execute(() -> {
                 String size = storageSize();
@@ -749,6 +1234,125 @@ public class MainActivity extends Activity {
                         .setMessage("登录在平台网页内完成。素材先暂存到本机，保存后写入下载目录。平台验证和评论可用性由平台决定。")
                         .setPositiveButton("关闭", null).show());
         showMainPage(root, 2);
+    }
+
+    private void pickRecordArchive(boolean exporting) {
+        if (recordTransferBusy) return;
+        if (exporting && records.isEmpty()) {
+            Toast.makeText(this, "暂无可导出的扫描记录", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (exporting && (scanning || (currentRecord != null && currentRecord.processingPage))) {
+            Toast.makeText(this, "请先暂停扫描，等待当前页处理完成后再导出", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent intent = new Intent(exporting ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType(exporting ? "application/zip" : "*/*");
+        if (exporting) intent.putExtra(Intent.EXTRA_TITLE, "咻咿扫描记录-"
+                + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".zip");
+        try { startActivityForResult(intent, exporting ? EXPORT_RECORDS : IMPORT_RECORDS); }
+        catch (android.content.ActivityNotFoundException error) {
+            Toast.makeText(this, "当前设备没有可用的系统文件选择器", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private java.util.List<String> recordArchiveFiles(File folder) throws Exception {
+        File manifest = new File(folder, "manifest.json");
+        if (!manifest.isFile() || manifest.length() > 4 * 1024 * 1024) throw new java.io.IOException("记录清单缺失或过大");
+        JSONObject data = new JSONObject(new String(Files.readAllBytes(manifest.toPath()), StandardCharsets.UTF_8));
+        data.getString("link");
+        if (data.getLong("createdAt") < 0) throw new java.io.IOException("记录时间无效");
+        JSONArray media = data.getJSONArray("media");
+        ArrayList<String> files = new ArrayList<>();
+        files.add("manifest.json");
+        for (int i = 0; i < media.length(); i++) {
+            JSONObject item = media.getJSONObject(i);
+            String name = item.getString("file"), mime = item.getString("mime");
+            if (!RecordArchive.leaf(name) || name.equals("manifest.json")
+                    || !(mime.startsWith("image/") || mime.startsWith("video/")))
+                throw new java.io.IOException("记录中的素材信息无效");
+            File file = new File(folder, name);
+            if (!file.isFile() || file.length() == 0) throw new java.io.IOException("记录素材缺失：" + name);
+            files.add(name);
+        }
+        return files;
+    }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != EXPORT_RECORDS && request != IMPORT_RECORDS) return;
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        if (recordTransferBusy) return;
+        boolean exporting = request == EXPORT_RECORDS;
+        if (exporting && (scanning || (currentRecord != null && currentRecord.processingPage))) {
+            Toast.makeText(this, "扫描仍在进行，请暂停后重新导出", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Uri uri = data.getData();
+        ArrayList<ScanRecord> snapshot = new ArrayList<>(records);
+        HashSet<String> known = new HashSet<>();
+        for (ScanRecord record : snapshot) known.add(record.id);
+        recordTransferBusy = true;
+        android.app.Dialog progress = new android.app.Dialog(this);
+        progress.setCancelable(false);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setGravity(Gravity.CENTER);
+        panel.setPadding(dp(24), dp(24), dp(24), dp(24));
+        panel.setBackground(card(20));
+        ProgressBar spinner = new ProgressBar(this);
+        spinner.setIndeterminateTintList(ColorStateList.valueOf(ACCENT));
+        panel.addView(spinner, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        panel.addView(homeLabel(exporting ? "正在导出记录与素材…" : "正在检查并导入备份…", 15, INK, 650));
+        showCardDialog(progress, panel);
+        worker.execute(() -> {
+            String message;
+            ArrayList<ScanRecord> imported = new ArrayList<>();
+            try {
+                if (exporting) {
+                    java.util.LinkedHashMap<String, File> folders = new java.util.LinkedHashMap<>();
+                    for (ScanRecord record : snapshot) {
+                        if (!persistRecord(record)) throw new java.io.IOException("记录暂存失败，请重试");
+                        recordArchiveFiles(record.folder);
+                        folders.put(record.id, record.folder);
+                    }
+                    try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
+                        if (output == null) throw new java.io.IOException("无法写入所选位置");
+                        RecordArchive.write(output, folders, this::recordArchiveFiles);
+                    }
+                    message = "导出成功：" + snapshot.size() + " 条记录，包含素材原文件";
+                } else {
+                    RecordArchive.Result restored;
+                    try (InputStream input = getContentResolver().openInputStream(uri)) {
+                        if (input == null) throw new java.io.IOException("无法读取所选备份");
+                        restored = RecordArchive.read(input, new File(getCacheDir(), "record-import-" + UUID.randomUUID()),
+                                recordsFolder(), known, this::recordArchiveFiles);
+                    }
+                    imported = readRecords(restored.added);
+                    message = "导入成功：" + imported.size() + " 条；跳过重复记录 " + restored.skipped + " 条";
+                }
+            } catch (Exception error) {
+                if (exporting) {
+                    try { android.provider.DocumentsContract.deleteDocument(getContentResolver(), uri); }
+                    catch (Exception ignored) { }
+                }
+                message = (exporting ? "导出失败：" : "导入失败：")
+                        + (error.getMessage() == null ? "备份文件无法处理" : error.getMessage());
+            }
+            String report = message;
+            ArrayList<ScanRecord> added = imported;
+            runOnUiThread(() -> {
+                recordTransferBusy = false;
+                if (isFinishing() || isDestroyed()) return;
+                progress.dismiss();
+                records.addAll(added);
+                records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
+                if (showingMy) showMy();
+                showConfirmation(R.drawable.blue_history, false, exporting ? "记录导出结果" : "记录导入结果",
+                        report, "关闭", "查看记录", null, this::openRecordsFromMy);
+            });
+        });
     }
 
     private void openRecordsFromMy() {
@@ -779,14 +1383,17 @@ public class MainActivity extends Activity {
         showingSettings = true;
         currentPage = -4;
         LinearLayout root = pageRoot();
-        header(root, "设置", true, this::returnFromSettings);
+        LinearLayout heading = header(root, "设置", true, this::returnFromSettings);
+        TextView headingText = (TextView) heading.getChildAt(1);
+        headingText.setTypeface(homeTypeface(750));
+        headingText.setTextSize(20);
         ScrollView scroll = new ScrollView(this);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(18), dp(8), dp(18), dp(24));
         scroll.addView(page);
-        page.addView(groupTitle("外观", 8));
+        page.addView(settingsGroupTitle("外观", 8));
         LinearLayout modes = new LinearLayout(this);
         modes.setPadding(dp(3), dp(3), dp(3), dp(3));
         modes.setBackground(shape(TRACK, 12));
@@ -796,63 +1403,136 @@ public class MainActivity extends Activity {
         String[] keys = {"light", "dark", "system"};
         for (int i = 0; i < keys.length; i++) {
             String key = keys[i];
-            TextView button = label(names[i], 13, selected.equals(key) ? Color.WHITE : INK2, true);
+            TextView button = homeLabel(names[i], 13, selected.equals(key) ? Color.WHITE : INK2, 650);
             button.setGravity(Gravity.CENTER);
             if (selected.equals(key)) button.setBackground(shape(ACCENT, 10));
             modes.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
-            button.setOnClickListener(v -> {
-                getPreferences(MODE_PRIVATE).edit().putString("appearance", key).apply();
-                int[] old = palette();
-                applyPalette();
-                setTheme(darkMode ? R.style.BlueDark : R.style.BlueLight);
-                updateSystemBars();
-                retheme(readerRoot, old, palette());
-                mainShell = null;
-                showSettings();
-            });
+            button.setOnClickListener(v -> changeAppearance(key, v));
         }
-        page.addView(groupTitle("扫描偏好", 22));
+        page.addView(settingsGroupTitle("扫描偏好", 22));
         LinearLayout scanningCards = new LinearLayout(this);
         page.addView(scanningCards, new LinearLayout.LayoutParams(-1, -2));
-        addToggleCard(scanningCards, R.drawable.blue_reply, "读取回复", "读取抖音主评论下的回复", douyinReadReplies, enabled -> {
+        addToggleCard(scanningCards, R.drawable.settings_reply, "读取回复", "同时读取抖音作品的\n评论与回复", "", douyinReadReplies, enabled -> {
             douyinReadReplies = enabled;
             getPreferences(MODE_PRIVATE).edit().putBoolean("douyin_read_replies", enabled).apply();
             if (currentRecord == null) configureReaderMode();
         });
-        addToggleCard(scanningCards, R.drawable.blue_bolt, "快速扫描", "缩短抖音翻页等待", douyinPageDelayMs == 350, enabled -> {
+        addToggleCard(scanningCards, R.drawable.settings_fast, "快速扫描", "缩短抖音评论\n翻页等待", "可能频繁暂停", douyinPageDelayMs == 350, enabled -> {
             douyinPageDelayMs = enabled ? 350 : 2000;
             getPreferences(MODE_PRIVATE).edit().putInt("douyin_page_delay_ms", douyinPageDelayMs).apply();
         });
-        TextView warning = label("快速模式可能频繁暂停", 12, DANGER, false);
-        LinearLayout.LayoutParams warningParams = new LinearLayout.LayoutParams(-1, -2);
-        warningParams.topMargin = dp(10);
-        page.addView(warning, warningParams);
-        page.addView(groupTitle("动效", 22));
+        page.addView(settingsGroupTitle("动效", 22));
         LinearLayout motionCards = new LinearLayout(this);
         page.addView(motionCards, new LinearLayout.LayoutParams(-1, -2));
-        addToggleCard(motionCards, R.drawable.blue_info, "标题解码", "首页标题逐字解码", decodeEnabled, enabled -> {
+        addToggleCard(motionCards, R.drawable.settings_decode, "标题解码", "进入首页时播放\n标题逐字解码", "", decodeEnabled, enabled -> {
             decodeEnabled = enabled;
             if (enabled) titleDecoded = false;
             getPreferences(MODE_PRIVATE).edit().putBoolean("title_decode", enabled).apply();
         });
-        addToggleCard(motionCards, R.drawable.blue_motion, "页面动效", "切换页面时平滑过渡", motionEnabled, enabled -> {
+        addToggleCard(motionCards, R.drawable.settings_motion, "页面动效", "页面切换与操作\n使用平滑过渡", "", motionEnabled, enabled -> {
             motionEnabled = enabled;
             getPreferences(MODE_PRIVATE).edit().putBoolean("page_motion", enabled).apply();
         });
         presentSecondary(root);
     }
 
-    private void addToggleCard(LinearLayout row, int resource, String title, String detail, boolean enabled,
+    private void changeAppearance(String key, View control) {
+        if (themeAnimation != null) return;
+        String selected = getPreferences(MODE_PRIVATE).getString("appearance", "system");
+        if (selected.equals(key)) return;
+        boolean nextDark = "dark".equals(key) || ("system".equals(key)
+                && (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES);
+        FrameLayout content = stage;
+        int width = content.getWidth(), height = content.getHeight();
+        boolean animate = motionEnabled && darkMode != nextDark && width > 0 && height > 0;
+        Bitmap before = null;
+        int[] center = new int[2];
+        if (animate) {
+            control.getLocationInWindow(center);
+            int[] position = new int[2];
+            content.getLocationInWindow(position);
+            center[0] += control.getWidth() / 2 - position[0];
+            center[1] += control.getHeight() / 2 - position[1];
+            before = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            content.draw(new android.graphics.Canvas(before));
+        }
+        getPreferences(MODE_PRIVATE).edit().putString("appearance", key).apply();
+        int[] old = palette();
+        applyPalette();
+        setTheme(darkMode ? R.style.BlueDark : R.style.BlueLight);
+        retheme(readerRoot, old, palette());
+        retheme(pageLayer, old, palette());
+        if (stripHost != null) retheme(stripHost, old, palette());
+        content.setBackgroundColor(BG);
+        mainShell = null;
+        LinearLayout modes = (LinearLayout) control.getParent();
+        String[] keys = {"light", "dark", "system"};
+        for (int i = 0; i < keys.length; i++) {
+            TextView button = (TextView) modes.getChildAt(i);
+            boolean active = keys[i].equals(key);
+            button.setTextColor(active ? Color.WHITE : INK2);
+            button.setBackground(active ? shape(ACCENT, 10) : null);
+        }
+        if (!animate) {
+            updateSystemBars();
+            return;
+        }
+        ThemeRevealView cover = new ThemeRevealView(this, before, center[0], center[1], nextDark);
+        cover.layout(0, 0, width, height);
+        content.getOverlay().add(cover);
+        float radius = (float) Math.hypot(Math.max(center[0], width - center[0]),
+                Math.max(center[1], height - center[1])) + 1;
+        android.animation.ValueAnimator reveal = android.animation.ValueAnimator.ofFloat(
+                nextDark ? 0 : radius, nextDark ? radius : 0);
+        themeAnimation = reveal;
+        reveal.setDuration(500);
+        reveal.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
+        reveal.addUpdateListener(value -> cover.setRadius((float) value.getAnimatedValue()));
+        reveal.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(android.animation.Animator animation) {
+                content.getOverlay().remove(cover);
+                themeAnimation = null;
+                updateSystemBars();
+            }
+        });
+        content.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                content.getViewTreeObserver().removeOnPreDrawListener(this);
+                if (themeAnimation != reveal) return true;
+                Bitmap after = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                cover.setVisibility(View.INVISIBLE);
+                content.draw(new android.graphics.Canvas(after));
+                cover.setVisibility(View.VISIBLE);
+                cover.setAfter(after);
+                cover.setRadius(nextDark ? 0 : radius);
+                reveal.start();
+                return true;
+            }
+        });
+    }
+
+    private TextView settingsGroupTitle(String text, int topMargin) {
+        TextView view = homeLabel(text, 14, INK, 750);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(topMargin);
+        params.bottomMargin = dp(10);
+        view.setLayoutParams(params);
+        return view;
+    }
+
+    private void addToggleCard(LinearLayout row, int resource, String title, String detail, String warning, boolean enabled,
                                java.util.function.Consumer<Boolean> changed) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(14), dp(12), dp(14), dp(14));
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -2, 1);
-        if (row.getChildCount() > 0) cp.leftMargin = dp(10);
+        card.setMinimumHeight(dp(174));
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -1, 1);
+        if (row.getChildCount() > 0) cp.leftMargin = dp(12);
         row.addView(card, cp);
         FrameLayout head = new FrameLayout(this);
-        card.addView(head, new LinearLayout.LayoutParams(-1, dp(38)));
-        ImageView image = icon(resource, enabled ? Color.WHITE : INK);
+        card.addView(head, new LinearLayout.LayoutParams(-1, dp(34)));
+        ImageView image = icon(resource, enabled ? Color.WHITE : ACCENT);
         head.addView(image, new FrameLayout.LayoutParams(dp(26), dp(26), Gravity.START | Gravity.CENTER_VERTICAL));
         Switch toggle = new Switch(this);
         toggle.setChecked(enabled);
@@ -862,19 +1542,27 @@ public class MainActivity extends Activity {
         toggle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         toggle.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
         head.addView(toggle, new FrameLayout.LayoutParams(-2, -2, Gravity.END | Gravity.CENTER_VERTICAL));
-        TextView name = label(title, 16, enabled ? Color.WHITE : INK, true);
+        TextView name = homeLabel(title, 16, enabled ? Color.WHITE : INK, 750);
         LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
-        np.topMargin = dp(10);
+        np.topMargin = dp(12);
         card.addView(name, np);
-        TextView description = label(detail, 12, enabled ? Color.WHITE : INK2, false);
+        TextView description = homeLabel(detail, 12, enabled ? Color.WHITE : INK2, 400);
+        description.setLineSpacing(dp(2), 1f);
         description.setMinLines(2);
         card.addView(description);
+        TextView caution = homeLabel(warning, 11, 0xFFFF8A22, 600);
+        if (!warning.isEmpty()) {
+            LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(-1, -2);
+            wp.topMargin = dp(8);
+            card.addView(caution, wp);
+        }
         boolean[] state = {enabled};
         Runnable paint = () -> {
             card.setBackground(outlined(16, state[0] ? ACCENT : SURFACE));
             name.setTextColor(state[0] ? Color.WHITE : INK);
             description.setTextColor(state[0] ? Color.WHITE : INK2);
-            image.setImageTintList(ColorStateList.valueOf(state[0] ? Color.WHITE : INK));
+            image.setImageTintList(ColorStateList.valueOf(state[0] ? Color.WHITE : ACCENT));
+            caution.setTextColor(state[0] ? 0xFFFFD080 : darkMode ? 0xFFFFB571 : 0xFFE46A10);
             toggle.setChecked(state[0]);
             toggle.setTrackTintList(ColorStateList.valueOf(state[0] ? Color.argb(100, 255, 255, 255) : INK3));
             card.setSelected(state[0]);
@@ -963,6 +1651,7 @@ public class MainActivity extends Activity {
         for (Animatable animation : animations) animation.stop();
         animations.clear();
         selectedFilter = "all";
+        positionReaderFilter(false);
         renderResults();
         updateResultLabels();
         configureReaderMode();
@@ -979,7 +1668,7 @@ public class MainActivity extends Activity {
         browser.getLayoutParams().height = xhsMode
                 ? Math.min(dp(400), (int) (getResources().getDisplayMetrics().heightPixels * 0.48f)) : dp(290);
         browser.requestLayout();
-        readerHeading.setText(xhsMode ? "小红书链接读取" : "抖音链接读取");
+        readerHeading.setText(xhsMode ? "小红书提取" : "抖音提取");
         input.setHint(xhsMode ? "粘贴小红书笔记链接或分享文案" : "粘贴抖音作品链接或分享文案");
         browserHint.setText(xhsMode ? "在网页中登录并打开笔记评论，扫描时会读取评论素材" : douyinReadReplies
                 ? "在网页中登录并打开评论区，然后扫描主评论与回复" : "在网页中登录并打开评论区，然后扫描主评论");
@@ -1047,12 +1736,6 @@ public class MainActivity extends Activity {
         currentPage = -2;
         showingSettings = false;
         showingMy = false;
-        retryReplyParent = null;
-        if (scanning) {
-            scanning = false;
-            requestToken++;
-            scanButton.setText("继续扫描");
-        }
         showingReader = false;
         showingRecords = true;
         showingFavorites = false;
@@ -1189,15 +1872,19 @@ public class MainActivity extends Activity {
                 resumeParams.leftMargin = dp(12);
                 actions.addView(resume, resumeParams);
                 resume.setOnClickListener(v -> {
+                    boolean live = isLiveRecord(record);
                     showRecord(record);
-                    openSavedRecordPage(record);
+                    if (!live) openSavedRecordPage(record);
                 });
             }
             if (record.link.startsWith("http")) {
                 TextView copy = label("复制链接", 12, INK2, true);
                 LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(-2, -2);
                 copyParams.leftMargin = dp(12);
-                copy.setOnClickListener(v -> copyLink(record.link));
+                copy.setOnClickListener(v -> {
+                    if (copyLink(record.link)) flashCopied(copy, "复制链接");
+                    else Toast.makeText(this, "复制失败：剪贴板不可用", Toast.LENGTH_SHORT).show();
+                });
                 actions.addView(copy, copyParams);
             }
             TextView delete = label("删除记录", 12, DANGER, true);
@@ -1211,34 +1898,48 @@ public class MainActivity extends Activity {
     }
 
     private void showRecord(ScanRecord record) {
+        boolean live = isLiveRecord(record);
         resumedFromHome = false;
         xhsMode = isXhsLink(record.link);
         configureReaderMode();
         currentRecord = record;
-        viewingSavedRecord = true;
-        savedRecordPageOpened = false;
+        viewingSavedRecord = !live;
+        savedRecordPageOpened = live;
         loadingSavedRecordPage = false;
         activeLink = record.link.startsWith("http") ? record.link : null;
         input.setText(activeLink == null ? "" : activeLink);
-        cursor = record.cursor;
-        scanned = xhsMode ? record.scanned : record.mainScanned > 0 ? record.mainScanned : record.scanned;
-        clearMediaSelection();
-        media.clear();
-        synchronized (record) { media.addAll(record.items); }
-        selectedFilter = "all";
-        browserPanel.setVisibility(View.GONE);
+        if (!live) {
+            cursor = record.cursor;
+            scanned = xhsMode ? record.scanned : record.mainScanned > 0 ? record.mainScanned : record.scanned;
+            clearMediaSelection();
+            media.clear();
+            synchronized (record) { media.addAll(record.items); }
+            selectedFilter = "all";
+        positionReaderFilter(false);
+            browserPanel.setVisibility(View.GONE);
+        }
         updateWebToggle();
-        scanButton.setText(canResume(record) ? "继续扫描" : "重新扫描");
+        if (live) {
+            scanButton.setText(scanning ? "暂停扫描" : "继续扫描");
+            status.setText(scanning ? "正在扫描，离开本页不会中断" : "扫描已暂停，已提取素材保留在暂存记录中");
+        } else {
+            scanButton.setText(canResume(record) ? "继续扫描" : "重新扫描");
+            status.setText(canResume(record) ? "已打开本机暂存记录，可继续扫描"
+                    : "已打开本机暂存记录；重新扫描会生成新记录");
+        }
         showReader();
         renderResults();
         updateResultLabels();
-        status.setText(canResume(record) ? "已打开本机暂存记录，可继续扫描"
-                : "已打开本机暂存记录；重新扫描会生成新记录");
         readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
     }
 
     private boolean canResume(ScanRecord record) {
         return record != null && !record.complete && extractLink(record.link, isXhsLink(record.link)) != null;
+    }
+
+    private boolean isLiveRecord(ScanRecord record) {
+        return record != null && currentRecord != null && record.id.equals(currentRecord.id)
+                && (scanning || stripPaused);
     }
 
     private void openSavedRecordPage(ScanRecord record) {
@@ -1381,22 +2082,25 @@ public class MainActivity extends Activity {
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
         toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
         readerRoot.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
-        TextView back = label("‹", 22, INK, false);
+        TextView back = label("", 22, INK, false);
+        readerIcon(back, R.drawable.extract_back, 20);
+        back.setContentDescription("返回");
         back.setGravity(Gravity.CENTER);
-        back.setBackground(card(10));
         back.setOnClickListener(v -> leaveReader());
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
-        readerHeading = label("抖音链接读取", 16, INK, true);
+        readerHeading = homeLabel("抖音提取", 18, INK, 750);
         readerHeading.setGravity(Gravity.CENTER);
         toolbar.addView(readerHeading, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView recordsButton = label("记录", 12, INK2, true);
+        TextView recordsButton = homeLabel("记录", 12, INK2, 650);
+        recordsButton.setSingleLine(true);
+        recordsButton.setMinWidth(dp(72));
+        readerIcon(recordsButton, R.drawable.extract_history, 17);
         recordsButton.setGravity(Gravity.CENTER);
-        recordsButton.setBackground(card(16));
         recordsButton.setOnClickListener(v -> {
             recordsFromSettings = false;
             showRecords();
         });
-        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(dp(48), dp(36)));
+        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(-2, dp(40)));
 
         FrameLayout scrollArea = new FrameLayout(this);
         readerRoot.addView(scrollArea, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -1405,97 +2109,119 @@ public class MainActivity extends Activity {
         scrollArea.addView(readerScroll, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(18), dp(8), dp(18), dp(72));
+        content.setPadding(dp(16), dp(10), dp(16), dp(64));
         readerScroll.addView(content);
-        TextView scrollTop = label("↑ 置顶", 13, GREEN, true);
+        TextView scrollTop = homeLabel("置顶", 12, ACCENT, 650);
+        readerIcon(scrollTop, R.drawable.extract_up, 16);
         scrollTop.setGravity(Gravity.CENTER);
         scrollTop.setBackground(shape(SURFACE, 22));
         scrollTop.setElevation(dp(4));
-        scrollTop.setOnClickListener(v -> readerScroll.smoothScrollTo(0, 0));
-        FrameLayout.LayoutParams scrollTopParams = new FrameLayout.LayoutParams(dp(90), dp(42), Gravity.RIGHT | Gravity.BOTTOM);
+        scrollTop.setOnClickListener(v -> { if (motionEnabled) readerScroll.smoothScrollTo(0, 0); else readerScroll.scrollTo(0, 0); });
+        FrameLayout.LayoutParams scrollTopParams = new FrameLayout.LayoutParams(dp(76), dp(36), Gravity.RIGHT | Gravity.BOTTOM);
         scrollTopParams.setMargins(0, 0, dp(18), dp(10));
         scrollArea.addView(scrollTop, scrollTopParams);
 
         LinearLayout inputCard = new LinearLayout(this);
         inputCard.setOrientation(LinearLayout.VERTICAL);
-        inputCard.setPadding(dp(12), dp(12), dp(12), dp(12));
-        inputCard.setBackground(card(16));
         content.addView(inputCard);
         LinearLayout urlBox = new LinearLayout(this);
         urlBox.setGravity(Gravity.CENTER_VERTICAL);
         urlBox.setPadding(dp(10), 0, dp(6), 0);
-        urlBox.setBackground(outlined(10, BG));
-        LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(-1, dp(44));
+        urlBox.setBackground(outlined(12, SURFACE));
+        urlBox.addView(icon(R.drawable.extract_link, ACCENT), new LinearLayout.LayoutParams(dp(19), dp(19)));
+        LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(-1, dp(46));
         inputCard.addView(urlBox, urlParams);
         input = new EditText(this);
         input.setSingleLine(true);
-        input.setTextSize(13);
+        input.setTextSize(12);
+        input.setTypeface(homeTypeface(450));
         input.setTextColor(INK);
         input.setHintTextColor(INK3);
         input.setHint("粘贴抖音作品链接或分享文案");
         input.setBackgroundColor(Color.TRANSPARENT);
-        input.setPadding(0, 0, 0, 0);
+        input.setPadding(dp(8), 0, 0, 0);
         urlBox.addView(input, new LinearLayout.LayoutParams(0, -1, 1));
-        TextView paste = label("粘贴", 11, INK2, true);
-        paste.setGravity(Gravity.CENTER);
-        paste.setBackground(card(8));
+        ImageView paste = new ImageView(this);
+        paste.setImageResource(R.drawable.extract_paste);
+        paste.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        paste.setPadding(dp(8), dp(8), dp(8), dp(8));
+        paste.setImageTintList(ColorStateList.valueOf(ACCENT));
+        paste.setContentDescription("粘贴");
+        pressFeedback(paste);
         paste.setOnClickListener(v -> {
             ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip().getItemCount() > 0)
                 input.setText(clipboard.getPrimaryClip().getItemAt(0).coerceToText(this));
         });
-        LinearLayout.LayoutParams pasteParams = new LinearLayout.LayoutParams(dp(40), dp(32));
+        LinearLayout.LayoutParams pasteParams = new LinearLayout.LayoutParams(dp(36), dp(40));
         pasteParams.leftMargin = dp(6);
         urlBox.addView(paste, pasteParams);
-        TextView copy = label("复制", 11, INK2, true);
-        copy.setGravity(Gravity.CENTER);
-        copy.setBackground(card(8));
+        ImageView copy = new ImageView(this);
+        copy.setImageResource(R.drawable.extract_copy);
+        copy.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        copy.setPadding(dp(8), dp(8), dp(8), dp(8));
+        copy.setImageTintList(ColorStateList.valueOf(ACCENT));
+        copy.setContentDescription("复制");
+        pressFeedback(copy);
         copy.setOnClickListener(v -> {
             String link = extractLink(input.getText().toString(), xhsMode);
             if (link == null && input.getText().length() == 0) link = activeLink;
-            if (link == null) showSaveResult("没有可复制的链接");
-            else copyLink(link);
+            if (link == null) {
+                showSaveResult("没有可复制的链接");
+            } else if (copyLink(link)) {
+                flashCopied(copy);
+            } else {
+                showSaveResult("复制失败：剪贴板不可用");
+            }
         });
-        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(dp(40), dp(32));
+        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(dp(36), dp(40));
         copyParams.leftMargin = dp(6);
         urlBox.addView(copy, copyParams);
         Button open = new Button(this);
         open.setAllCaps(false);
         open.setText("打开作品");
         open.setTextColor(ACCENT);
-        open.setTextSize(15);
-        open.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        open.setBackground(outlined(12, SURFACE));
+        open.setTextSize(14);
+        open.setTypeface(homeTypeface(700));
+        GradientDrawable openShape = outlined(12, SURFACE);
+        openShape.setStroke(dp(1), ACCENT);
+        open.setBackground(openShape);
+        open.setTag("reader-primary-outline");
+        readerIcon(open, R.drawable.extract_open, 20);
         open.setMinHeight(0);
         open.setStateListAnimator(null);
         open.setOnClickListener(v -> openLink());
         LinearLayout actionRow = new LinearLayout(this);
         actionRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-1, dp(46));
-        actionParams.topMargin = dp(10);
+        LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-1, dp(44));
+        actionParams.topMargin = dp(12);
         inputCard.addView(actionRow, actionParams);
         actionRow.addView(open, new LinearLayout.LayoutParams(0, -1, 1));
 
         LinearLayout scanCard = new LinearLayout(this);
         scanCard.setOrientation(LinearLayout.HORIZONTAL);
-        scanCard.setGravity(Gravity.CENTER_VERTICAL);
+        scanCard.setGravity(Gravity.TOP);
+        scanCard.setPadding(dp(12), dp(12), dp(12), dp(12));
         scanCard.setBackground(card(16));
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = dp(12);
         content.addView(scanCard, statusParams);
-        View scanBar = new View(this);
-        scanBar.setBackground(shape(ACCENT, 2));
-        LinearLayout.LayoutParams scanBarParams = new LinearLayout.LayoutParams(dp(3), dp(40));
-        scanBarParams.leftMargin = dp(8);
-        scanCard.addView(scanBar, scanBarParams);
+        scanStatusIcon = icon(R.drawable.extract_info, ACCENT);
+        LinearLayout.LayoutParams scanIconParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+        scanIconParams.topMargin = dp(2);
+        scanCard.addView(scanStatusIcon, scanIconParams);
         LinearLayout scanBody = new LinearLayout(this);
         scanBody.setOrientation(LinearLayout.VERTICAL);
         scanBody.setGravity(Gravity.CENTER_VERTICAL);
-        scanBody.setPadding(dp(14), dp(14), dp(14), dp(14));
+        scanBody.setPadding(dp(12), 0, 0, 0);
         scanCard.addView(scanBody, new LinearLayout.LayoutParams(0, -2, 1));
-        status = label("粘贴作品链接，打开网页后进入评论区", 14, INK, true);
+        scanStateLabel = homeLabel("扫描中", 16, INK, 750);
+        scanStateLabel.setVisibility(View.GONE);
+        scanBody.addView(scanStateLabel);
+        status = homeLabel("粘贴作品链接，打开网页后进入评论区", 12, INK2, 450);
         scanBody.addView(status);
-        scanCountLine = label("", 12, INK2, false);
+        scanCountLine = homeLabel("", 12, INK2, 400);
+        scanCountLine.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams countParams = new LinearLayout.LayoutParams(-1, -2);
         countParams.topMargin = dp(6);
         scanBody.addView(scanCountLine, countParams);
@@ -1507,9 +2233,9 @@ public class MainActivity extends Activity {
         progressParams.topMargin = dp(10);
         scanBody.addView(scanProgress, progressParams);
         scanProgress.setVisibility(View.GONE);
-        scanDetails = label("查看扫描明细", 13, ACCENT, true);
+        scanDetails = homeLabel("查看扫描明细", 12, ACCENT, 650);
         scanDetails.setGravity(Gravity.CENTER_VERTICAL);
-        scanDetails.setMinHeight(dp(44));
+        scanDetails.setMinHeight(dp(32));
         scanDetails.setVisibility(View.GONE);
         scanDetails.setOnClickListener(v -> {
             if (currentRecord != null) showScanDetails(currentRecord);
@@ -1522,18 +2248,22 @@ public class MainActivity extends Activity {
         });
         LinearLayout webToggleRow = new LinearLayout(this);
         webToggleRow.setGravity(Gravity.CENTER_VERTICAL);
-        webToggleRow.setPadding(dp(16), 0, dp(14), 0);
+        webToggleRow.setPadding(dp(12), 0, dp(12), 0);
+        webToggleRow.addView(icon(R.drawable.extract_globe, INK), new LinearLayout.LayoutParams(dp(20), dp(20)));
         webToggleRow.setBackground(card(14));
         LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(-1, dp(44));
         toggleParams.topMargin = dp(12);
         content.addView(webToggleRow, toggleParams);
-        webToggle = label("网页操作", 15, INK, true);
-        webToggleRow.addView(webToggle, new LinearLayout.LayoutParams(0, -2, 1));
-        webToggleArrow = label("⌄", 19, Color.WHITE, true);
-        webToggleArrow.setGravity(Gravity.CENTER);
-        webToggleArrow.setBackground(shape(ACCENT, 10));
-        webToggleRow.addView(webToggleArrow, new LinearLayout.LayoutParams(dp(34), dp(30)));
+        webToggle = homeLabel("网页操作", 13, INK, 650);
+        LinearLayout.LayoutParams webLabelParams = new LinearLayout.LayoutParams(0, -2, 1);
+        webLabelParams.leftMargin = dp(9);
+        webToggleRow.addView(webToggle, webLabelParams);
+        webToggleArrow = icon(R.drawable.extract_chevron, INK2);
+        webToggleRow.addView(webToggleArrow, new LinearLayout.LayoutParams(dp(18), dp(18)));
+        pressFeedback(webToggleRow);
         webToggleRow.setOnClickListener(v -> {
+            if (motionEnabled) android.transition.TransitionManager.beginDelayedTransition(
+                    (android.view.ViewGroup) browserPanel.getParent(), new android.transition.ChangeBounds().setDuration(180));
             browserPanel.setVisibility(browserPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
             updateWebToggle();
         });
@@ -1565,10 +2295,11 @@ public class MainActivity extends Activity {
         browserPanel.addView(codeLogin, loginParams);
         scanButton = new Button(this);
         scanButton.setAllCaps(false);
-        scanButton.setText("扫描主评论");
+        scanButton.setText("扫描评论");
         scanButton.setTextColor(Color.WHITE);
         scanButton.setTextSize(14);
-        scanButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        scanButton.setTypeface(homeTypeface(700));
+        readerIcon(scanButton, R.drawable.extract_scan, 20);
         scanButton.setBackground(shape(ACCENT, 10));
         scanButton.setMinHeight(0);
         scanButton.setStateListAnimator(null);
@@ -1601,8 +2332,11 @@ public class MainActivity extends Activity {
             if (scanning) {
                 scanning = false;
                 requestToken++;
+                stripPaused = true;
                 scanButton.setText("继续扫描");
                 status.setText("扫描已暂停，已提取素材保留在暂存记录中");
+                recordScanPause("已手动暂停扫描", false);
+                updateScanStrip();
             } else {
                 String page = browser.getUrl();
                 if (page == null || !page.startsWith("https://www.douyin.com/")) {
@@ -1633,48 +2367,57 @@ public class MainActivity extends Activity {
                 scanning = true;
                 requestWaits = 0;
                 pageRetries = 0;
+                stripPaused = false;
                 scanButton.setText("暂停扫描");
                 startPage();
             }
         });
         LinearLayout.LayoutParams scanButtonParams = new LinearLayout.LayoutParams(0, -1, 1);
-        scanButtonParams.leftMargin = dp(8);
+        scanButtonParams.leftMargin = dp(10);
         actionRow.addView(scanButton, scanButtonParams);
 
-        resultAnchor = label("提取结果", 20, INK, true);
+        resultAnchor = homeLabel("提取结果", 18, INK, 750);
+        LinearLayout resultHeader = new LinearLayout(this);
+        resultHeader.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams resultHeadParams = new LinearLayout.LayoutParams(-1, -2);
         resultHeadParams.topMargin = dp(22);
-        content.addView(resultAnchor, resultHeadParams);
+        content.addView(resultHeader, resultHeadParams);
+        resultHeader.addView(resultAnchor, new LinearLayout.LayoutParams(0, -2, 1));
         resultSummary = label("提取后自动显示图片与动图预览", 12, INK3, false);
-        LinearLayout summaryRow = new LinearLayout(this);
-        summaryRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(-1, -2);
-        summaryParams.topMargin = dp(4);
-        content.addView(summaryRow, summaryParams);
-        summaryRow.addView(resultSummary, new LinearLayout.LayoutParams(0, -2, 1));
-        selectionAction = label("多选", 12, ACCENT, true);
+        resultSummary.setVisibility(View.GONE);
+        selectionAction = homeLabel("多选", 12, ACCENT, 650);
+        readerIcon(selectionAction, R.drawable.extract_select, 18);
         selectionAction.setGravity(Gravity.CENTER);
         selectionAction.setPadding(dp(12), dp(6), dp(12), dp(6));
-        selectionAction.setBackground(shape(ACCENT_SOFT, 10));
+        selectionAction.setBackgroundColor(Color.TRANSPARENT);
         selectionAction.setOnClickListener(v -> {
             selectingMedia = !selectingMedia;
             selectedMedia.clear();
             renderResults();
             updateResultLabels();
         });
-        summaryRow.addView(selectionAction);
+        resultHeader.addView(selectionAction, new LinearLayout.LayoutParams(dp(70), dp(36)));
         LinearLayout filters = new LinearLayout(this);
         filters.setOrientation(LinearLayout.HORIZONTAL);
-        filters.setPadding(dp(3), dp(3), dp(3), dp(3));
-        filters.setBackground(shape(TRACK, 10));
-        LinearLayout.LayoutParams filtersParams = new LinearLayout.LayoutParams(-1, dp(38));
-        filtersParams.topMargin = dp(14);
+        readerFilterTrack = new FrameLayout(this);
+        readerFilterTrack.setPadding(dp(3), dp(3), dp(3), dp(3));
+        readerFilterTrack.setBackground(shape(TRACK, 10));
+        readerFilterIndicator = new View(this);
+        readerFilterIndicator.setBackground(shape(ACCENT, 8));
+        readerFilterTrack.addView(readerFilterIndicator, new FrameLayout.LayoutParams(0, -1));
+        readerFilterTrack.addView(filters, new FrameLayout.LayoutParams(-1, -1));
+        readerFilterTrack.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> {
+            if (r - l != or - ol) positionReaderFilter(false);
+        });
+        LinearLayout.LayoutParams filtersParams = new LinearLayout.LayoutParams(-1, dp(36));
+        filtersParams.topMargin = dp(12);
         filtersParams.bottomMargin = dp(12);
-        content.addView(filters, filtersParams);
+        content.addView(readerFilterTrack, filtersParams);
         allFilter = segment("全部 0", "all", filters);
         gifFilter = segment("动图 0", "gif", filters);
         imageFilter = segment("图片 0", "image", filters);
-        emptyResults = label("还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。", 12, INK3, false);
+        emptyResults = homeLabel("等待提取素材\n打开作品并扫描评论后，素材会显示在这里", 12, INK2, 400);
+        emptyResults.setLineSpacing(dp(5), 1f);
         emptyResults.setGravity(Gravity.CENTER);
         emptyResults.setPadding(dp(18), dp(26), dp(18), dp(26));
         emptyResults.setBackground(card(16));
@@ -1688,15 +2431,15 @@ public class MainActivity extends Activity {
         readerRoot.addView(saveDivider, new LinearLayout.LayoutParams(-1, 1));
         LinearLayout saveBar = new LinearLayout(this);
         saveBar.setGravity(Gravity.CENTER_VERTICAL);
-        saveBar.setPadding(dp(20), dp(10), dp(20), dp(14));
-        saveBar.setBackgroundColor(BG);
-        readerRoot.addView(saveBar, new LinearLayout.LayoutParams(-1, dp(72)));
+        saveBar.setPadding(dp(16), dp(8), dp(16), dp(8));
+        saveBar.setBackgroundColor(SURFACE);
+        readerRoot.addView(saveBar, new LinearLayout.LayoutParams(-1, dp(64)));
         LinearLayout saveInfo = new LinearLayout(this);
         saveInfo.setOrientation(LinearLayout.VERTICAL);
         saveBar.addView(saveInfo, new LinearLayout.LayoutParams(0, -2, 1));
-        countLabel = label("已提取 0 个", 14, INK, true);
+        countLabel = homeLabel("已提取 0 个", 14, INK, 750);
         saveInfo.addView(countLabel);
-        saveSub = label("保存到 下载 / DouYinGetting", 11, INK3, false);
+        saveSub = homeLabel("保存到 下载 / DouYinGetting", 10, INK2, 400);
         LinearLayout.LayoutParams saveSubParams = new LinearLayout.LayoutParams(-1, -2);
         saveSubParams.topMargin = dp(3);
         saveInfo.addView(saveSub, saveSubParams);
@@ -1705,7 +2448,8 @@ public class MainActivity extends Activity {
         saveButton.setText("保存全部");
         saveButton.setTextColor(Color.WHITE);
         saveButton.setTextSize(13);
-        saveButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        saveButton.setTypeface(homeTypeface(700));
+        readerIcon(saveButton, R.drawable.extract_download, 18);
         saveButton.setBackground(shape(ACCENT, 10));
         saveButton.setMinHeight(0);
         saveButton.setStateListAnimator(null);
@@ -1714,7 +2458,7 @@ public class MainActivity extends Activity {
             for (Media item : media) if (!selectingMedia || selectedMedia.contains(item)) snapshot.add(item);
             saveMediaBatch(snapshot, this::showSaveResult);
         });
-        saveBar.addView(saveButton, new LinearLayout.LayoutParams(dp(104), dp(40)));
+        saveBar.addView(saveButton, new LinearLayout.LayoutParams(dp(118), dp(40)));
         shareSelectedButton = shareButton("分享", v -> {
             ArrayList<Media> items = new ArrayList<>();
             for (Media item : media) if (selectedMedia.contains(item)) items.add(item);
@@ -1729,11 +2473,37 @@ public class MainActivity extends Activity {
     private void updateScanCard() {
         if (scanProgress == null) return;
         scanProgress.setVisibility(scanning ? View.VISIBLE : View.GONE);
+        scanStateLabel.setVisibility(scanning ? View.VISIBLE : View.GONE);
+        status.setVisibility(scanning ? View.GONE : View.VISIBLE);
+        int stateIcon = scanning ? R.drawable.extract_spinner
+                : currentRecord != null && currentRecord.complete ? R.drawable.extract_check : R.drawable.extract_info;
+        if (!Integer.valueOf(stateIcon).equals(scanStatusIcon.getTag())) {
+            scanStatusIcon.setImageResource(stateIcon);
+            scanStatusIcon.setTag(stateIcon);
+        }
+        if (scanning && showingReader && motionEnabled) {
+            if (scanStatusIcon.getAnimation() == null) {
+                android.view.animation.RotateAnimation rotation = new android.view.animation.RotateAnimation(0, 360,
+                        android.view.animation.Animation.RELATIVE_TO_SELF, 0.5f,
+                        android.view.animation.Animation.RELATIVE_TO_SELF, 0.5f);
+                rotation.setDuration(900);
+                rotation.setRepeatCount(android.view.animation.Animation.INFINITE);
+                rotation.setInterpolator(new android.view.animation.LinearInterpolator());
+                scanStatusIcon.startAnimation(rotation);
+            }
+        } else scanStatusIcon.clearAnimation();
+        if (scanButton != null && !Boolean.valueOf(scanning).equals(scanButton.getTag())) {
+            Drawable drawable = getDrawable(scanning ? R.drawable.extract_pause : R.drawable.extract_scan).mutate();
+            drawable.setTint(Color.WHITE);
+            drawable.setBounds(0, 0, dp(20), dp(20));
+            scanButton.setCompoundDrawablesRelative(drawable, null, null, null);
+            scanButton.setTag(scanning);
+        }
         ScanRecord record = currentRecord;
         scanDetails.setVisibility(record == null ? View.GONE : View.VISIBLE);
         scanCountLine.setVisibility(record == null ? View.GONE : View.VISIBLE);
         if (record == null) return;
-        scanCountLine.setText(scanCounts(record));
+        scanCountLine.setText(scanCounts(record) + (scanning ? "\n已找到 " + media.size() + " 个素材" : ""));
         synchronized (record) {
             int issues = record.issueCount + Math.max(0, record.emptyReplyLists - record.loggedEmptyReplyLists);
             scanDetails.setText(issues > 0 ? "查看扫描明细 · " + issues + " 条异常" : "查看扫描明细");
@@ -1958,13 +2728,19 @@ public class MainActivity extends Activity {
     }
 
     private void recordScanPause(String reason) {
+        recordScanPause(reason, true);
+    }
+
+    private void recordScanPause(String reason, boolean abnormal) {
         ScanRecord record = currentRecord;
         if (record == null) return;
-        String location = isXhsLink(record.link) ? "网页评论"
-                : record.mainDone && record.replyIndex < record.replyParents.size()
-                ? "回复组 " + (record.replyIndex + 1) + "（主评论 ID " + record.replyParents.get(record.replyIndex) + "）"
-                : "主评论分页（已读取 " + scanned + " 条）";
-        record.addIssue(location + "： " + reason);
+        if (abnormal) {
+            String location = isXhsLink(record.link) ? "网页评论"
+                    : record.mainDone && record.replyIndex < record.replyParents.size()
+                    ? "回复组 " + (record.replyIndex + 1) + "（主评论 ID " + record.replyParents.get(record.replyIndex) + "）"
+                    : "主评论分页（已读取 " + scanned + " 条）";
+            record.addIssue(location + "： " + reason);
+        }
         worker.execute(() -> persistRecord(record));
     }
 
@@ -2076,10 +2852,15 @@ public class MainActivity extends Activity {
     }
 
     private void loadRecords() {
+        records.addAll(readRecords(null));
+    }
+
+    private ArrayList<ScanRecord> readRecords(HashSet<String> included) {
+        ArrayList<ScanRecord> records = new ArrayList<>();
         File[] folders = recordsFolder().listFiles();
         if (folders == null) folders = new File[0];
         for (File folder : folders) {
-            if (!folder.isDirectory()) continue;
+            if (!folder.isDirectory() || (included != null && !included.contains(folder.getName()))) continue;
             File manifest = new File(folder, "manifest.json");
             if (!manifest.isFile()) continue;
             try {
@@ -2168,7 +2949,7 @@ public class MainActivity extends Activity {
         }
         File legacy = new File(getFilesDir(), "media");
         File[] oldFiles = legacy.listFiles();
-        if (oldFiles != null && oldFiles.length > 0) {
+        if (included == null && oldFiles != null && oldFiles.length > 0) {
             ScanRecord old = new ScanRecord("legacy", "旧版提取结果（来源链接未知）", legacy.lastModified(), legacy);
             old.complete = true;
             for (File file : oldFiles) {
@@ -2182,6 +2963,7 @@ public class MainActivity extends Activity {
             if (!old.items.isEmpty()) records.add(old);
         }
         records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
+        return records;
     }
 
     private boolean persistRecord(ScanRecord record) {
@@ -2299,7 +3081,9 @@ public class MainActivity extends Activity {
     private void updateWebToggle() {
         boolean expanded = browserPanel.getVisibility() == View.VISIBLE;
         webToggle.setText(expanded ? "收起网页" : "网页操作");
-        webToggleArrow.setText(expanded ? "⌃" : "⌄");
+        webToggleArrow.animate().cancel();
+        if (motionEnabled) webToggleArrow.animate().rotation(expanded ? 180f : 0f).setDuration(180).start();
+        else webToggleArrow.setRotation(expanded ? 180f : 0f);
     }
 
     private void openLink() {
@@ -2332,6 +3116,7 @@ public class MainActivity extends Activity {
         resultRow = null;
         displayedCount = 0;
         selectedFilter = "all";
+        positionReaderFilter(false);
         updateResultLabels();
         renderResults();
         browserPanel.setVisibility(View.VISIBLE);
@@ -2348,14 +3133,71 @@ public class MainActivity extends Activity {
         return matcher.find() ? matcher.group().replaceAll("[，。,.]+$", "") : null;
     }
 
-    private void copyLink(String link) {
+    private boolean copyLink(String link) {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        if (clipboard == null) {
-            showSaveResult("复制失败：剪贴板不可用");
-            return;
-        }
+        if (clipboard == null) return false;
         clipboard.setPrimaryClip(ClipData.newPlainText("作品链接", link));
-        showSaveResult("链接已复制");
+        return true;
+    }
+
+    private void showCopiedBanner() {
+        View decor = getWindow().getDecorView();
+        if (copiedBanner != null) copiedBanner.dismiss();
+        TextView banner = label("已复制", 12, Color.WHITE, true);
+        banner.setGravity(Gravity.CENTER);
+        banner.setPadding(dp(16), 0, dp(16), 0);
+        banner.setBackground(shape(Color.rgb(23, 37, 43), 17));
+        PopupWindow popup = new PopupWindow(banner, -2, dp(34));
+        popup.setElevation(dp(8));
+        popup.setFocusable(false);
+        popup.setTouchable(false);
+        popup.setOutsideTouchable(false);
+        copiedBanner = popup;
+        int[] location = new int[2];
+        decor.getLocationOnScreen(location);
+        Rect frame = new Rect();
+        decor.getWindowVisibleDisplayFrame(frame);
+        int top = Math.max(dp(10), frame.top - location[1] + dp(10));
+        popup.showAtLocation(decor, Gravity.TOP | Gravity.CENTER_HORIZONTAL, 0, top);
+        banner.setAlpha(0f);
+        banner.animate().alpha(1f).setDuration(120).start();
+        decor.postDelayed(() -> {
+            if (copiedBanner != popup) return;
+            banner.animate().alpha(0f).setDuration(200).withEndAction(() -> {
+                if (copiedBanner == popup) {
+                    copiedBanner = null;
+                    popup.dismiss();
+                }
+            }).start();
+        }, 800);
+    }
+
+    private void flashCopied(ImageView button) {
+        button.setImageResource(R.drawable.extract_check);
+        button.setBackground(shape(ACCENT_SOFT, 8));
+        showCopiedBanner();
+        Object pending = button.getTag();
+        if (pending instanceof Runnable) button.removeCallbacks((Runnable) pending);
+        Runnable restore = () -> {
+            button.setImageResource(R.drawable.extract_copy);
+            button.setBackgroundColor(Color.TRANSPARENT);
+        };
+        button.setTag(restore);
+        button.postDelayed(restore, 1000);
+    }
+
+    private void flashCopied(TextView button, String original) {
+        button.setText("✓ 已复制");
+        button.setTextColor(ACCENT);
+        showCopiedBanner();
+        Object pending = button.getTag();
+        if (pending instanceof Runnable) button.removeCallbacks((Runnable) pending);
+        Runnable restore = () -> {
+            button.setText(original);
+            button.setTextColor(INK2);
+        };
+        button.setTag(restore);
+        button.postDelayed(restore, 1000);
     }
 
     private static boolean isXhsLink(String link) {
@@ -2514,6 +3356,7 @@ public class MainActivity extends Activity {
                 .setMessage("已扫描 " + record.scanned + " 条评论（主评论 " + record.mainScanned + "、回复 " + record.replyScanned + "），提取 " + media.size() + " 个不同素材。结果已暂存。")
                 .setPositiveButton("查看结果", (dialog, which) -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()))
                 .show();
+        else showTopNotice("扫描完成 · 已提取 " + media.size() + " 个素材");
     }
 
     private void startPage() {
@@ -2838,6 +3681,7 @@ public class MainActivity extends Activity {
                         + (record.emptyReplyLists > 0 ? "\n" + record.emptyReplyLists + " 组回复未返回数据，未计入扫描数。" : ""))
                 .setPositiveButton("查看结果", (dialog, which) -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()))
                 .show();
+        else showTopNotice("扫描完成 · 已提取 " + media.size() + " 个素材");
     }
 
     private boolean download(ScanRecord record, String source, String commentId, String kind) {
@@ -2988,6 +3832,10 @@ public class MainActivity extends Activity {
         resultSummary.setText(selectingMedia ? "点击素材选择，可跨分类多选"
                 : media.isEmpty() ? "提取后自动显示图片与动图预览" : media.size() + " 个不重复素材 · 默认预览中");
         selectionAction.setText(selectingMedia ? "完成" : "多选");
+        selectionAction.setTextColor(selectingMedia ? Color.WHITE : ACCENT);
+        selectionAction.setBackground(selectingMedia ? shape(ACCENT, 8) : null);
+        for (Drawable drawable : selectionAction.getCompoundDrawablesRelative())
+            if (drawable != null) drawable.setTint(selectionAction.getCurrentTextColor());
         countLabel.setText(selectingMedia ? "已选 " + selectedMedia.size() + " / " + media.size() + " 个" : "已提取 " + media.size() + " 个");
         saveButton.setText(selectingMedia ? "保存选中" : "保存全部");
         saveButton.setEnabled(!selectingMedia || !selectedMedia.isEmpty());
@@ -2997,7 +3845,7 @@ public class MainActivity extends Activity {
         shareSelectedButton.setAlpha(shareSelectedButton.isEnabled() ? 1f : 0.45f);
         saveSub.setText(media.isEmpty() ? "保存到 下载 / DouYinGetting"
                 : gifCount + " 个动图 · " + (media.size() - gifCount) + " 张图片");
-        emptyResults.setText(media.isEmpty() ? "还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。" : "当前分类没有结果");
+        emptyResults.setText(media.isEmpty() ? "等待提取素材\n打开作品并扫描评论后，素材会显示在这里" : "当前分类没有结果");
         emptyResults.setVisibility(displayedCount == 0 ? View.VISIBLE : View.GONE);
     }
 
@@ -3008,7 +3856,7 @@ public class MainActivity extends Activity {
         resultRow = null;
         displayedCount = 0;
         for (Media item : media) if (matchesFilter(item)) addTile(item);
-        emptyResults.setText(media.isEmpty() ? "还没有提取结果。打开作品并扫描评论后，图片和动态素材会显示在这里。" : "当前分类没有结果");
+        emptyResults.setText(media.isEmpty() ? "等待提取素材\n打开作品并扫描评论后，素材会显示在这里" : "当前分类没有结果");
         emptyResults.setVisibility(displayedCount == 0 ? View.VISIBLE : View.GONE);
         styleSegment(allFilter, "all");
         styleSegment(gifFilter, "gif");
@@ -3017,24 +3865,25 @@ public class MainActivity extends Activity {
 
     private void styleSegment(TextView button, String type) {
         boolean active = type.equals(selectedFilter);
-        button.setTextColor(active ? INK : INK2);
-        button.setBackground(active ? shape(SURFACE, 8) : null);
+        button.setTextColor(active ? Color.WHITE : INK2);
+        button.setBackground(null);
     }
 
     private void addTile(Media item) {
         if (displayedCount % 3 == 0) {
             resultRow = new LinearLayout(this);
             LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
-            rowParams.bottomMargin = dp(6);
+            rowParams.bottomMargin = dp(8);
             results.addView(resultRow, rowParams);
         }
-        int tileWidth = (getResources().getDisplayMetrics().widthPixels - dp(52)) / 3;
+        int tileWidth = (getResources().getDisplayMetrics().widthPixels - dp(48)) / 3;
         LinearLayout row = resultRow;
         FrameLayout art = new FrameLayout(this);
-        art.setBackground(shape(SURFACE, 10));
+        art.setBackground(outlined(12, SURFACE));
+        pressFeedback(art);
         art.setClipToOutline(true);
         LinearLayout.LayoutParams artParams = new LinearLayout.LayoutParams(tileWidth, tileWidth);
-        if (displayedCount % 3 != 0) artParams.leftMargin = dp(6);
+        if (displayedCount % 3 != 0) artParams.leftMargin = dp(8);
         resultRow.addView(art, artParams);
         ImageView image = new ImageView(this);
         image.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -3051,26 +3900,28 @@ public class MainActivity extends Activity {
             });
         }
         if ("video/mp4".equals(item.mime)) {
-            TextView play = label("▶", 14, Color.WHITE, true);
-            play.setGravity(Gravity.CENTER);
+            ImageView play = icon(R.drawable.extract_play, Color.WHITE);
+            play.setPadding(dp(5), dp(5), dp(5), dp(5));
             play.setBackground(shape(Color.argb(110, 0, 0, 0), 17));
-            art.addView(play, new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.CENTER));
+            FrameLayout.LayoutParams playParams = new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.RIGHT | Gravity.BOTTOM);
+            playParams.setMargins(0, 0, dp(6), dp(6));
+            art.addView(play, playParams);
         }
         if (item.animated || "video/mp4".equals(item.mime)) {
             String tag = "video/mp4".equals(item.mime) ? "视频" : ("image/gif".equals(item.mime) ? "GIF" : "动图");
             TextView badge = label(tag, 9, Color.WHITE, true);
             badge.setGravity(Gravity.CENTER);
             badge.setPadding(dp(6), 0, dp(6), 0);
-            badge.setBackground(shape(Color.argb(190, 23, 37, 43), 5));
-            FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, dp(17), Gravity.LEFT | Gravity.BOTTOM);
-            badgeParams.setMargins(dp(6), 0, 0, dp(6));
+            badge.setBackground(shape("video/mp4".equals(item.mime) ? Color.argb(190, 23, 37, 43) : ACCENT, 5));
+            FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, dp(17), Gravity.RIGHT | Gravity.TOP);
+            badgeParams.setMargins(0, dp(6), dp(6), 0);
             art.addView(badge, badgeParams);
         }
         if (item.kind.startsWith("回复")) {
             TextView replyBadge = label("回复", 9, Color.WHITE, true);
             replyBadge.setGravity(Gravity.CENTER);
             replyBadge.setBackground(shape(ACCENT, 5));
-            art.addView(replyBadge, new FrameLayout.LayoutParams(dp(32), dp(18), Gravity.RIGHT | Gravity.TOP));
+            art.addView(replyBadge, new FrameLayout.LayoutParams(dp(32), dp(18), Gravity.LEFT | Gravity.BOTTOM));
         }
         TextView check = label(selectedMedia.contains(item) ? "✓" : "", 15, selectedMedia.contains(item) ? Color.WHITE : ACCENT, true);
         check.setGravity(Gravity.CENTER);
@@ -3079,6 +3930,12 @@ public class MainActivity extends Activity {
         checkParams.setMargins(dp(6), dp(6), 0, 0);
         art.addView(check, checkParams);
         check.setVisibility(selectingMedia ? View.VISIBLE : View.GONE);
+        if (selectingMedia && selectedMedia.contains(item)) {
+            GradientDrawable border = shape(Color.TRANSPARENT, 12);
+            border.setStroke(dp(2), ACCENT);
+            art.setForeground(border);
+        }
+        art.setContentDescription("素材 " + item.file.getName());
         art.setOnClickListener(v -> {
             if (!selectingMedia) {
                 preview(item);
@@ -3089,6 +3946,14 @@ public class MainActivity extends Activity {
             check.setText(selected ? "✓" : "");
             check.setTextColor(selected ? Color.WHITE : ACCENT);
             check.setBackground(shape(selected ? ACCENT : Color.argb(225, 255, 255, 255), 13));
+            GradientDrawable border = shape(Color.TRANSPARENT, 12);
+            if (selected) border.setStroke(dp(2), ACCENT);
+            art.setForeground(border);
+            if (motionEnabled) {
+                check.setScaleX(0.7f);
+                check.setScaleY(0.7f);
+                check.animate().scaleX(1f).scaleY(1f).setDuration(150).start();
+            }
             updateResultLabels();
         });
         art.setOnLongClickListener(v -> {
@@ -3305,12 +4170,6 @@ public class MainActivity extends Activity {
 
     private void openFavorites(Runnable onBack) {
         returnFromFavorites = onBack;
-        if (scanning) {
-            scanning = false;
-            requestToken++;
-            scanButton.setText("继续扫描");
-            status.setText("扫描已暂停，可返回读取页继续扫描");
-        }
         showFavorites();
     }
 
@@ -3524,7 +4383,7 @@ public class MainActivity extends Activity {
             for (int i = 0; i < filters.length; i++) {
                 boolean active = category == i;
                 filters[i].setSelected(active);
-                filters[i].setText(categories[i] + (active ? " " + counts[i] : ""));
+                filters[i].setText(categories[i] + " " + counts[i]);
                 filters[i].setTextColor(active ? Color.WHITE : INK2);
                 filters[i].setBackground(null);
             }
@@ -3713,6 +4572,8 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         scanning = false;
+        stripHandler.removeCallbacksAndMessages(null);
+        if (themeAnimation != null) themeAnimation.cancel();
         if (noticePopup != null) noticePopup.dismiss();
         for (Animatable animation : animations) animation.stop();
         worker.shutdownNow();
@@ -3736,6 +4597,7 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
+        if (themeAnimation != null) themeAnimation.end();
         if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) returnToRecordsOrigin();
