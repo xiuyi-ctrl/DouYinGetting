@@ -2,5 +2,6 @@
 <paths>
     <files-path name="records" path="records/" />
     <files-path name="favorites" path="favorites/" />
+    <files-path name="wechat_stickers" path="wechat-stickers/" />
     <files-path name="legacy_media" path="media/" />
 </paths>

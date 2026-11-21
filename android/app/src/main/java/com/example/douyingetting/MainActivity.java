@@ -93,8 +93,12 @@ public class MainActivity extends Activity {
     private String activeLink;
     private boolean viewingSavedRecord;
     private boolean resumedFromHome;
-    private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102;
+    private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102, IMPORT_WECHAT = 7103;
+    private boolean showingWechat;
+    private boolean wechatImportBusy;
+    private String wechatPairing = "";
     private boolean recordTransferBusy;
+    private int backupScope = 2; // 0 records, 1 favorites, 2 both
     private boolean savedRecordPageOpened;
     private boolean loadingSavedRecordPage;
     private boolean xhsMode;
@@ -228,13 +232,19 @@ public class MainActivity extends Activity {
         final boolean animated;
 
         Media(File file, String hash, String mime, String commentId, String kind, Drawable thumbnail, boolean animated) {
+            this(file, hash, mime, commentId, kind, thumbnail, animated, true);
+        }
+
+        Media(File file, String hash, String mime, String commentId, String kind, Drawable thumbnail,
+              boolean animated, boolean inferAnimation) {
             this.file = file;
             this.hash = hash;
             this.mime = mime;
             this.commentId = commentId;
             this.kind = kind;
             this.thumbnail = thumbnail;
-            this.animated = animated || "video/mp4".equals(mime) || "image/gif".equals(mime) || thumbnail instanceof Animatable;
+            this.animated = animated || (inferAnimation && ("video/mp4".equals(mime)
+                    || "image/gif".equals(mime) || thumbnail instanceof Animatable));
         }
     }
 
@@ -522,6 +532,7 @@ public class MainActivity extends Activity {
     }
 
     private void resetPages() {
+        showingWechat = false;
         showingReader = false;
         showingRecords = false;
         showingRecordPlatforms = false;
@@ -533,7 +544,7 @@ public class MainActivity extends Activity {
     private ImageView icon(int resource, int color) {
         ImageView image = new ImageView(this);
         image.setImageResource(resource);
-        image.setImageTintList(ColorStateList.valueOf(color));
+        if (resource != R.drawable.wechat_import) image.setImageTintList(ColorStateList.valueOf(color));
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         return image;
     }
@@ -1070,8 +1081,9 @@ public class MainActivity extends Activity {
             });
             title.post(decode::start);
         }
-        addHomeFeature(content, false);
-        addHomeFeature(content, true);
+        addHomeFeature(content, 0);
+        addHomeFeature(content, 1);
+        addHomeFeature(content, 2);
         ScanRecord latest = null;
         for (ScanRecord record : records) {
             if (record != null && extractLink(record.link, isXhsLink(record.link)) != null) {
@@ -1133,16 +1145,18 @@ public class MainActivity extends Activity {
         row.setOnClickListener(action);
     }
 
-    private void addHomeFeature(LinearLayout content, boolean xhs) {
+    private void addHomeFeature(LinearLayout content, int platform) {
+        boolean xhs = platform == 1;
+        boolean wechat = platform == 2;
         LinearLayout row = new LinearLayout(this);
         row.setPadding(dp(16), dp(12), dp(16), dp(12));
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setBackground(card(15));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(86));
-        params.topMargin = dp(xhs ? 12 : 20);
+        params.topMargin = dp(platform == 0 ? 20 : 12);
         content.addView(row, params);
         ImageView image = new ImageView(this);
-        image.setImageResource(xhs ? R.drawable.home_xiaohongshu : R.drawable.home_douyin);
+        image.setImageResource(wechat ? R.drawable.wechat_import : xhs ? R.drawable.home_xiaohongshu : R.drawable.home_douyin);
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setBackground(shape(SURFACE, 13));
         image.setClipToOutline(true);
@@ -1152,10 +1166,13 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(0, -2, 1);
         wp.leftMargin = dp(16);
         row.addView(words, wp);
-        words.addView(homeLabel(xhs ? "小红书提取" : "抖音提取", 20, INK, 750));
-        words.addView(homeLabel(xhs ? "图片 · 回复 · 实况" : "图片 · 动图 · 回复", 14, INK2, 400));
+        words.addView(homeLabel(wechat ? "微信表情导入" : xhs ? "小红书提取" : "抖音提取", 20, INK, 750));
+        words.addView(homeLabel(wechat ? "图片 · 动图 · 导入" : xhs ? "图片 · 回复 · 实况" : "图片 · 动图 · 回复", 14, INK2, 400));
         row.addView(icon(R.drawable.home_arrow, ACCENT), new LinearLayout.LayoutParams(dp(26), dp(26)));
-        row.setOnClickListener(v -> selectMode(xhs));
+        row.setOnClickListener(v -> {
+            if (wechat) unlockWechat();
+            else selectMode(xhs);
+        });
     }
 
     private void addMenuCard(LinearLayout parent, int resource, String name, String detail, View.OnClickListener action) {
@@ -1212,8 +1229,8 @@ public class MainActivity extends Activity {
         favoriteCount.setOnClickListener(v -> openFavorites(this::showMy));
         recordCount.setOnClickListener(v -> openRecordsFromMy());
         addMenuCard(page, R.drawable.blue_history, "扫描记录", "按平台查看与继续扫描", v -> openRecordsFromMy());
-        addMenuCard(page, R.drawable.extract_download, "导出扫描记录", "备份两平台记录、进度及素材原文件", v -> pickRecordArchive(true));
-        addMenuCard(page, R.drawable.record_import, "导入扫描记录", "从 ZIP 备份恢复，重复记录自动跳过", v -> pickRecordArchive(false));
+        addMenuCard(page, R.drawable.extract_download, "导出备份", "扫描记录 · 收藏表情 · 原文件", v -> chooseBackupScope());
+        addMenuCard(page, R.drawable.record_import, "导入备份", "恢复记录和收藏，重复内容自动跳过", v -> pickRecordArchive(false));
         addMenuCard(page, R.drawable.blue_info, "关于咻咿", "版本信息与使用说明", v -> showAbout());
         showMainPage(root, 2);
     }
@@ -1238,20 +1255,55 @@ public class MainActivity extends Activity {
         showCardDialog(dialog, panel);
     }
 
+    private void chooseBackupScope() {
+        if (recordTransferBusy) return;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.extract_download, false, "选择备份内容", "收藏备份包含图片、动图和视频原文件。");
+        String[] names = {"扫描记录", "收藏表情", "全部"};
+        String[] details = {"记录、扫描进度和提取素材", "只备份收藏夹中的原文件", "扫描记录和收藏表情一起备份"};
+        for (int i = 0; i < names.length; i++) {
+            int scope = i;
+            addMenuCard(panel, scope == 1 ? R.drawable.dialog_heart : R.drawable.dialog_file, names[i], details[i], v ->
+                    dismissCardDialog(dialog, () -> { backupScope = scope; pickRecordArchive(true); }));
+        }
+        dialogActions(dialog, panel, "取消", null, false, null, null);
+        showCardDialog(dialog, panel);
+    }
+
+    private ArrayList<File> backupFavorites() {
+        ArrayList<File> files = new ArrayList<>();
+        File[] saved = new File(getFilesDir(), "favorites").listFiles();
+        if (saved != null) for (File file : saved)
+            if (file.isFile() && !file.getName().endsWith(".tmp")) files.add(file);
+        return files;
+    }
+
+    private String favoriteArchiveExtension(File file) throws Exception {
+        try (InputStream input = new FileInputStream(file)) {
+            byte[] header = new byte[32];
+            if (input.read(header) < 12) throw new java.io.IOException("收藏素材无效");
+            String mime = format(header);
+            if (mime == null) throw new java.io.IOException("收藏素材格式无法识别");
+            return mime.equals("image/jpeg") ? ".jpg" : mime.equals("video/mp4") ? ".mp4"
+                    : "." + mime.substring(mime.indexOf('/') + 1);
+        }
+    }
+
     private void pickRecordArchive(boolean exporting) {
         if (recordTransferBusy) return;
-        if (exporting && records.isEmpty()) {
-            showTopNotice("暂无可导出的扫描记录");
+        if (exporting && (backupScope == 0 ? records.isEmpty() : backupScope == 1 ? backupFavorites().isEmpty()
+                : records.isEmpty() && backupFavorites().isEmpty())) {
+            showTopNotice("暂无所选范围的记录或收藏");
             return;
         }
-        if (exporting && (scanning || (currentRecord != null && currentRecord.processingPage))) {
+        if (exporting && backupScope != 1 && (scanning || (currentRecord != null && currentRecord.processingPage))) {
             showTopNotice("请先暂停扫描，等待当前页处理完成后再导出");
             return;
         }
         Intent intent = new Intent(exporting ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType(exporting ? "application/zip" : "*/*");
-        if (exporting) intent.putExtra(Intent.EXTRA_TITLE, "咻咿扫描记录-"
+        if (exporting) intent.putExtra(Intent.EXTRA_TITLE, "咻咿备份-"
                 + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".zip");
         try { startActivityForResult(intent, exporting ? EXPORT_RECORDS : IMPORT_RECORDS); }
         catch (android.content.ActivityNotFoundException error) {
@@ -1283,16 +1335,22 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == IMPORT_WECHAT) {
+            if (result == RESULT_OK && data != null && data.getData() != null) importWechat(data.getData());
+            return;
+        }
         if (request != EXPORT_RECORDS && request != IMPORT_RECORDS) return;
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         if (recordTransferBusy) return;
         boolean exporting = request == EXPORT_RECORDS;
-        if (exporting && (scanning || (currentRecord != null && currentRecord.processingPage))) {
+        if (exporting && backupScope != 1 && (scanning || (currentRecord != null && currentRecord.processingPage))) {
             showTopNotice("扫描仍在进行，请暂停后重新导出");
             return;
         }
         Uri uri = data.getData();
         ArrayList<ScanRecord> snapshot = new ArrayList<>(records);
+        final int scope = backupScope;
+        if (exporting && scope == 1) snapshot.clear();
         HashSet<String> known = new HashSet<>();
         for (ScanRecord record : snapshot) known.add(record.id);
         recordTransferBusy = true;
@@ -1311,7 +1369,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(-1, -2);
         progressParams.topMargin = dp(16);
         panel.addView(progressTitle, progressParams);
-        TextView progressDetail = homeLabel(exporting ? "正在打包扫描记录与素材原文件。\n文件较多时，请稍候。" : "正在检查备份并恢复记录与素材。", 13, INK2, 400);
+        TextView progressDetail = homeLabel(exporting ? "正在打包所选记录、收藏及原文件。\n文件较多时，请稍候。" : "正在检查备份并恢复记录与收藏。", 13, INK2, 400);
         progressDetail.setGravity(Gravity.CENTER);
         progressDetail.setPadding(0, dp(8), 0, 0);
         panel.addView(progressDetail);
@@ -1320,6 +1378,8 @@ public class MainActivity extends Activity {
             String message;
             boolean succeeded = false;
             ArrayList<ScanRecord> imported = new ArrayList<>();
+            int favoriteCount = 0;
+            boolean favoritesInBackup = false;
             try {
                 if (exporting) {
                     java.util.LinkedHashMap<String, File> folders = new java.util.LinkedHashMap<>();
@@ -1330,18 +1390,23 @@ public class MainActivity extends Activity {
                     }
                     try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
                         if (output == null) throw new java.io.IOException("无法写入所选位置");
-                        RecordArchive.write(output, folders, this::recordArchiveFiles);
+                        favoriteCount = RecordArchive.write(output, folders, scope == 0 ? Collections.emptyList() : backupFavorites(),
+                                this::recordArchiveFiles, this::favoriteArchiveExtension);
                     }
-                    message = "导出成功：" + snapshot.size() + " 条记录，包含素材原文件";
+                    message = "导出成功：记录 " + snapshot.size() + " 条，收藏 " + favoriteCount + " 个";
                 } else {
                     RecordArchive.Result restored;
                     try (InputStream input = getContentResolver().openInputStream(uri)) {
                         if (input == null) throw new java.io.IOException("无法读取所选备份");
                         restored = RecordArchive.read(input, new File(getCacheDir(), "record-import-" + UUID.randomUUID()),
-                                recordsFolder(), known, this::recordArchiveFiles);
+                                recordsFolder(), new File(getFilesDir(), "favorites"), known,
+                                this::recordArchiveFiles, this::favoriteArchiveExtension);
                     }
                     imported = readRecords(restored.added);
-                    message = "导入成功：" + imported.size() + " 条；跳过重复记录 " + restored.skipped + " 条";
+                    favoriteCount = restored.favoritesAdded;
+                    favoritesInBackup = restored.favoritesAdded + restored.favoritesSkipped > 0;
+                    message = "导入成功：记录 " + imported.size() + " 条，收藏 " + favoriteCount
+                            + " 个；跳过重复 " + (restored.skipped + restored.favoritesSkipped) + " 项";
                 }
                 succeeded = true;
             } catch (Exception error) {
@@ -1354,6 +1419,7 @@ public class MainActivity extends Activity {
             String report = message;
             boolean success = succeeded;
             ArrayList<ScanRecord> added = imported;
+            boolean showImportedFavorites = imported.isEmpty() && favoritesInBackup;
             runOnUiThread(() -> {
                 recordTransferBusy = false;
                 if (isFinishing() || isDestroyed()) return;
@@ -1363,10 +1429,11 @@ public class MainActivity extends Activity {
                 if (showingMy) showMy();
                 if (success) {
                     if (exporting) showBottomNotice(report);
+                    else if (showImportedFavorites) showBottomNotice(report, "查看收藏", () -> openFavorites(this::showMy));
                     else showBottomNotice(report, "查看记录", this::openRecordsFromMy);
                 } else showConfirmation(R.drawable.dialog_file, false, exporting ? "备份未能导出" : "无法导入这个备份",
                         report, "取消", "重新选择", null, () -> pickRecordArchive(exporting),
-                        exporting ? "扫描记录和素材仍保留在本机" : "本机现有记录未被覆盖");
+                        exporting ? "记录与收藏仍保留在本机" : "本机现有记录和收藏未被覆盖");
             });
         });
     }
@@ -1375,6 +1442,209 @@ public class MainActivity extends Activity {
         recordsOrigin = 2;
         recordsFromSettings = true;
         showRecordPlatforms();
+    }
+
+    private File wechatFolder() {
+        return new File(getFilesDir(), "wechat-stickers");
+    }
+
+    private void unlockWechat() {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.wechat_import, false, "输入访问密码", "验证通过后可使用微信表情导入。");
+        EditText password = new EditText(this);
+        password.setTextColor(INK);
+        password.setHintTextColor(INK3);
+        password.setTextSize(16);
+        password.setHint("请输入六位密码");
+        password.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        password.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(6)});
+        password.setSingleLine(true);
+        password.setSaveEnabled(false);
+        password.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+        password.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        panel.addView(password, new LinearLayout.LayoutParams(-1, dp(52)));
+        Runnable verify = () -> {
+            if (!"299852".equals(password.getText().toString())) {
+                password.setError("密码错误，请重新输入");
+                password.selectAll();
+                return;
+            }
+            password.setText("");
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(password.getWindowToken(), 0);
+            dismissCardDialog(dialog, this::showWechat);
+        };
+        LinearLayout actions = new LinearLayout(this);
+        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(-1, -2);
+        ap.topMargin = dp(18);
+        panel.addView(actions, ap);
+        actions.addView(dialogButton("取消", false, false, v -> dismissCardDialog(dialog, null)),
+                new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -2, 1);
+        cp.leftMargin = dp(10);
+        actions.addView(dialogButton("验证并进入", true, false, v -> verify.run()), cp);
+        password.setOnEditorActionListener((v, action, event) -> {
+            if (action != android.view.inputmethod.EditorInfo.IME_ACTION_DONE) return false;
+            verify.run();
+            return true;
+        });
+        showCardDialog(dialog, panel);
+    }
+
+    private void showWechat() {
+        stopScanForNavigation();
+        resetPages();
+        showingWechat = true;
+        currentPage = -5;
+        new FavoritesScreen(true).show();
+    }
+
+    private void pickWechatArchive() {
+        if (wechatImportBusy) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        try { startActivityForResult(intent, IMPORT_WECHAT); }
+        catch (android.content.ActivityNotFoundException error) { showTopNotice("当前设备没有可用的系统文件选择器"); }
+    }
+
+    private void importWechat(Uri uri) {
+        if (wechatImportBusy) return;
+        wechatImportBusy = true;
+        android.app.Dialog progress = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.wechat_import, false, "正在导入微信表情", "正在检查原文件，完成后可预览和保存。\n请稍候，不要关闭应用。");
+        ProgressBar spinner = new ProgressBar(this);
+        spinner.setIndeterminateTintList(ColorStateList.valueOf(ACCENT));
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(32), dp(32));
+        sp.gravity = Gravity.CENTER_HORIZONTAL;
+        sp.topMargin = dp(18);
+        panel.addView(spinner, sp);
+        progress.setCancelable(false);
+        showCardDialog(progress, panel);
+        worker.execute(() -> {
+            String message;
+            boolean success = false;
+            try (InputStream stream = getContentResolver().openInputStream(uri)) {
+                if (stream == null) throw new java.io.IOException("无法读取压缩包");
+                StickerArchive.Result result = StickerArchive.read(stream,
+                        new File(getCacheDir(), "wechat-import-" + UUID.randomUUID()), wechatFolder(),
+                        file -> ImageDecoder.decodeDrawable(ImageDecoder.createSource(file), (decoder, info, source) -> {
+                            if (info.getSize().getWidth() > 32768 || info.getSize().getHeight() > 32768)
+                                throw new IllegalArgumentException("图片尺寸过大");
+                            decoder.setTargetSampleSize(Math.max(1, Math.max(info.getSize().getWidth(), info.getSize().getHeight()) / 120));
+                        }));
+                message = "已导入 " + result.added + " 个表情";
+                if (result.duplicates > 0) message += "，重复 " + result.duplicates + " 个";
+                if (result.failed > 0) message += "，无法读取 " + result.failed + " 个";
+                success = true;
+            } catch (Exception error) {
+                String detail = error instanceof java.io.IOException ? error.getMessage() : null;
+                message = detail != null && (detail.startsWith("压缩包") || detail.startsWith("无法创建") || detail.startsWith("无法保存"))
+                        ? detail : fileFailureReason(error) + "请选择完整的表情 ZIP 压缩包。";
+            }
+            if ("file".equals(uri.getScheme()) && uri.getPath() != null) {
+                File received = new File(uri.getPath());
+                if (getCacheDir().equals(received.getParentFile()) && received.getName().startsWith("wechat-received-"))
+                    received.delete();
+            }
+            String report = message;
+            boolean imported = success;
+            runOnUiThread(() -> {
+                wechatImportBusy = false;
+                if (isFinishing() || isDestroyed()) return;
+                progress.dismiss();
+                if (imported) {
+                    showWechat();
+                    showBottomNotice(report);
+                } else showConfirmation(R.drawable.dialog_file, false, "表情未能导入", report,
+                        "取消", "重新选择", null, this::pickWechatArchive, "已导入的表情不会被覆盖");
+            });
+        });
+    }
+
+    private void connectWechatComputer() {
+        if (wechatImportBusy) return;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.wechat_import, false, "连接电脑助手",
+                "手机与电脑连接同一局域网。\n电脑启动助手并选择自己的表情库，再复制配对内容。非官方导出仍有账号风险。");
+        EditText pairing = new EditText(this);
+        pairing.setTextColor(INK);
+        pairing.setTextSize(13);
+        pairing.setHint("粘贴电脑助手的配对内容");
+        pairing.setHintTextColor(INK3);
+        pairing.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        pairing.setText(wechatPairing);
+        pairing.setMaxLines(4);
+        panel.addView(pairing, new LinearLayout.LayoutParams(-1, dp(112)));
+        dialogActions(dialog, panel, "取消", "连接并获取", false, null, () -> {
+            String value = pairing.getText().toString().trim();
+            receiveWechatComputer(value);
+        });
+        showCardDialog(dialog, panel);
+    }
+
+    private void receiveWechatComputer(String pairing) {
+        if (wechatImportBusy) return;
+        WechatComputer client;
+        try { client = new WechatComputer(pairing); }
+        catch (Exception error) { showTopNotice("配对内容无效，请从电脑助手重新复制"); return; }
+        wechatPairing = pairing;
+        wechatImportBusy = true;
+        java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+        android.app.Dialog progress = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.wechat_import, false, "正在连接电脑", null);
+        TextView detail = homeLabel("等待电脑助手…", 13, INK2, 400);
+        panel.addView(detail);
+        dialogActions(progress, panel, null, "取消接收", false, null, () -> cancelled.set(true));
+        progress.setCancelable(false);
+        showCardDialog(progress, panel);
+        File zip = new File(getCacheDir(), "wechat-received-" + UUID.randomUUID() + ".zip");
+        worker.execute(() -> {
+            String error = null;
+            try { client.receive(zip, message -> runOnUiThread(() -> detail.setText(message)), cancelled::get); }
+            catch (Exception failure) {
+                error = failure instanceof javax.net.ssl.SSLException ? "电脑证书验证失败，请重新复制配对内容"
+                        : failure instanceof java.net.ConnectException || failure instanceof java.net.SocketTimeoutException
+                        ? "连接电脑失败，请检查同一局域网、助手是否启动，以及专用网络的防火墙许可"
+                        : failure instanceof java.io.IOException && failure.getMessage() != null
+                        && (failure.getMessage().startsWith("配对") || failure.getMessage().startsWith("电脑")
+                        || failure.getMessage().startsWith("表情") || failure.getMessage().startsWith("等待"))
+                        ? failure.getMessage() : "连接未完成，请检查电脑助手后重试";
+            }
+            String message = error;
+            runOnUiThread(() -> {
+                wechatImportBusy = false;
+                if (isFinishing() || isDestroyed()) { zip.delete(); return; }
+                progress.dismiss();
+                if (cancelled.get()) { zip.delete(); showBottomNotice("已取消接收，电脑上的导出可能仍在继续"); }
+                else if (message != null) showConfirmation(R.drawable.dialog_file, false, "未能获取表情", message,
+                        "取消", "重新连接", null, this::connectWechatComputer, "已有表情不受影响");
+                else importWechat(Uri.fromFile(zip));
+            });
+        });
+    }
+
+    private ArrayList<Media> readWechat() {
+        ArrayList<Media> items = new ArrayList<>();
+        File[] files = wechatFolder().listFiles();
+        if (files == null) return items;
+        java.util.Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        for (File file : files) {
+            if (!file.isFile()) continue;
+            try (InputStream stream = new FileInputStream(file)) {
+                byte[] header = new byte[32];
+                if (stream.read(header) < 12) continue;
+                String mime = format(header);
+                if (mime == null || !mime.startsWith("image/")) continue;
+                boolean[] animated = new boolean[1];
+                Drawable thumbnail = ImageDecoder.decodeDrawable(ImageDecoder.createSource(file), (decoder, info, source) -> {
+                    animated[0] = info.isAnimated();
+                    decoder.setTargetSampleSize(Math.max(1, Math.max(info.getSize().getWidth(), info.getSize().getHeight()) / 120));
+                });
+                String name = file.getName();
+                items.add(new Media(file, name.substring(0, name.lastIndexOf('.')), mime, "", "微信表情", thumbnail, animated[0], false));
+            } catch (Exception ignored) { }
+        }
+        return items;
     }
 
     private void returnToRecordsOrigin() {
@@ -4225,8 +4495,9 @@ public class MainActivity extends Activity {
             } catch (Exception error) { message = "收藏操作失败：" + error.getMessage(); }
             String result = message;
             runOnUiThread(() -> {
-                if (adding && isFavorite(item) && showingReader && !isFinishing()) {
-                    showFavoriteNotice();
+                if (adding && isFavorite(item) && (showingReader || showingWechat) && !isFinishing()) {
+                    if (showingWechat) showBottomNotice("已收藏", "查看收藏", () -> openFavorites(this::showWechat));
+                    else showFavoriteNotice();
                     return;
                 }
                 if (showingFavorites) showFavorites();
@@ -4264,6 +4535,7 @@ public class MainActivity extends Activity {
     }
 
     private void showFavorites() {
+        showingWechat = false;
         showingFavorites = true;
         showingMy = false;
         showingReader = false;
@@ -4286,6 +4558,9 @@ public class MainActivity extends Activity {
     }
 
     private class FavoritesScreen {
+        private final boolean wechat;
+        FavoritesScreen() { this(false); }
+        FavoritesScreen(boolean wechat) { this.wechat = wechat; }
         private final LinearLayout root = new LinearLayout(MainActivity.this);
         private final LinearLayout list = new LinearLayout(MainActivity.this);
         private final ArrayList<Media> items = new ArrayList<>();
@@ -4315,13 +4590,36 @@ public class MainActivity extends Activity {
             header.setPadding(dp(20), 0, dp(20), 0);
             root.addView(header, new LinearLayout.LayoutParams(-1, dp(54)));
 
-            title = homeLabel("收藏", 26, INK, 800);
+            if (wechat) {
+                ImageView back = icon(R.drawable.home_chevron, INK);
+                back.setRotation(180);
+                back.setPadding(dp(8), dp(10), dp(8), dp(10));
+                back.setContentDescription("返回首页");
+                back.setOnClickListener(v -> back());
+                header.addView(back, new LinearLayout.LayoutParams(dp(40), dp(44)));
+            }
+            title = homeLabel(wechat ? "微信表情导入" : "收藏", wechat ? 20 : 26, INK, 800);
             header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
             select = shareButton("多选", v -> setSelecting(!selecting));
             select.setTypeface(homeTypeface(700));
             header.addView(select, new LinearLayout.LayoutParams(dp(68), dp(44)));
             select.setEnabled(false);
-            header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
+            if (!wechat) header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
+            if (wechat) {
+                LinearLayout introduction = new LinearLayout(MainActivity.this);
+                introduction.setOrientation(LinearLayout.VERTICAL);
+                introduction.setPadding(dp(20), dp(8), dp(20), dp(8));
+                root.addView(introduction, new LinearLayout.LayoutParams(-1, -2));
+                introduction.addView(homeLabel("导入已有 ZIP，或连接电脑助手获取表情。\n原文件保留在本机，重复文件自动跳过。", 12, INK2, 400));
+                LinearLayout sources = new LinearLayout(MainActivity.this);
+                introduction.addView(sources, new LinearLayout.LayoutParams(-1, dp(46)));
+                Button choose = shareButton("选择 ZIP 导入", v -> pickWechatArchive());
+                sources.addView(choose, new LinearLayout.LayoutParams(0, -1, 1));
+                Button computer = shareButton("连接电脑助手", v -> connectWechatComputer());
+                LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -1, 1);
+                cp.leftMargin = dp(8);
+                sources.addView(computer, cp);
+            }
 
             filterTrack = new FrameLayout(MainActivity.this);
             filterTrack.setPadding(dp(3), dp(3), dp(3), dp(3));
@@ -4372,24 +4670,32 @@ public class MainActivity extends Activity {
             actions = new LinearLayout(MainActivity.this);
             actions.setPadding(dp(12), dp(6), dp(12), dp(6));
             root.addView(actions, new LinearLayout.LayoutParams(-1, dp(60)));
-            share = addAction("分享", v -> shareMedia(selection()));
-            save = addAction("保存", v -> {
+            share = addAction("分享", v -> shareMedia(actionItems()));
+            save = addAction(wechat ? "保存全部" : "保存", v -> {
                 busy = true;
                 updateActions();
-                saveMediaBatch(selection(), (saved, failed) -> {
+                saveMediaBatch(actionItems(), (saved, failed) -> {
                     busy = false;
                     updateActions();
                     showSaveBatchResult(saved, failed);
                 });
             });
-            remove = addAction("取消收藏", v -> confirmRemove());
-            remove.setTextColor(DANGER);
+            if (wechat) {
+                save.setBackground(shape(ACCENT, 10));
+                save.setTextColor(Color.WHITE);
+            }
+            remove = addAction(wechat ? "收藏" : "取消收藏", v -> {
+                if (wechat) collectWechat();
+                else confirmRemove();
+            });
+            remove.setTextColor(wechat ? ACCENT : DANGER);
             favoriteScreen = this;
-            showMainPage(root, 0);
+            if (wechat) presentSecondary(root);
+            else showMainPage(root, 0);
             render();
 
             worker.execute(() -> {
-                ArrayList<Media> found = readFavorites();
+                ArrayList<Media> found = wechat ? readWechat() : readFavorites();
                 runOnUiThread(() -> {
                     if (favoriteScreen != this || !root.isAttachedToWindow()) return;
                     items.addAll(found);
@@ -4426,7 +4732,42 @@ public class MainActivity extends Activity {
 
         void back() {
             if (selecting) setSelecting(false);
+            else if (wechat) showHome();
             else leaveFavorites();
+        }
+
+        private ArrayList<Media> actionItems() {
+            return wechat && !selecting ? new ArrayList<>(items) : selection();
+        }
+
+        private void collectWechat() {
+            ArrayList<Media> snapshot = actionItems();
+            busy = true;
+            updateActions();
+            worker.execute(() -> {
+                int count = 0;
+                for (Media item : snapshot) {
+                    File target = favoriteFile(item);
+                    File temp = new File(target.getParentFile(), target.getName() + ".tmp");
+                    try {
+                        if (!target.isFile()) {
+                            if (!target.getParentFile().isDirectory() && !target.getParentFile().mkdirs())
+                                throw new java.io.IOException("无法创建收藏目录");
+                            Files.copy(item.file.toPath(), temp.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                        }
+                        count++;
+                    } catch (Exception ignored) { }
+                    finally { temp.delete(); }
+                }
+                int saved = count;
+                runOnUiThread(() -> {
+                    busy = false;
+                    updateActions();
+                    showBottomNotice("已收藏 " + saved + " 个" + (saved < snapshot.size() ? "，失败 " + (snapshot.size() - saved) + " 个" : ""),
+                            "查看收藏", () -> openFavorites(MainActivity.this::showWechat));
+                });
+            });
         }
 
         private void setSelecting(boolean value) {
@@ -4507,8 +4848,9 @@ public class MainActivity extends Activity {
                 count++;
             }
             if (count == 0) {
-                String message = !loaded ? "正在读取收藏…"
-                        : items.isEmpty() ? "还没有收藏。在素材预览里点「收藏」即可添加。" : "这个分类还没有收藏";
+                String message = !loaded ? wechat ? "正在读取表情…" : "正在读取收藏…"
+                        : items.isEmpty() ? wechat ? "还没有导入表情\n选择电脑导出的 ZIP 后，图片和动图会显示在这里。"
+                        : "还没有收藏。在素材预览里点「收藏」即可添加。" : wechat ? "这个分类还没有表情" : "这个分类还没有收藏";
                 TextView empty = label(message, 14, INK2, false);
                 empty.setGravity(Gravity.CENTER);
                 empty.setPadding(0, dp(24), 0, dp(24));
@@ -4530,15 +4872,16 @@ public class MainActivity extends Activity {
         }
 
         private void updateActions() {
-            title.setText(selecting ? "已选 " + selected.size() + " 项" : "收藏");
+            title.setText(selecting ? "已选 " + selected.size() + " 项" : wechat ? "微信表情导入" : "收藏");
             select.setText(selecting ? "完成" : "多选");
             select.setSelected(selecting);
             select.setBackground(shape(selecting ? ACCENT : ACCENT_SOFT, 12));
             select.setTextColor(selecting ? Color.WHITE : ACCENT);
             select.setEnabled(selecting || !items.isEmpty());
-            actions.setVisibility(selecting ? View.VISIBLE : View.GONE);
+            actions.setVisibility(selecting || wechat ? View.VISIBLE : View.GONE);
+            if (wechat) save.setText(selecting ? "保存选中" : "保存全部");
             for (Button button : new Button[]{share, save, remove}) {
-                button.setEnabled(!selected.isEmpty() && !busy);
+                button.setEnabled((wechat && !selecting ? !items.isEmpty() : !selected.isEmpty()) && !busy);
                 button.setAlpha(button.isEnabled() ? 1f : 0.45f);
             }
         }
@@ -4616,9 +4959,10 @@ public class MainActivity extends Activity {
         }
         if (message.contains("素材缺失") || message.contains("清单缺失"))
             return "备份文件不完整，缺少记录或素材。请重新选择完整的备份文件。";
-        if (message.contains("过大")) return "备份过大或文件无效，请重新选择受支持的记录备份。";
+        if (message.contains("过大")) return "备份过大或文件无效，请重新选择受支持的备份。";
         if (error instanceof SecurityException || error instanceof java.io.FileNotFoundException)
             return fileFailureReason(error);
+        if (message.contains("收藏素材")) return "备份中的收藏文件不完整或格式无法识别，请重新选择完整备份。";
         return "备份文件无法读取或格式不受支持。请选择完整的咻咿提取备份文件。";
     }
 
@@ -4792,7 +5136,8 @@ public class MainActivity extends Activity {
 
     @Override public void onBackPressed() {
         if (themeAnimation != null) themeAnimation.end();
-        if (showingFavorites) favoriteScreen.back();
+        if (showingWechat) favoriteScreen.back();
+        else if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) returnToRecordsOrigin();
         else if (showingReader) leaveReader();

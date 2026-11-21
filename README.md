@@ -1,5 +1,26 @@
 # DouYinGetting
 
+## 记录与收藏备份（Android 4.0.27）
+
+“我的”→“导出备份”，可选择“扫描记录”“收藏表情”或“全部”。收藏备份包含图片、动图和视频原文件，可在没有扫描记录时单独导出。
+
+“导入备份”自动恢复 ZIP 中的记录和收藏：记录按编号跳过重复项，收藏按文件内容去重，不覆盖已有文件。保留媒体原始字节和收藏文件时间；失败时回滚本次已安装内容。新版使用版本 2 的备份格式，继续支持旧版版本 1 的扫描记录备份；旧 APK 不支持新版备份，恢复时请使用 4.0.27 或更新版本。
+
+## 微信表情导入（Android 4.0.25）
+
+首页→“微信表情导入”→输入访问密码→选择电脑导出的表情 ZIP。“我的”不显示该入口。入口密码验证不等同于素材文件加密。支持 PNG、JPG、GIF 和 WebP 原文件，导入后保留在本机，可分类预览、多选、收藏、分享和保存到 `下载/DouYinGetting`。按文件内容去重，重复导入不会产生副本；保存及分享保持原文件字节不变。
+
+也可点击“连接电脑助手”：在 Windows 上运行配套助手，选择自己的表情库或已有 ZIP，启动后将配对内容粘贴到手机。使用 HTTPS、证书指纹和临时令牌配对，数据在局域网内传输。具体使用方式及非官方导出风险见 [电脑助手说明](desktop/wechat_helper/README.md)。APK 不包含微信数据库密钥读取代码。
+
+这是电脑辅助导出后的本地导入功能，APK 不读取微信私有目录、进程或登录信息。ZIP 中的说明和结果清单不作为表情导入。压缩包最多 5000 个条目，解压后总计最多 512 MB、单文件最多 32 MB；无效路径或超限时取消本次导入，保留已有表情。
+
+压缩包处理检查可使用 JDK 17 运行：
+
+```powershell
+javac -encoding UTF-8 -d android/app/build/sticker-tests android/app/src/main/java/com/example/douyingetting/StickerArchive.java android/tests/StickerArchiveTest.java
+java -cp android/app/build/sticker-tests com.example.douyingetting.StickerArchiveTest android/app/build
+```
+
 抖音评论媒体提取验证项目，包含 Android App 源码、浏览器端提取脚本和设计记录。Android debug APK 已构建；App 内登录、完整扫描和批量保存仍需真机验证。
 
 ## 已验证
