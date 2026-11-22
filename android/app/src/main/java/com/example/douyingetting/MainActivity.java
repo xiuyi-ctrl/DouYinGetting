@@ -95,6 +95,9 @@ public class MainActivity extends Activity {
     private boolean resumedFromHome;
     private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102, IMPORT_WECHAT = 7103;
     private boolean showingWechat;
+    private boolean showingKuaishou;
+    private boolean kuaishouRecords;
+    private FavoritesScreen kuaishouRecordsOrigin;
     private WechatImportRecord currentWechatImport;
     private static class WechatImportRecord {
         String id, name;
@@ -268,6 +271,8 @@ public class MainActivity extends Activity {
     }
 
     private static class ScanRecord {
+        boolean kuaishou;
+        String caption = "";
         final String id;
         final String link;
         final long createdAt;
@@ -540,6 +545,7 @@ public class MainActivity extends Activity {
 
     private void resetPages() {
         showingWechat = false;
+        showingKuaishou = false;
         showingReader = false;
         showingRecords = false;
         showingRecordPlatforms = false;
@@ -1090,6 +1096,7 @@ public class MainActivity extends Activity {
         }
         addHomeFeature(content, 0);
         addHomeFeature(content, 1);
+        addHomeFeature(content, 3);
         addHomeFeature(content, 2);
         ScanRecord latest = null;
         for (ScanRecord record : records) {
@@ -1155,6 +1162,7 @@ public class MainActivity extends Activity {
     private void addHomeFeature(LinearLayout content, int platform) {
         boolean xhs = platform == 1;
         boolean wechat = platform == 2;
+        boolean kuaishou = platform == 3;
         LinearLayout row = new LinearLayout(this);
         row.setPadding(dp(16), dp(12), dp(16), dp(12));
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -1163,7 +1171,8 @@ public class MainActivity extends Activity {
         params.topMargin = dp(platform == 0 ? 20 : 12);
         content.addView(row, params);
         ImageView image = new ImageView(this);
-        image.setImageResource(wechat ? R.drawable.wechat_import : xhs ? R.drawable.home_xiaohongshu : R.drawable.home_douyin);
+        image.setImageResource(kuaishou ? R.drawable.home_kuaishou
+                : wechat ? R.drawable.wechat_import : xhs ? R.drawable.home_xiaohongshu : R.drawable.home_douyin);
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setBackground(shape(SURFACE, 13));
         image.setClipToOutline(true);
@@ -1173,11 +1182,12 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(0, -2, 1);
         wp.leftMargin = dp(16);
         row.addView(words, wp);
-        words.addView(homeLabel(wechat ? "微信表情导入" : xhs ? "小红书提取" : "抖音提取", 20, INK, 750));
-        words.addView(homeLabel(wechat ? "图片 · 动图 · 导入" : xhs ? "图片 · 回复 · 实况" : "图片 · 动图 · 回复", 14, INK2, 400));
+        words.addView(homeLabel(kuaishou ? "快手提取" : wechat ? "微信表情导入" : xhs ? "小红书提取" : "抖音提取", 20, INK, 750));
+        words.addView(homeLabel(kuaishou ? "图片 · 视频 · 文案" : wechat ? "图片 · 动图 · 导入" : xhs ? "图片 · 回复 · 实况" : "图片 · 动图 · 回复", 14, INK2, 400));
         row.addView(icon(R.drawable.home_arrow, ACCENT), new LinearLayout.LayoutParams(dp(26), dp(26)));
         row.setOnClickListener(v -> {
-            if (wechat) unlockWechat();
+            if (kuaishou) showKuaishou();
+            else if (wechat) unlockWechat();
             else selectMode(xhs);
         });
     }
@@ -1235,7 +1245,7 @@ public class MainActivity extends Activity {
         });
         favoriteCount.setOnClickListener(v -> openFavorites(this::showMy));
         recordCount.setOnClickListener(v -> openRecordsFromMy());
-        addMenuCard(page, R.drawable.blue_history, "扫描记录", "按平台查看与继续扫描", v -> openRecordsFromMy());
+        addMenuCard(page, R.drawable.blue_history, "提取记录", "按平台查看已提取的作品", v -> openRecordsFromMy());
         addMenuCard(page, R.drawable.extract_download, "导出备份", "扫描记录 · 收藏表情 · 原文件", v -> chooseBackupScope());
         addMenuCard(page, R.drawable.record_import, "导入备份", "恢复记录和收藏，重复内容自动跳过", v -> pickRecordArchive(false));
         addMenuCard(page, R.drawable.blue_info, "关于咻咿", "版本信息与使用说明", v -> showAbout());
@@ -2170,6 +2180,8 @@ public class MainActivity extends Activity {
     }
 
     private void showRecordPlatforms() {
+        resetPages();
+        kuaishouRecordsOrigin = null;
         currentPage = -3;
         showingMy = false;
         showingReader = false;
@@ -2179,8 +2191,10 @@ public class MainActivity extends Activity {
         showingFavorites = false;
         int douyinCount = 0;
         int xhsCount = 0;
+        int kuaishouCount = 0;
         for (ScanRecord record : records) {
-            if (isXhsLink(record.link)) xhsCount++;
+            if (record.kuaishou) kuaishouCount++;
+            else if (isXhsLink(record.link)) xhsCount++;
             else douyinCount++;
         }
 
@@ -2205,7 +2219,7 @@ public class MainActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(20), dp(18), dp(20), 0);
         root.addView(page);
-        page.addView(label("选择要查看的扫描记录", 13, INK2, false));
+        page.addView(label("选择要查看的提取记录", 13, INK2, false));
         LinearLayout choices = new LinearLayout(this);
         choices.setOrientation(LinearLayout.VERTICAL);
         choices.setBackground(card(16));
@@ -2213,18 +2227,26 @@ public class MainActivity extends Activity {
         choicesParams.topMargin = dp(16);
         page.addView(choices, choicesParams);
         choices.addView(settingRow("抖音扫描记录", douyinCount + " 条", true, v -> {
+            kuaishouRecords = false;
             xhsMode = false;
             showRecords();
         }));
         choices.addView(rowDivider());
         choices.addView(settingRow("小红书扫描记录", xhsCount + " 条", true, v -> {
+            kuaishouRecords = false;
             xhsMode = true;
+            showRecords();
+        }));
+        choices.addView(rowDivider());
+        choices.addView(settingRow("快手正文记录", kuaishouCount + " 条", true, v -> {
+            kuaishouRecords = true;
             showRecords();
         }));
         presentSecondary(root);
     }
 
     private void showRecords() {
+        resetPages();
         currentPage = -2;
         showingSettings = false;
         showingMy = false;
@@ -2248,11 +2270,11 @@ public class MainActivity extends Activity {
         back.setBackground(card(10));
         back.setOnClickListener(v -> leaveRecords());
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
-        TextView heading = label("扫描记录", 16, INK, true);
+        TextView heading = label(kuaishouRecords ? "快手正文记录" : "扫描记录", 16, INK, true);
         heading.setGravity(Gravity.CENTER);
         toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
         int visibleCount = 0;
-        for (ScanRecord record : records) if (isXhsLink(record.link) == xhsMode) visibleCount++;
+        for (ScanRecord record : records) if (matchesRecordPlatform(record)) visibleCount++;
         TextView total = label("共 " + visibleCount + " 条", 12, INK2, true);
         total.setGravity(Gravity.CENTER);
         total.setBackground(card(16));
@@ -2272,8 +2294,16 @@ public class MainActivity extends Activity {
 
     private void leaveRecords() {
         if (recordsFromSettings) showRecordPlatforms();
+        else if (kuaishouRecords) {
+            if (kuaishouRecordsOrigin != null) kuaishouRecordsOrigin.restoreKuaishou();
+            else showKuaishou();
+        }
         else if (viewingSavedRecord) selectMode(xhsMode);
         else showReader();
+    }
+
+    private boolean matchesRecordPlatform(ScanRecord record) {
+        return kuaishouRecords ? record.kuaishou : !record.kuaishou && isXhsLink(record.link) == xhsMode;
     }
 
     private void addRecordCards(LinearLayout page, TextView total) {
@@ -2283,9 +2313,9 @@ public class MainActivity extends Activity {
         hintParams.bottomMargin = dp(14);
         page.addView(hint, hintParams);
         ArrayList<ScanRecord> visibleRecords = new ArrayList<>();
-        for (ScanRecord record : records) if (isXhsLink(record.link) == xhsMode) visibleRecords.add(record);
+        for (ScanRecord record : records) if (matchesRecordPlatform(record)) visibleRecords.add(record);
         if (visibleRecords.isEmpty()) {
-            TextView empty = label("扫描过的作品会暂存在这里，方便随时查看和删除。", 12, INK3, false);
+            TextView empty = label(kuaishouRecords ? "读取过的快手作品会显示在这里。" : "扫描过的作品会暂存在这里，方便随时查看和删除。", 12, INK3, false);
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(dp(18), dp(26), dp(18), dp(26));
             empty.setBackground(card(16));
@@ -2308,7 +2338,7 @@ public class MainActivity extends Activity {
             card.addView(head);
 
             ImageView icon = new ImageView(this);
-            icon.setImageResource(xhsRecord ? R.drawable.xhs_nav : R.drawable.douyin_nav);
+            icon.setImageResource(record.kuaishou ? R.drawable.extract_globe : xhsRecord ? R.drawable.xhs_nav : R.drawable.douyin_nav);
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
             icon.setPadding(dp(9), dp(9), dp(9), dp(9));
             icon.setBackground(shape(ACCENT_SOFT, 11));
@@ -2322,7 +2352,7 @@ public class MainActivity extends Activity {
             head.addView(info, infoParams);
             String shortLink = record.link.replaceFirst("^https?://", "").replaceFirst("\\?.*$", "").replaceFirst("/$", "");
             if (shortLink.length() > 24) shortLink = shortLink.substring(0, 23) + "…";
-            TextView title = label(shortLink, 13, INK, true);
+            TextView title = label(record.kuaishou && !record.caption.isEmpty() ? record.caption : shortLink, 13, INK, true);
             title.setSingleLine(true);
             title.setEllipsize(android.text.TextUtils.TruncateAt.END);
             info.addView(title);
@@ -2334,7 +2364,7 @@ public class MainActivity extends Activity {
                     : record.scanned + " 条评论";
             if (xhsRecord && record.scanned > 0 && record.mainScanned + record.replyScanned == 0)
                 progress = record.scanned + " 条评论";
-            String detail = ("legacy".equals(record.id) ? "旧版缓存" : date.format(record.createdAt) + " · " + progress)
+            String detail = ("legacy".equals(record.id) ? "旧版缓存" : date.format(record.createdAt) + (record.kuaishou ? "" : " · " + progress))
                     + " · " + count + " 素材";
             TextView sub = label(detail, 11, INK3, false);
             sub.setSingleLine(true);
@@ -2386,7 +2416,7 @@ public class MainActivity extends Activity {
                 if (!showingRecords || !page.isAttachedToWindow()) return;
                 page.removeView(card);
                 int remaining = 0;
-                for (ScanRecord item : records) if (isXhsLink(item.link) == xhsRecord) remaining++;
+                for (ScanRecord item : records) if (matchesRecordPlatform(item)) remaining++;
                 total.setText("共 " + remaining + " 条");
                 if (remaining == 0) {
                     page.removeAllViews();
@@ -2400,6 +2430,10 @@ public class MainActivity extends Activity {
     }
 
     private void showRecord(ScanRecord record) {
+        if (record.kuaishou) {
+            showKuaishou(record);
+            return;
+        }
         boolean live = isLiveRecord(record);
         resumedFromHome = false;
         xhsMode = isXhsLink(record.link);
@@ -2436,7 +2470,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean canResume(ScanRecord record) {
-        return record != null && !record.complete && extractLink(record.link, isXhsLink(record.link)) != null;
+        return record != null && !record.kuaishou && !record.complete && extractLink(record.link, isXhsLink(record.link)) != null;
     }
 
     private boolean isLiveRecord(ScanRecord record) {
@@ -2594,7 +2628,7 @@ public class MainActivity extends Activity {
     }
 
     private void confirmDelete(ScanRecord record, Runnable onDeleted) {
-        showConfirmation(R.drawable.dialog_trash, true, "删除这条扫描记录？",
+        showConfirmation(R.drawable.dialog_trash, true, record.kuaishou ? "删除这条快手记录？" : "删除这条扫描记录？",
                 "这条记录及暂存素材将被删除。\n已保存到下载目录的文件不受影响。",
                 "保留记录", "删除记录", null, () -> {
             if (currentRecord == record) {
@@ -2636,71 +2670,17 @@ public class MainActivity extends Activity {
         for (Animatable animation : animations) animation.start();
     }
 
-    private void buildReader() {
-        readerRoot = new LinearLayout(this);
-        readerRoot.setOrientation(LinearLayout.VERTICAL);
-        readerRoot.setBackgroundColor(BG);
-        readerRoot.setFitsSystemWindows(true);
-        LinearLayout toolbar = new LinearLayout(this);
-        toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
-        readerRoot.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
-        TextView back = label("", 22, INK, false);
-        readerIcon(back, R.drawable.extract_back, 20);
-        back.setContentDescription("返回");
-        back.setGravity(Gravity.CENTER);
-        back.setOnClickListener(v -> leaveReader());
-        toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
-        readerHeading = homeLabel("抖音提取", 18, INK, 750);
-        readerHeading.setGravity(Gravity.CENTER);
-        toolbar.addView(readerHeading, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView recordsButton = homeLabel("记录", 12, INK2, 650);
-        recordsButton.setSingleLine(true);
-        recordsButton.setMinWidth(dp(72));
-        readerIcon(recordsButton, R.drawable.extract_history, 17);
-        recordsButton.setGravity(Gravity.CENTER);
-        recordsButton.setOnClickListener(v -> {
-            recordsFromSettings = false;
-            showRecords();
-        });
-        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(-2, dp(40)));
-
-        FrameLayout scrollArea = new FrameLayout(this);
-        readerRoot.addView(scrollArea, new LinearLayout.LayoutParams(-1, 0, 1));
-        readerScroll = new ScrollView(this);
-        readerScroll.setFillViewport(true);
-        scrollArea.addView(readerScroll, new FrameLayout.LayoutParams(-1, -1));
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(16), dp(10), dp(16), dp(64));
-        readerScroll.addView(content);
-        TextView scrollTop = homeLabel("置顶", 12, ACCENT, 650);
-        readerIcon(scrollTop, R.drawable.extract_up, 16);
-        scrollTop.setGravity(Gravity.CENTER);
-        scrollTop.setBackground(shape(SURFACE, 22));
-        scrollTop.setElevation(dp(4));
-        scrollTop.setOnClickListener(v -> { if (motionEnabled) readerScroll.smoothScrollTo(0, 0); else readerScroll.scrollTo(0, 0); });
-        FrameLayout.LayoutParams scrollTopParams = new FrameLayout.LayoutParams(dp(76), dp(36), Gravity.RIGHT | Gravity.BOTTOM);
-        scrollTopParams.setMargins(0, 0, dp(18), dp(10));
-        scrollArea.addView(scrollTop, scrollTopParams);
-
-        LinearLayout inputCard = new LinearLayout(this);
-        inputCard.setOrientation(LinearLayout.VERTICAL);
-        content.addView(inputCard);
+    private LinearLayout readerLinkRow(EditText input, java.util.function.Supplier<String> copyValue) {
         LinearLayout urlBox = new LinearLayout(this);
         urlBox.setGravity(Gravity.CENTER_VERTICAL);
         urlBox.setPadding(dp(10), 0, dp(6), 0);
         urlBox.setBackground(outlined(12, SURFACE));
         urlBox.addView(icon(R.drawable.extract_link, ACCENT), new LinearLayout.LayoutParams(dp(19), dp(19)));
-        LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(-1, dp(46));
-        inputCard.addView(urlBox, urlParams);
-        input = new EditText(this);
         input.setSingleLine(true);
         input.setTextSize(12);
         input.setTypeface(homeTypeface(450));
         input.setTextColor(INK);
         input.setHintTextColor(INK3);
-        input.setHint("粘贴抖音作品链接或分享文案");
         input.setBackgroundColor(Color.TRANSPARENT);
         input.setPadding(dp(8), 0, 0, 0);
         urlBox.addView(input, new LinearLayout.LayoutParams(0, -1, 1));
@@ -2729,8 +2709,7 @@ public class MainActivity extends Activity {
         copy.setContentDescription("复制");
         pressFeedback(copy);
         copy.setOnClickListener(v -> {
-            String link = extractLink(input.getText().toString(), xhsMode);
-            if (link == null && input.getText().length() == 0) link = activeLink;
+            String link = copyValue.get();
             if (link == null) {
                 showTopNotice("没有可复制的链接");
             } else if (copyLink(link)) {
@@ -2742,6 +2721,68 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(dp(36), dp(40));
         copyParams.leftMargin = dp(6);
         urlBox.addView(copy, copyParams);
+        return urlBox;
+    }
+
+    private void buildReader() {
+        readerRoot = new LinearLayout(this);
+        readerRoot.setOrientation(LinearLayout.VERTICAL);
+        readerRoot.setBackgroundColor(BG);
+        readerRoot.setFitsSystemWindows(true);
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
+        readerRoot.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
+        TextView back = label("", 22, INK, false);
+        readerIcon(back, R.drawable.extract_back, 20);
+        back.setContentDescription("返回");
+        back.setGravity(Gravity.CENTER);
+        back.setOnClickListener(v -> leaveReader());
+        toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        readerHeading = homeLabel("抖音提取", 18, INK, 750);
+        readerHeading.setGravity(Gravity.CENTER);
+        toolbar.addView(readerHeading, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView recordsButton = homeLabel("记录", 12, INK2, 650);
+        recordsButton.setSingleLine(true);
+        recordsButton.setMinWidth(dp(72));
+        readerIcon(recordsButton, R.drawable.extract_history, 17);
+        recordsButton.setGravity(Gravity.CENTER);
+        recordsButton.setOnClickListener(v -> {
+            recordsFromSettings = false;
+            kuaishouRecords = false;
+            showRecords();
+        });
+        toolbar.addView(recordsButton, new LinearLayout.LayoutParams(-2, dp(40)));
+
+        FrameLayout scrollArea = new FrameLayout(this);
+        readerRoot.addView(scrollArea, new LinearLayout.LayoutParams(-1, 0, 1));
+        readerScroll = new ScrollView(this);
+        readerScroll.setFillViewport(true);
+        scrollArea.addView(readerScroll, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(10), dp(16), dp(64));
+        readerScroll.addView(content);
+        TextView scrollTop = homeLabel("置顶", 12, ACCENT, 650);
+        readerIcon(scrollTop, R.drawable.extract_up, 16);
+        scrollTop.setGravity(Gravity.CENTER);
+        scrollTop.setBackground(shape(SURFACE, 22));
+        scrollTop.setElevation(dp(4));
+        scrollTop.setOnClickListener(v -> { if (motionEnabled) readerScroll.smoothScrollTo(0, 0); else readerScroll.scrollTo(0, 0); });
+        FrameLayout.LayoutParams scrollTopParams = new FrameLayout.LayoutParams(dp(76), dp(36), Gravity.RIGHT | Gravity.BOTTOM);
+        scrollTopParams.setMargins(0, 0, dp(18), dp(10));
+        scrollArea.addView(scrollTop, scrollTopParams);
+
+        LinearLayout inputCard = new LinearLayout(this);
+        inputCard.setOrientation(LinearLayout.VERTICAL);
+        content.addView(inputCard);
+        input = new EditText(this);
+        input.setHint("粘贴抖音作品链接或分享文案");
+        inputCard.addView(readerLinkRow(input, () -> {
+            String link = extractLink(input.getText().toString(), xhsMode);
+            return link == null && input.getText().length() == 0 ? activeLink : link;
+        }),
+                new LinearLayout.LayoutParams(-1, dp(46)));
         Button open = new Button(this);
         open.setAllCaps(false);
         open.setText("打开作品");
@@ -3394,6 +3435,8 @@ public class MainActivity extends Activity {
             try {
                 JSONObject data = new JSONObject(new String(Files.readAllBytes(manifest.toPath()), StandardCharsets.UTF_8));
                 ScanRecord record = new ScanRecord(folder.getName(), data.getString("link"), data.getLong("createdAt"), folder);
+                record.kuaishou = "kuaishou".equals(data.optString("platform"));
+                record.caption = data.optString("caption");
                 record.scanned = data.optInt("scanned");
                 record.mainScanned = data.optInt("mainScanned");
                 record.replyScanned = data.optInt("replyScanned");
@@ -3500,6 +3543,10 @@ public class MainActivity extends Activity {
             data.put("id", record.id);
             data.put("link", record.link);
             data.put("createdAt", record.createdAt);
+            if (record.kuaishou) {
+                data.put("platform", "kuaishou");
+                data.put("caption", record.caption);
+            }
             data.put("scanned", record.scanned);
             data.put("mainScanned", record.mainScanned);
             data.put("replyScanned", record.replyScanned);
@@ -4669,8 +4716,11 @@ public class MainActivity extends Activity {
             } catch (Exception error) { message = "收藏操作失败：" + error.getMessage(); }
             String result = message;
             runOnUiThread(() -> {
-                if (adding && isFavorite(item) && (showingReader || showingWechat) && !isFinishing()) {
-                    if (showingWechat) showBottomNotice("已收藏", "查看收藏", () -> openFavorites(this::returnToWechatImport));
+                if (adding && isFavorite(item) && (showingReader || showingWechat || showingKuaishou) && !isFinishing()) {
+                    if (showingKuaishou) {
+                        FavoritesScreen screen = favoriteScreen;
+                        showBottomNotice("已收藏", "查看收藏", () -> openFavorites(screen::restoreKuaishou));
+                    } else if (showingWechat) showBottomNotice("已收藏", "查看收藏", () -> openFavorites(this::returnToWechatImport));
                     else showFavoriteNotice();
                     return;
                 }
@@ -4710,6 +4760,7 @@ public class MainActivity extends Activity {
 
     private void showFavorites() {
         showingWechat = false;
+        showingKuaishou = false;
         showingFavorites = true;
         showingMy = false;
         showingReader = false;
@@ -4731,11 +4782,78 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void showKuaishou() {
+        showKuaishou(null);
+    }
+
+    private void showKuaishou(ScanRecord record) {
+        stopScanForNavigation();
+        resetPages();
+        showingKuaishou = true;
+        currentPage = -6;
+        new FavoritesScreen(false, true, record).show();
+    }
+
+    private Media readKuaishouImage(java.net.URL url, File folder) throws Exception {
+        byte[] bytes = KuaishouPost.read(url, 12 * 1024 * 1024, true);
+        String mime = format(bytes);
+        if (mime == null || !mime.startsWith("image/")) throw new java.io.IOException("图片格式无法识别");
+        StringBuilder hash = new StringBuilder();
+        for (byte b : MessageDigest.getInstance("SHA-256").digest(bytes)) hash.append(String.format(Locale.ROOT, "%02x", b & 255));
+        String extension = mime.equals("image/jpeg") ? ".jpg" : "." + mime.substring(6);
+        if (!folder.isDirectory() && !folder.mkdirs()) throw new java.io.IOException("无法创建暂存目录");
+        File file = new File(folder, hash + extension);
+        File temp = File.createTempFile("image-", ".tmp", folder);
+        try {
+            Files.write(temp.toPath(), bytes);
+            Drawable preview = decodeThumbnail(temp);
+            if (preview == null) throw new java.io.IOException("图片无法预览");
+            Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            return new Media(file, hash.toString(), mime, "", "快手正文图片", preview, preview instanceof Animatable);
+        } finally { temp.delete(); }
+    }
+
+    private Media readKuaishouVideo(java.net.URL url, File folder) throws Exception {
+        if (!folder.isDirectory() && !folder.mkdirs()) throw new java.io.IOException("无法创建暂存目录");
+        File pending = File.createTempFile("video-", ".mp4", folder);
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (OutputStream out = new java.security.DigestOutputStream(new FileOutputStream(pending), digest)) {
+                KuaishouPost.transfer(url, 160 * 1024 * 1024, true, out);
+            }
+            android.media.MediaExtractor extractor = new android.media.MediaExtractor();
+            boolean hasVideo = false;
+            try {
+                extractor.setDataSource(pending.getAbsolutePath());
+                for (int i = 0; i < extractor.getTrackCount(); i++) {
+                    String mime = extractor.getTrackFormat(i).getString(android.media.MediaFormat.KEY_MIME);
+                    if (mime != null && mime.startsWith("video/")) hasVideo = true;
+                }
+            } finally { extractor.release(); }
+            if (!hasVideo) throw new java.io.IOException("视频文件无效");
+            StringBuilder hash = new StringBuilder();
+            for (byte b : digest.digest()) hash.append(String.format(Locale.ROOT, "%02x", b & 255));
+            File file = new File(folder, hash + ".mp4");
+            Files.move(pending.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            return new Media(file, hash.toString(), "video/mp4", "", "快手正文视频", decodeThumbnail(file), true);
+        } finally { pending.delete(); }
+    }
+
     private class FavoritesScreen {
         private final boolean wechat;
+        private final boolean kuaishou;
+        private final boolean imported;
         private final WechatImportRecord wechatRecord;
+        private final ScanRecord savedKuaishou;
         FavoritesScreen() { this(false); }
-        FavoritesScreen(boolean wechat) { this.wechat = wechat; this.wechatRecord = wechat ? currentWechatImport : null; }
+        FavoritesScreen(boolean wechat) { this(wechat, false, null); }
+        FavoritesScreen(boolean wechat, boolean kuaishou, ScanRecord savedKuaishou) {
+            this.wechat = wechat;
+            this.kuaishou = kuaishou;
+            imported = wechat || kuaishou;
+            wechatRecord = wechat ? currentWechatImport : null;
+            this.savedKuaishou = savedKuaishou;
+        }
         private final LinearLayout root = new LinearLayout(MainActivity.this);
         private final LinearLayout list = new LinearLayout(MainActivity.this);
         private final ArrayList<Media> items = new ArrayList<>();
@@ -4747,6 +4865,7 @@ public class MainActivity extends Activity {
         private android.animation.ValueAnimator filterAnimation;
         private LinearLayout actions;
         private TextView title;
+        private TextView extractedCount;
         private Button select;
         private Button selectAll;
         private Button share;
@@ -4757,6 +4876,155 @@ public class MainActivity extends Activity {
         private boolean busy;
         private boolean loaded;
 
+        private String screenTitle() {
+            return kuaishou ? "快手提取" : wechat ? "微信表情导入" : "收藏";
+        }
+
+        private void restoreKuaishou() {
+            resetPages();
+            showingKuaishou = true;
+            currentPage = -6;
+            favoriteScreen = this;
+            presentSecondary(root);
+        }
+
+        private void addKuaishouInput(LinearLayout content) {
+            EditText link = new EditText(MainActivity.this);
+            link.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+            link.setHint("粘贴快手作品链接或分享文案");
+            content.addView(readerLinkRow(link, () -> KuaishouPost.extractLink(link.getText().toString())),
+                    new LinearLayout.LayoutParams(-1, dp(46)));
+
+            Button fetch = shareButton("读取正文", v -> {});
+            fetch.setBackground(shape(ACCENT, 12));
+            fetch.setTextSize(14);
+            fetch.setTypeface(homeTypeface(700));
+            fetch.setTextColor(Color.WHITE);
+            readerIcon(fetch, R.drawable.extract_scan, 20);
+            LinearLayout.LayoutParams fetchParams = new LinearLayout.LayoutParams(-1, dp(44));
+            fetchParams.topMargin = dp(12);
+            content.addView(fetch, fetchParams);
+
+            LinearLayout statusCard = new LinearLayout(MainActivity.this);
+            statusCard.setGravity(Gravity.CENTER_VERTICAL);
+            statusCard.setPadding(dp(12), dp(12), dp(12), dp(12));
+            statusCard.setBackground(card(14));
+            LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
+            statusParams.topMargin = dp(12);
+            content.addView(statusCard, statusParams);
+            ImageView info = icon(R.drawable.extract_info, ACCENT);
+            statusCard.addView(info, new LinearLayout.LayoutParams(dp(20), dp(20)));
+            ProgressBar spinner = new ProgressBar(MainActivity.this);
+            spinner.setIndeterminateTintList(ColorStateList.valueOf(ACCENT));
+            spinner.setVisibility(View.GONE);
+            statusCard.addView(spinner, new LinearLayout.LayoutParams(dp(20), dp(20)));
+            TextView progress = homeLabel("粘贴作品链接，读取文案、图片和视频", 12, INK2, 450);
+            LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(0, -2, 1);
+            progressParams.leftMargin = dp(12);
+            statusCard.addView(progress, progressParams);
+
+            TextView caption = homeLabel("", 13, INK, 450);
+            caption.setBackground(card(14));
+            caption.setPadding(dp(12), dp(10), dp(12), dp(10));
+            caption.setMaxLines(3);
+            caption.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            caption.setOnClickListener(v -> caption.setMaxLines(caption.getMaxLines() == 3 ? 12 : 3));
+            caption.setVisibility(View.GONE);
+            LinearLayout.LayoutParams captionParams = new LinearLayout.LayoutParams(-1, -2);
+            captionParams.topMargin = dp(8);
+            content.addView(caption, captionParams);
+            if (savedKuaishou != null) {
+                link.setText(savedKuaishou.link);
+                caption.setText(savedKuaishou.caption);
+                caption.setVisibility(savedKuaishou.caption.isEmpty() ? View.GONE : View.VISIBLE);
+                progress.setText("已打开本机提取记录");
+            }
+            fetch.setOnClickListener(v -> {
+                if (busy) return;
+                String text = link.getText().toString().trim();
+                if (KuaishouPost.extractLink(text) == null) {
+                    showTopNotice("请粘贴快手作品链接或分享文案");
+                    return;
+                }
+                ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(link.getWindowToken(), 0);
+                link.clearFocus();
+                busy = true;
+                fetch.setEnabled(false);
+                updateActions();
+                info.setVisibility(View.GONE);
+                spinner.setVisibility(View.VISIBLE);
+                progress.setText("正在读取快手正文…");
+                worker.execute(() -> {
+                    ArrayList<Media> found = new ArrayList<>();
+                    String message;
+                    KuaishouPost post = null;
+                    ScanRecord saved = null;
+                    try {
+                        post = KuaishouPost.open(text);
+                        String id = UUID.randomUUID().toString();
+                        File folder = new File(recordsFolder(), id);
+                        for (ArrayList<java.net.URL> variants : post.images) {
+                            for (java.net.URL url : variants) {
+                                try { found.add(readKuaishouImage(url, folder)); break; }
+                                catch (Exception ignored) { }
+                            }
+                        }
+                        if (!post.videos.isEmpty()) {
+                            runOnUiThread(() -> progress.setText("正在下载视频…"));
+                            for (java.net.URL url : post.videos) {
+                                try { found.add(readKuaishouVideo(url, folder)); break; }
+                                catch (Exception ignored) { }
+                            }
+                            message = found.isEmpty() ? "视频下载失败，请检查网络后重试" : "已读取视频，可以预览或保存";
+                        } else if (post.images.isEmpty()) {
+                            message = "已读取文案，分享页未提供配图或视频文件";
+                        } else {
+                            int failed = post.images.size() - found.size();
+                            message = "已读取 " + found.size() + " 张配图" + (failed > 0 ? "，" + failed + " 张读取失败" : "");
+                        }
+                        if (!found.isEmpty() || (post.images.isEmpty() && post.videos.isEmpty())) {
+                            ScanRecord record = new ScanRecord(id, post.link, System.currentTimeMillis(), folder);
+                            record.kuaishou = true;
+                            record.caption = post.caption;
+                            record.complete = post.images.size() <= found.size() && (post.videos.isEmpty() || !found.isEmpty());
+                            record.items.addAll(found);
+                            if (persistRecord(record)) saved = record;
+                            else {
+                                deleteRecordFiles(record);
+                                found.clear();
+                                message = "无法保存提取记录，请检查存储空间后重试";
+                            }
+                        } else folder.delete();
+                    } catch (Exception error) {
+                        String detail = error.getMessage();
+                        message = detail != null && (detail.startsWith("请粘贴") || detail.startsWith("公开分享页"))
+                                ? detail : "暂时无法读取快手作品，请检查网络或链接后重试";
+                    }
+                    String statusText = message;
+                    KuaishouPost result = post;
+                    ScanRecord newRecord = saved;
+                    runOnUiThread(() -> {
+                        if (newRecord != null) records.add(0, newRecord);
+                        busy = false;
+                        fetch.setEnabled(true);
+                        spinner.setVisibility(View.GONE);
+                        info.setVisibility(View.VISIBLE);
+                        progress.setText(statusText);
+                        if (result != null) {
+                            items.clear();
+                            items.addAll(found);
+                            caption.setText(result.caption);
+                            caption.setMaxLines(3);
+                            caption.setVisibility(result.caption.isEmpty() ? View.GONE : View.VISIBLE);
+                            category = 0;
+                            positionFilter(false);
+                            setSelecting(false);
+                        } else updateActions();
+                    });
+                });
+            });
+        }
+
         void show() {
             root.setOrientation(LinearLayout.VERTICAL);
             root.setBackgroundColor(BG);
@@ -4766,15 +5034,16 @@ public class MainActivity extends Activity {
             header.setPadding(dp(20), 0, dp(20), 0);
             root.addView(header, new LinearLayout.LayoutParams(-1, dp(54)));
 
-            if (wechat) {
-                ImageView back = icon(R.drawable.home_chevron, INK);
-                back.setRotation(180);
+            if (imported) {
+                ImageView back = icon(kuaishou ? R.drawable.extract_back : R.drawable.home_chevron, INK);
+                if (!kuaishou) back.setRotation(180);
                 back.setPadding(dp(8), dp(10), dp(8), dp(10));
-                back.setContentDescription("返回导入记录");
+                back.setContentDescription(wechat ? "返回导入记录" : "返回首页");
                 back.setOnClickListener(v -> back());
                 header.addView(back, new LinearLayout.LayoutParams(dp(40), dp(44)));
             }
-            title = homeLabel(wechat ? "微信表情导入" : "收藏", wechat ? 20 : 26, INK, 800);
+            title = homeLabel(screenTitle(), kuaishou ? 18 : imported ? 20 : 26, INK, kuaishou ? 750 : 800);
+            if (kuaishou) title.setGravity(Gravity.CENTER);
             header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
             selectAll = shareButton("全选", v -> {
                 toggleVisibleSelection(items, selected, this::matchesCategory);
@@ -4782,12 +5051,51 @@ public class MainActivity extends Activity {
             });
             LinearLayout.LayoutParams selectAllParams = new LinearLayout.LayoutParams(dp(76), dp(44));
             selectAllParams.rightMargin = dp(6);
-            header.addView(selectAll, selectAllParams);
+            if (!kuaishou) header.addView(selectAll, selectAllParams);
             select = shareButton("多选", v -> setSelecting(!selecting));
             select.setTypeface(homeTypeface(700));
-            header.addView(select, new LinearLayout.LayoutParams(dp(68), dp(44)));
+            if (!kuaishou) header.addView(select, new LinearLayout.LayoutParams(dp(68), dp(44)));
             select.setEnabled(false);
-            if (!wechat) header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
+            if (!imported) header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
+            if (kuaishou && savedKuaishou == null) {
+                TextView history = homeLabel("记录", 12, INK2, 650);
+                history.setGravity(Gravity.CENTER);
+                history.setSingleLine(true);
+                readerIcon(history, R.drawable.extract_history, 17);
+                history.setOnClickListener(v -> {
+                    if (busy) return;
+                    kuaishouRecordsOrigin = this;
+                    kuaishouRecords = true;
+                    recordsFromSettings = false;
+                    showRecords();
+                });
+                header.addView(history, new LinearLayout.LayoutParams(dp(72), dp(40)));
+            } else if (kuaishou) {
+                header.addView(new View(MainActivity.this), new LinearLayout.LayoutParams(dp(40), dp(44)));
+            }
+            LinearLayout content = root;
+            if (kuaishou) {
+                header.setPadding(dp(16), dp(6), dp(16), dp(6));
+                ScrollView scroll = new ScrollView(MainActivity.this);
+                scroll.setFillViewport(true);
+                root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+                content = new LinearLayout(MainActivity.this);
+                content.setOrientation(LinearLayout.VERTICAL);
+                content.setPadding(dp(16), dp(10), dp(16), dp(20));
+                scroll.addView(content);
+                addKuaishouInput(content);
+                LinearLayout resultHeader = new LinearLayout(MainActivity.this);
+                resultHeader.setGravity(Gravity.CENTER_VERTICAL);
+                LinearLayout.LayoutParams resultParams = new LinearLayout.LayoutParams(-1, dp(36));
+                resultParams.topMargin = dp(22);
+                content.addView(resultHeader, resultParams);
+                resultHeader.addView(homeLabel("提取结果", 18, INK, 750),
+                        new LinearLayout.LayoutParams(0, -2, 1));
+                selectAllParams.height = dp(36);
+                resultHeader.addView(selectAll, selectAllParams);
+                resultHeader.addView(select, new LinearLayout.LayoutParams(dp(70), dp(36)));
+                readerIcon(select, R.drawable.extract_select, 16);
+            }
             if (wechat) {
                 LinearLayout introduction = new LinearLayout(MainActivity.this);
                 introduction.setOrientation(LinearLayout.VERTICAL);
@@ -4813,7 +5121,11 @@ public class MainActivity extends Activity {
             });
             LinearLayout.LayoutParams tabParams = new LinearLayout.LayoutParams(-1, dp(44));
             tabParams.setMargins(dp(20), dp(8), dp(20), 0);
-            root.addView(filterTrack, tabParams);
+            if (kuaishou) {
+                tabParams.height = dp(36);
+                tabParams.setMargins(0, dp(12), 0, dp(12));
+            }
+            content.addView(filterTrack, tabParams);
             for (int i = 0; i < categories.length; i++) {
                 int target = i;
                 TextView tab = homeLabel(categories[i], 13, INK2, 700);
@@ -4840,17 +5152,35 @@ public class MainActivity extends Activity {
                 tabs.addView(tab, new LinearLayout.LayoutParams(0, -1, 1));
             }
 
-            ScrollView scroll = new ScrollView(MainActivity.this);
-            root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
             list.setOrientation(LinearLayout.VERTICAL);
-            list.setPadding(dp(20), dp(12), dp(20), dp(20));
-            scroll.addView(list);
+            if (kuaishou) {
+                content.addView(list);
+                View divider = new View(MainActivity.this);
+                divider.setBackgroundColor(LINE);
+                root.addView(divider, new LinearLayout.LayoutParams(-1, 1));
+            } else {
+                ScrollView scroll = new ScrollView(MainActivity.this);
+                root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+                list.setPadding(dp(20), dp(12), dp(20), dp(20));
+                scroll.addView(list);
+            }
 
             actions = new LinearLayout(MainActivity.this);
             actions.setPadding(dp(12), dp(6), dp(12), dp(6));
-            root.addView(actions, new LinearLayout.LayoutParams(-1, dp(60)));
+            root.addView(actions, new LinearLayout.LayoutParams(-1, dp(kuaishou ? 64 : 60)));
+            if (kuaishou) {
+                actions.setGravity(Gravity.CENTER_VERTICAL);
+                actions.setPadding(dp(16), dp(8), dp(16), dp(8));
+                actions.setBackgroundColor(SURFACE);
+                extractedCount = homeLabel("已提取 0 个", 14, INK, 750);
+                extractedCount.setSingleLine(true);
+                extractedCount.setAutoSizeTextTypeUniformWithConfiguration(10, 14, 1,
+                        android.util.TypedValue.COMPLEX_UNIT_SP);
+                actions.addView(extractedCount, new LinearLayout.LayoutParams(0, dp(40), 1));
+                extractedCount.setGravity(Gravity.CENTER_VERTICAL);
+            }
             share = addAction("分享", v -> shareMedia(actionItems()));
-            save = addAction(wechat ? "保存全部" : "保存", v -> {
+            save = addAction(imported ? "保存全部" : "保存", v -> {
                 busy = true;
                 updateActions();
                 saveMediaBatch(actionItems(), (saved, failed) -> {
@@ -4859,22 +5189,44 @@ public class MainActivity extends Activity {
                     showSaveBatchResult(saved, failed);
                 });
             });
-            if (wechat) {
+            if (imported) {
                 save.setBackground(shape(ACCENT, 10));
                 save.setTextColor(Color.WHITE);
             }
-            remove = addAction(wechat ? "收藏" : "取消收藏", v -> {
-                if (wechat) collectWechat();
+            remove = addAction(imported ? "收藏" : "取消收藏", v -> {
+                if (imported) collectImported();
                 else confirmRemove();
             });
-            remove.setTextColor(wechat ? ACCENT : DANGER);
+            remove.setTextColor(imported ? ACCENT : DANGER);
+            if (kuaishou) {
+                save.setSingleLine(true);
+                save.setTypeface(homeTypeface(700));
+                readerIcon(save, R.drawable.extract_download, 16);
+                actions.removeView(save);
+                actions.addView(save, new LinearLayout.LayoutParams(dp(108), dp(40)));
+                for (Button action : new Button[]{share, remove}) {
+                    LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) action.getLayoutParams();
+                    params.width = dp(46);
+                    params.height = dp(40);
+                    params.weight = 0;
+                    params.setMargins(0, 0, dp(4), 0);
+                    action.setLayoutParams(params);
+                    action.setPadding(0, 0, 0, 0);
+                }
+            }
             favoriteScreen = this;
-            if (wechat) presentSecondary(root);
+            if (imported) presentSecondary(root);
             else showMainPage(root, 0);
+            loaded = kuaishou && savedKuaishou == null;
             render();
 
+            if (kuaishou && savedKuaishou == null) return;
             worker.execute(() -> {
-                ArrayList<Media> found = wechat ? readWechat(wechatRecord) : readFavorites();
+                ArrayList<Media> found;
+                if (savedKuaishou != null) {
+                    found = new ArrayList<>(savedKuaishou.items);
+                    for (Media item : found) if (item.thumbnail == null) item.thumbnail = decodeThumbnail(item.file);
+                } else found = wechat ? readWechat(wechatRecord) : readFavorites();
                 runOnUiThread(() -> {
                     if (favoriteScreen != this || !root.isAttachedToWindow()) return;
                     items.addAll(found);
@@ -4912,14 +5264,16 @@ public class MainActivity extends Activity {
         void back() {
             if (selecting) setSelecting(false);
             else if (wechat) showWechat();
+            else if (savedKuaishou != null) showRecords();
+            else if (kuaishou) showHome();
             else leaveFavorites();
         }
 
         private ArrayList<Media> actionItems() {
-            return wechat && !selecting ? new ArrayList<>(items) : selection();
+            return imported && !selecting ? new ArrayList<>(items) : selection();
         }
 
-        private void collectWechat() {
+        private void collectImported() {
             ArrayList<Media> snapshot = actionItems();
             busy = true;
             updateActions();
@@ -4944,7 +5298,7 @@ public class MainActivity extends Activity {
                     busy = false;
                     updateActions();
                     showBottomNotice("已收藏 " + saved + " 个" + (saved < snapshot.size() ? "，失败 " + (snapshot.size() - saved) + " 个" : ""),
-                            "查看收藏", () -> openFavorites(MainActivity.this::returnToWechatImport));
+                            "查看收藏", () -> openFavorites(kuaishou ? this::restoreKuaishou : MainActivity.this::returnToWechatImport));
                 });
             });
         }
@@ -4984,7 +5338,7 @@ public class MainActivity extends Activity {
             list.removeAllViews();
             LinearLayout row = null;
             int count = 0;
-            int size = (getResources().getDisplayMetrics().widthPixels - dp(52)) / 3;
+            int size = (getResources().getDisplayMetrics().widthPixels - dp(kuaishou ? 44 : 52)) / 3;
             for (Media item : items) {
                 if (!matchesCategory(item)) continue;
                 if (count % 3 == 0) {
@@ -5031,10 +5385,15 @@ public class MainActivity extends Activity {
                 count++;
             }
             if (count == 0) {
-                String message = !loaded ? wechat ? "正在读取表情…" : "正在读取收藏…"
+                String message = !loaded ? kuaishou ? "正在打开提取记录…" : wechat ? "正在读取表情…" : "正在读取收藏…"
                         : items.isEmpty() ? wechat ? "还没有导入表情\n选择电脑导出的 ZIP 后，图片和动图会显示在这里。"
-                        : "还没有收藏。在素材预览里点「收藏」即可添加。" : wechat ? "这个分类还没有表情" : "这个分类还没有收藏";
-                TextView empty = label(message, 14, INK2, false);
+                        : kuaishou ? "等待提取素材\n读取作品后，图片和视频会显示在这里" : "还没有收藏。在素材预览里点「收藏」即可添加。"
+                        : imported ? "这个分类没有素材" : "这个分类还没有收藏";
+                TextView empty = label(message, kuaishou ? 12 : 14, INK2, false);
+                if (kuaishou) {
+                    empty.setBackground(card(16));
+                    empty.setLineSpacing(dp(5), 1f);
+                }
                 empty.setGravity(Gravity.CENTER);
                 empty.setPadding(0, dp(24), 0, dp(24));
                 list.addView(empty, new LinearLayout.LayoutParams(-1, -2));
@@ -5056,16 +5415,19 @@ public class MainActivity extends Activity {
 
         private void updateActions() {
             updateSelectAll(selectAll, selecting, busy, items, selected, this::matchesCategory);
-            title.setText(selecting ? "已选 " + selected.size() + " 项" : wechat ? "微信表情导入" : "收藏");
+            title.setText(selecting && !kuaishou ? "已选 " + selected.size() + " 项" : screenTitle());
+            if (extractedCount != null) extractedCount.setText(selecting
+                    ? "已选 " + selected.size() + " 项" : "已提取 " + items.size() + " 个");
             select.setText(selecting ? "完成" : "多选");
             select.setSelected(selecting);
-            select.setBackground(shape(selecting ? ACCENT : ACCENT_SOFT, 12));
+            select.setBackground(kuaishou && !selecting ? null : shape(selecting ? ACCENT : ACCENT_SOFT, 12));
             select.setTextColor(selecting ? Color.WHITE : ACCENT);
-            select.setEnabled(selecting || !items.isEmpty());
-            actions.setVisibility(selecting || wechat ? View.VISIBLE : View.GONE);
-            if (wechat) save.setText(selecting ? "保存选中" : "保存全部");
+            if (kuaishou) select.getCompoundDrawablesRelative()[0].setTint(select.getCurrentTextColor());
+            select.setEnabled(!busy && (selecting || !items.isEmpty()));
+            actions.setVisibility(selecting || imported ? View.VISIBLE : View.GONE);
+            if (imported) save.setText(selecting ? "保存选中" : "保存全部");
             for (Button button : new Button[]{share, save, remove}) {
-                button.setEnabled((wechat && !selecting ? !items.isEmpty() : !selected.isEmpty()) && !busy);
+                button.setEnabled((imported && !selecting ? !items.isEmpty() : !selected.isEmpty()) && !busy);
                 button.setAlpha(button.isEnabled() ? 1f : 0.45f);
             }
         }
@@ -5322,6 +5684,7 @@ public class MainActivity extends Activity {
         if (themeAnimation != null) themeAnimation.end();
         if (showingWechat && currentWechatImport == null) showHome();
         else if (showingWechat) favoriteScreen.back();
+        else if (showingKuaishou) favoriteScreen.back();
         else if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) returnToRecordsOrigin();
