@@ -13,6 +13,8 @@ final class StickerArchive {
     interface Validator { void check(File file) throws Exception; }
     static final class Result {
         int added, duplicates, failed;
+        final LinkedHashSet<String> files = new LinkedHashSet<>();
+        final LinkedHashSet<String> installed = new LinkedHashSet<>();
     }
 
     static Result read(InputStream input, File staging, File destination, Validator validator) throws Exception {
@@ -66,6 +68,7 @@ final class StickerArchive {
                     for (byte b : digest.digest()) hash.append(String.format(Locale.ROOT, "%02x", b & 255));
                     String output = hash + extension;
                     if (hashes.contains(output) || new File(destination, output).isFile()) {
+                        result.files.add(output);
                         result.duplicates++;
                         temp.delete();
                         continue;
@@ -73,6 +76,7 @@ final class StickerArchive {
                     try { validator.check(temp); }
                     catch (Exception error) { result.failed++; temp.delete(); continue; }
                     hashes.add(output);
+                    result.files.add(output);
                     Files.move(temp.toPath(), new File(staging, output).toPath());
                 }
             }
@@ -85,6 +89,7 @@ final class StickerArchive {
                 Files.move(file.toPath(), target.toPath());
                 installed.add(target);
                 result.added++;
+                result.installed.add(file.getName());
             }
             return result;
         } catch (Exception error) {

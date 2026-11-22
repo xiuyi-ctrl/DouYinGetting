@@ -164,6 +164,19 @@ def local_addresses():
     return sorted(addresses, key=lambda value: value.startswith('127.'))
 
 
+def prepare_export_target(folder):
+    """Test real write access in the selected folder before reading WeChat."""
+    folder = Path(folder)
+    with tempfile.NamedTemporaryFile(dir=folder, prefix='xiuyi-write-check-', delete=False) as probe:
+        check = Path(probe.name)
+        try: probe.write(b'write-check')
+        finally:
+            probe.close()
+            check.unlink(missing_ok=True)
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    return folder/f'wechat-stickers-{stamp}-{secrets.token_hex(2)}.zip'
+
+
 def main():
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -239,9 +252,12 @@ def main():
             messagebox.showwarning('请选择表情库', '切换到导出微信表情，并选择自己的 emoticon.db。'); return
         if not consent.get():
             messagebox.showwarning('需要确认', '请先阅读并勾选非官方导出风险说明。'); return
-        target = filedialog.asksaveasfilename(title='保存表情 ZIP', defaultextension='.zip',
-                                            initialfile='wechat-stickers.zip', filetypes=[('ZIP 压缩包', '*.zip')])
-        if not target: return
+        folder = filedialog.askdirectory(title='选择表情 ZIP 保存文件夹', mustexist=True)
+        if not folder: return
+        try: target = prepare_export_target(folder)
+        except OSError:
+            messagebox.showerror('此文件夹无法写入', '助手未能在所选文件夹创建文件。\n请选择自己可写的文件夹，或检查系统安全软件的拦截提示。\n尚未开始读取或导出微信表情。')
+            return
         local_running = True
         state.set('正在导出到电脑，请保持微信登录并等待…')
         def notify(text):
@@ -262,7 +278,9 @@ def main():
                         with archive.open('rb') as source_file: shutil.copyfileobj(source_file, out)
                     pending.replace(target)
                     pending = None
-                notify('ZIP 已保存到所选位置，可传到手机后使用“选择 ZIP 导入”。')
+                notify(f'ZIP 已保存：{target}')
+            except PermissionError:
+                notify('文件访问被拒绝：请检查所选表情库、保存文件夹或系统安全软件的拦截提示。')
             except Exception: notify('本地导出失败，请检查表情库、微信登录状态和版本兼容性。')
             finally:
                 if pending: pending.unlink(missing_ok=True)

@@ -95,6 +95,12 @@ public class MainActivity extends Activity {
     private boolean resumedFromHome;
     private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102, IMPORT_WECHAT = 7103;
     private boolean showingWechat;
+    private WechatImportRecord currentWechatImport;
+    private static class WechatImportRecord {
+        String id, name;
+        long createdAt;
+        final java.util.LinkedHashSet<String> files = new java.util.LinkedHashSet<>();
+    }
     private boolean wechatImportBusy;
     private String wechatPairing = "";
     private boolean recordTransferBusy;
@@ -162,6 +168,7 @@ public class MainActivity extends Activity {
     private TextView saveSub;
     private TextView resultSummary;
     private TextView selectionAction;
+    private Button readerSelectAll;
     private Button saveButton;
     private Button shareSelectedButton;
     private TextView allFilter;
@@ -879,7 +886,7 @@ public class MainActivity extends Activity {
             stripResumeAt = now;
             stripWasRunning = false;
         }
-        if (!(scanning || stripPaused) || showingReader) {
+        if (!(scanning || stripPaused) || showingReader || showingSettings) {
             stripHost.setVisibility(View.GONE);
             stripExpanded = false;
             updatePageInset(false);
@@ -1495,7 +1502,127 @@ public class MainActivity extends Activity {
         resetPages();
         showingWechat = true;
         currentPage = -5;
+        currentWechatImport = null;
+        LinearLayout root = pageRoot();
+        header(root, "微信表情导入", true, this::showHome);
+        LinearLayout sources = new LinearLayout(this);
+        sources.setPadding(dp(18), dp(8), dp(18), dp(8));
+        root.addView(sources, new LinearLayout.LayoutParams(-1, dp(62)));
+        sources.addView(shareButton("选择 ZIP 导入", v -> pickWechatArchive()), new LinearLayout.LayoutParams(0, -1, 1));
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -1, 1);
+        cp.leftMargin = dp(8);
+        sources.addView(shareButton("连接电脑助手", v -> connectWechatComputer()), cp);
+        TextView hint = homeLabel("每次导入单独保存为一条记录", 13, INK2, 400);
+        hint.setPadding(dp(18), dp(8), dp(18), dp(8));
+        root.addView(hint);
+        ScrollView scroll = new ScrollView(this);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(18), 0, dp(18), dp(20));
+        scroll.addView(list);
+        list.addView(homeLabel("正在读取导入记录…", 14, INK2, 400));
+        presentSecondary(root);
+        worker.execute(() -> {
+            ArrayList<WechatImportRecord> found = new ArrayList<>();
+            String failure = null;
+            try {
+                migrateWechatImports();
+                File[] files = wechatRecordsFolder().listFiles();
+                if (files != null) for (File file : files) {
+                    if (!file.getName().endsWith(".json")) continue;
+                    JSONObject json = new JSONObject(new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
+                    WechatImportRecord record = new WechatImportRecord();
+                    record.id = file.getName().substring(0, file.getName().length() - 5);
+                    record.name = json.getString("name");
+                    record.createdAt = json.getLong("createdAt");
+                    JSONArray names = json.getJSONArray("files");
+                    for (int i = 0; i < names.length(); i++) {
+                        String name = names.getString(i);
+                        if (RecordArchive.leaf(name)) record.files.add(name);
+                    }
+                    found.add(record);
+                }
+                found.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
+            } catch (Exception error) { failure = "导入记录暂时无法读取，请稍后重试"; }
+            String message = failure;
+            runOnUiThread(() -> {
+                if (!showingWechat || currentWechatImport != null || !root.isAttachedToWindow()) return;
+                list.removeAllViews();
+                if (message != null || found.isEmpty()) {
+                    TextView empty = homeLabel(message != null ? message : "还没有导入记录\n选择 ZIP 后，每批表情会分别显示在这里。", 14, INK2, 400);
+                    empty.setGravity(Gravity.CENTER);
+                    empty.setPadding(0, dp(32), 0, dp(32));
+                    list.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+                }
+                for (WechatImportRecord record : found) {
+                    String date = new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(new java.util.Date(record.createdAt));
+                    addMenuCard(list, R.drawable.wechat_import, record.name, date + " · " + record.files.size() + " 个表情", v -> showWechatRecord(record));
+                    LinearLayout row = (LinearLayout) list.getChildAt(list.getChildCount() - 1);
+                    TextView title = (TextView) ((LinearLayout) row.getChildAt(1)).getChildAt(0);
+                    title.setSingleLine(true);
+                    title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                }
+            });
+        });
+    }
+
+    private File wechatRecordsFolder() { return new File(getFilesDir(), "wechat-import-records"); }
+
+    private WechatImportRecord writeWechatImport(String id, String name, java.util.Collection<String> files) throws Exception {
+        WechatImportRecord record = new WechatImportRecord();
+        record.id = id;
+        record.name = name;
+        record.createdAt = System.currentTimeMillis();
+        record.files.addAll(files);
+        File folder = wechatRecordsFolder();
+        if (!folder.isDirectory() && !folder.mkdirs()) throw new java.io.IOException("无法保存导入记录");
+        JSONObject json = new JSONObject();
+        json.put("name", name);
+        json.put("createdAt", record.createdAt);
+        json.put("files", new JSONArray(record.files));
+        File temp = new File(folder, id + ".tmp");
+        try {
+            Files.write(temp.toPath(), json.toString().getBytes(StandardCharsets.UTF_8));
+            Files.move(temp.toPath(), new File(folder, id + ".json").toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } finally { temp.delete(); }
+        return record;
+    }
+
+    private void migrateWechatImports() throws Exception {
+        File[] records = wechatRecordsFolder().listFiles((folder, name) -> name.endsWith(".json"));
+        if (records != null && records.length > 0) return;
+        ArrayList<String> names = new ArrayList<>();
+        File[] files = wechatFolder().listFiles();
+        if (files != null) for (File file : files)
+            if (file.isFile() && !file.getName().endsWith(".tmp")) names.add(file.getName());
+        if (!names.isEmpty()) writeWechatImport("legacy", "历史导入", names);
+    }
+
+    private void showWechatRecord(WechatImportRecord record) {
+        stopScanForNavigation();
+        resetPages();
+        showingWechat = true;
+        currentPage = -5;
+        currentWechatImport = record;
         new FavoritesScreen(true).show();
+    }
+
+    private void returnToWechatImport() {
+        if (currentWechatImport == null) showWechat();
+        else showWechatRecord(currentWechatImport);
+    }
+
+    private String wechatArchiveName(Uri uri) {
+        String name = uri.getLastPathSegment();
+        if ("content".equals(uri.getScheme())) {
+            try (android.database.Cursor cursor = getContentResolver().query(uri,
+                    new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
+            } catch (Exception ignored) { }
+        }
+        if (name == null || name.startsWith("wechat-received-")) name = "电脑助手导入.zip";
+        return name.replaceAll("[\\p{Cntrl}]", " ").substring(0, Math.min(name.length(), 200));
     }
 
     private void pickWechatArchive() {
@@ -1523,20 +1650,26 @@ public class MainActivity extends Activity {
         worker.execute(() -> {
             String message;
             boolean success = false;
+            WechatImportRecord importedRecord = null;
+            StickerArchive.Result result = null;
             try (InputStream stream = getContentResolver().openInputStream(uri)) {
                 if (stream == null) throw new java.io.IOException("无法读取压缩包");
-                StickerArchive.Result result = StickerArchive.read(stream,
+                migrateWechatImports();
+                result = StickerArchive.read(stream,
                         new File(getCacheDir(), "wechat-import-" + UUID.randomUUID()), wechatFolder(),
                         file -> ImageDecoder.decodeDrawable(ImageDecoder.createSource(file), (decoder, info, source) -> {
                             if (info.getSize().getWidth() > 32768 || info.getSize().getHeight() > 32768)
                                 throw new IllegalArgumentException("图片尺寸过大");
                             decoder.setTargetSampleSize(Math.max(1, Math.max(info.getSize().getWidth(), info.getSize().getHeight()) / 120));
                         }));
-                message = "已导入 " + result.added + " 个表情";
+                importedRecord = writeWechatImport(UUID.randomUUID().toString(), wechatArchiveName(uri), result.files);
+                message = "已创建导入记录，共 " + result.files.size() + " 个表情";
                 if (result.duplicates > 0) message += "，重复 " + result.duplicates + " 个";
                 if (result.failed > 0) message += "，无法读取 " + result.failed + " 个";
                 success = true;
             } catch (Exception error) {
+                if (importedRecord != null) new File(wechatRecordsFolder(), importedRecord.id + ".json").delete();
+                if (result != null) for (String name : result.installed) new File(wechatFolder(), name).delete();
                 String detail = error instanceof java.io.IOException ? error.getMessage() : null;
                 message = detail != null && (detail.startsWith("压缩包") || detail.startsWith("无法创建") || detail.startsWith("无法保存"))
                         ? detail : fileFailureReason(error) + "请选择完整的表情 ZIP 压缩包。";
@@ -1548,12 +1681,13 @@ public class MainActivity extends Activity {
             }
             String report = message;
             boolean imported = success;
+            WechatImportRecord addedRecord = importedRecord;
             runOnUiThread(() -> {
                 wechatImportBusy = false;
                 if (isFinishing() || isDestroyed()) return;
                 progress.dismiss();
                 if (imported) {
-                    showWechat();
+                    showWechatRecord(addedRecord);
                     showBottomNotice(report);
                 } else showConfirmation(R.drawable.dialog_file, false, "表情未能导入", report,
                         "取消", "重新选择", null, this::pickWechatArchive, "已导入的表情不会被覆盖");
@@ -1623,13 +1757,14 @@ public class MainActivity extends Activity {
         });
     }
 
-    private ArrayList<Media> readWechat() {
+    private ArrayList<Media> readWechat(WechatImportRecord record) {
         ArrayList<Media> items = new ArrayList<>();
         File[] files = wechatFolder().listFiles();
         if (files == null) return items;
         java.util.Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
         for (File file : files) {
             if (!file.isFile()) continue;
+            if (record != null && !record.files.contains(file.getName())) continue;
             try (InputStream stream = new FileInputStream(file)) {
                 byte[] header = new byte[32];
                 if (stream.read(header) < 12) continue;
@@ -1669,6 +1804,8 @@ public class MainActivity extends Activity {
         showingSettings = true;
         currentPage = -4;
         LinearLayout root = pageRoot();
+        // Consume taps in blank areas before they reach the reader behind this page.
+        root.setClickable(true);
         LinearLayout heading = header(root, "设置", true, this::returnFromSettings);
         TextView headingText = (TextView) heading.getChildAt(1);
         headingText.setTypeface(homeTypeface(750));
@@ -2799,6 +2936,15 @@ public class MainActivity extends Activity {
         resultHeader.addView(resultAnchor, new LinearLayout.LayoutParams(0, -2, 1));
         resultSummary = label("提取后自动显示图片与动图预览", 12, INK3, false);
         resultSummary.setVisibility(View.GONE);
+        readerSelectAll = shareButton("全选", v -> {
+            toggleVisibleSelection(media, selectedMedia, this::matchesFilter);
+            renderResults();
+            updateResultLabels();
+        });
+        readerSelectAll.setVisibility(View.GONE);
+        LinearLayout.LayoutParams selectAllParams = new LinearLayout.LayoutParams(dp(76), dp(36));
+        selectAllParams.rightMargin = dp(6);
+        resultHeader.addView(readerSelectAll, selectAllParams);
         selectionAction = homeLabel("多选", 12, ACCENT, 650);
         readerIcon(selectionAction, R.drawable.extract_select, 18);
         selectionAction.setGravity(Gravity.CENTER);
@@ -4169,7 +4315,35 @@ public class MainActivity extends Activity {
         selectedMedia.clear();
     }
 
+    private static void toggleVisibleSelection(ArrayList<Media> items, HashSet<Media> selection,
+                                               java.util.function.Predicate<Media> visible) {
+        ArrayList<Media> batch = new ArrayList<>();
+        for (Media item : items) if (visible.test(item)) batch.add(item);
+        if (selection.containsAll(batch)) selection.removeAll(batch);
+        else selection.addAll(batch);
+    }
+
+    private static void updateSelectAll(Button button, boolean selecting, boolean busy, ArrayList<Media> items,
+                                        HashSet<Media> selection, java.util.function.Predicate<Media> visible) {
+        button.setVisibility(selecting ? View.VISIBLE : View.GONE);
+        if (!selecting) return;
+        boolean found = false;
+        boolean allSelected = true;
+        for (Media item : items) {
+            if (!visible.test(item)) continue;
+            found = true;
+            if (!selection.contains(item)) {
+                allSelected = false;
+                break;
+            }
+        }
+        button.setText(found && allSelected ? "取消全选" : "全选");
+        button.setEnabled(found && !busy);
+        button.setAlpha(button.isEnabled() ? 1f : 0.45f);
+    }
+
     private void updateResultLabels() {
+        updateSelectAll(readerSelectAll, selectingMedia, false, media, selectedMedia, this::matchesFilter);
         int gifCount = 0;
         for (Media item : media) if (item.animated) gifCount++;
         allFilter.setText("全部 " + media.size());
@@ -4496,7 +4670,7 @@ public class MainActivity extends Activity {
             String result = message;
             runOnUiThread(() -> {
                 if (adding && isFavorite(item) && (showingReader || showingWechat) && !isFinishing()) {
-                    if (showingWechat) showBottomNotice("已收藏", "查看收藏", () -> openFavorites(this::showWechat));
+                    if (showingWechat) showBottomNotice("已收藏", "查看收藏", () -> openFavorites(this::returnToWechatImport));
                     else showFavoriteNotice();
                     return;
                 }
@@ -4559,8 +4733,9 @@ public class MainActivity extends Activity {
 
     private class FavoritesScreen {
         private final boolean wechat;
+        private final WechatImportRecord wechatRecord;
         FavoritesScreen() { this(false); }
-        FavoritesScreen(boolean wechat) { this.wechat = wechat; }
+        FavoritesScreen(boolean wechat) { this.wechat = wechat; this.wechatRecord = wechat ? currentWechatImport : null; }
         private final LinearLayout root = new LinearLayout(MainActivity.this);
         private final LinearLayout list = new LinearLayout(MainActivity.this);
         private final ArrayList<Media> items = new ArrayList<>();
@@ -4573,6 +4748,7 @@ public class MainActivity extends Activity {
         private LinearLayout actions;
         private TextView title;
         private Button select;
+        private Button selectAll;
         private Button share;
         private Button save;
         private Button remove;
@@ -4594,12 +4770,19 @@ public class MainActivity extends Activity {
                 ImageView back = icon(R.drawable.home_chevron, INK);
                 back.setRotation(180);
                 back.setPadding(dp(8), dp(10), dp(8), dp(10));
-                back.setContentDescription("返回首页");
+                back.setContentDescription("返回导入记录");
                 back.setOnClickListener(v -> back());
                 header.addView(back, new LinearLayout.LayoutParams(dp(40), dp(44)));
             }
             title = homeLabel(wechat ? "微信表情导入" : "收藏", wechat ? 20 : 26, INK, 800);
             header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+            selectAll = shareButton("全选", v -> {
+                toggleVisibleSelection(items, selected, this::matchesCategory);
+                render();
+            });
+            LinearLayout.LayoutParams selectAllParams = new LinearLayout.LayoutParams(dp(76), dp(44));
+            selectAllParams.rightMargin = dp(6);
+            header.addView(selectAll, selectAllParams);
             select = shareButton("多选", v -> setSelecting(!selecting));
             select.setTypeface(homeTypeface(700));
             header.addView(select, new LinearLayout.LayoutParams(dp(68), dp(44)));
@@ -4610,15 +4793,11 @@ public class MainActivity extends Activity {
                 introduction.setOrientation(LinearLayout.VERTICAL);
                 introduction.setPadding(dp(20), dp(8), dp(20), dp(8));
                 root.addView(introduction, new LinearLayout.LayoutParams(-1, -2));
-                introduction.addView(homeLabel("导入已有 ZIP，或连接电脑助手获取表情。\n原文件保留在本机，重复文件自动跳过。", 12, INK2, 400));
-                LinearLayout sources = new LinearLayout(MainActivity.this);
-                introduction.addView(sources, new LinearLayout.LayoutParams(-1, dp(46)));
-                Button choose = shareButton("选择 ZIP 导入", v -> pickWechatArchive());
-                sources.addView(choose, new LinearLayout.LayoutParams(0, -1, 1));
-                Button computer = shareButton("连接电脑助手", v -> connectWechatComputer());
-                LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -1, 1);
-                cp.leftMargin = dp(8);
-                sources.addView(computer, cp);
+                TextView name = homeLabel(wechatRecord == null ? "导入表情" : wechatRecord.name, 14, INK, 650);
+                name.setMaxLines(2);
+                name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                introduction.addView(name);
+                introduction.addView(homeLabel("仅显示本条记录中的图片与动图", 12, INK2, 400));
             }
 
             filterTrack = new FrameLayout(MainActivity.this);
@@ -4695,7 +4874,7 @@ public class MainActivity extends Activity {
             render();
 
             worker.execute(() -> {
-                ArrayList<Media> found = wechat ? readWechat() : readFavorites();
+                ArrayList<Media> found = wechat ? readWechat(wechatRecord) : readFavorites();
                 runOnUiThread(() -> {
                     if (favoriteScreen != this || !root.isAttachedToWindow()) return;
                     items.addAll(found);
@@ -4732,7 +4911,7 @@ public class MainActivity extends Activity {
 
         void back() {
             if (selecting) setSelecting(false);
-            else if (wechat) showHome();
+            else if (wechat) showWechat();
             else leaveFavorites();
         }
 
@@ -4765,7 +4944,7 @@ public class MainActivity extends Activity {
                     busy = false;
                     updateActions();
                     showBottomNotice("已收藏 " + saved + " 个" + (saved < snapshot.size() ? "，失败 " + (snapshot.size() - saved) + " 个" : ""),
-                            "查看收藏", () -> openFavorites(MainActivity.this::showWechat));
+                            "查看收藏", () -> openFavorites(MainActivity.this::returnToWechatImport));
                 });
             });
         }
@@ -4787,6 +4966,10 @@ public class MainActivity extends Activity {
             return item.animated ? 2 : 1;
         }
 
+        private boolean matchesCategory(Media item) {
+            return category == 0 || category == type(item);
+        }
+
         private void render() {
             int[] counts = new int[categories.length];
             counts[0] = items.size();
@@ -4803,7 +4986,7 @@ public class MainActivity extends Activity {
             int count = 0;
             int size = (getResources().getDisplayMetrics().widthPixels - dp(52)) / 3;
             for (Media item : items) {
-                if (category != 0 && category != type(item)) continue;
+                if (!matchesCategory(item)) continue;
                 if (count % 3 == 0) {
                     row = new LinearLayout(MainActivity.this);
                     LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
@@ -4872,6 +5055,7 @@ public class MainActivity extends Activity {
         }
 
         private void updateActions() {
+            updateSelectAll(selectAll, selecting, busy, items, selected, this::matchesCategory);
             title.setText(selecting ? "已选 " + selected.size() + " 项" : wechat ? "微信表情导入" : "收藏");
             select.setText(selecting ? "完成" : "多选");
             select.setSelected(selecting);
@@ -5136,7 +5320,8 @@ public class MainActivity extends Activity {
 
     @Override public void onBackPressed() {
         if (themeAnimation != null) themeAnimation.end();
-        if (showingWechat) favoriteScreen.back();
+        if (showingWechat && currentWechatImport == null) showHome();
+        else if (showingWechat) favoriteScreen.back();
         else if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) returnToRecordsOrigin();

@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 from pathlib import Path
-from helper import Bridge
+from helper import Bridge, prepare_export_target
 from export_wechat import checked_url
 
 
@@ -79,6 +79,17 @@ class BridgeTests(unittest.TestCase):
 
 
 class ExportTests(unittest.TestCase):
+    def test_save_folder_preflight_and_unique_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            first = prepare_export_target(temp)
+            second = prepare_export_target(temp)
+            self.assertEqual(first.parent, Path(temp))
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.suffix, '.zip')
+            self.assertEqual(list(Path(temp).iterdir()), [])
+            with patch('helper.tempfile.NamedTemporaryFile', side_effect=PermissionError('denied')):
+                with self.assertRaises(PermissionError): prepare_export_target(temp)
+
     def test_export_pipeline_without_reading_wechat(self):
         import io
         import sqlite3

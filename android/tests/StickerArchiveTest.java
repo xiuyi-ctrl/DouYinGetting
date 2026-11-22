@@ -30,9 +30,16 @@ public class StickerArchiveTest {
                 new byte[][]{PNG, PNG, "Instructions".getBytes(), "not an image".getBytes()});
         StickerArchive.Result first = read(valid, root, dest);
         check(first.added == 1 && first.duplicates == 1 && first.failed == 1);
+        check(first.files.size() == 1 && first.installed.size() == 1);
         check(dest.listFiles()[0].getName().endsWith(".png"));
         StickerArchive.Result again = read(valid, root, dest);
         check(again.added == 0 && again.duplicates == 2 && dest.listFiles().length == 1);
+        check(again.files.equals(first.files) && again.installed.isEmpty());
+        byte[] different = PNG.clone(); different[different.length - 1] ^= 1;
+        StickerArchive.Result mixed = read(zip(new String[]{"shared.png", "different.png"}, new byte[][]{PNG, different}), root, dest);
+        check(mixed.files.size() == 2 && mixed.files.containsAll(first.files) && mixed.added == 1 && mixed.duplicates == 1);
+        // Remove only the additional test file to retain the original rollback assertions below.
+        for (String name : mixed.installed) check(new File(dest, name).delete());
         for (String path : new String[]{"../escape.png", "/absolute.png", "images/../../escape.png", "C:/escape.png", "images\\escape.png"}) {
             try { read(zip(new String[]{"good.png", path}, new byte[][]{PNG, PNG}), root, dest); throw new AssertionError(path); }
             catch (IOException expected) { }
