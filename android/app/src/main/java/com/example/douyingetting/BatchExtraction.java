@@ -62,6 +62,7 @@ final class BatchExtraction {
             if (host == null || uri.getUserInfo() != null || (uri.getPort() != -1 && uri.getPort() != 443)) return null;
             host = host.toLowerCase(Locale.ROOT);
             if ("douyin.com".equals(host)) host = "www.douyin.com";
+            if ("xiaohongshu.com".equals(host)) host = "www.xiaohongshu.com";
             String path = uri.getEncodedPath();
             if (path == null || path.length() < 2) return null;
             link = uri.buildUpon().scheme("https").encodedAuthority(host).fragment(null).build().toString();
@@ -71,10 +72,31 @@ final class BatchExtraction {
             else if (link.equals(KuaishouPost.extractLink(link))) platform = 2;
             else return null;
             String id = platform == 2 ? null : WorkMedia.pageId(link, platform == 1);
+            if (id == null && !isWorkSharePath(host, path)) return null;
             String key = platform + ":" + (id == null ? host + path.replaceFirst("/+$", "") : id);
             return new Task(link, platform, key);
         } catch (IllegalArgumentException ignored) {
             return null;
+        }
+    }
+
+    private static boolean isWorkSharePath(String host, String path) {
+        switch (host) {
+            case "v.douyin.com":
+            case "v.kuaishou.com":
+                return path.matches("/[A-Za-z0-9_-]+/?");
+            case "www.douyin.com":
+            case "m.douyin.com":
+                return path.matches("/(?:share/)?(?:video|note)/[0-9]+/?");
+            case "xhslink.cn":
+                return path.matches("/(?:(?:o|a)/)?[A-Za-z0-9_-]+/?");
+            case "www.kuaishou.com":
+            case "kuaishou.com":
+                return path.matches("/(?:short-video|photo)/[A-Za-z0-9_-]+/?");
+            case "v.m.chenzhongtech.com":
+                return path.matches("/fw/photo/[A-Za-z0-9_-]+/?");
+            default:
+                return false;
         }
     }
 

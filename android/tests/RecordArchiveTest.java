@@ -56,6 +56,16 @@ public class RecordArchiveTest {
         check(again.added.isEmpty() && again.skipped == 1 && again.favoritesAdded == 0 && again.favoritesSkipped == 1);
         File favoriteOnly = new File(root, "favorite-only"); check(favoriteOnly.mkdirs());
         check(read(write(Collections.emptyMap(), Collections.singletonList(favorite)), favoriteOnly).favoritesAdded == 1);
+        byte[] metadata = "{\"groups\":[\"表情\"],\"sources\":{}}".getBytes(StandardCharsets.UTF_8);
+        ByteArrayOutputStream v3 = new ByteArrayOutputStream();
+        RecordArchive.write(v3, Collections.emptyMap(), Collections.singletonList(favorite), metadata,
+                RecordArchiveTest::validateRecord, RecordArchiveTest::validateFavorite);
+        File restoredMetadata = new File(root, "with-metadata"); check(restoredMetadata.mkdirs());
+        RecordArchive.Result v3Result = read(v3.toByteArray(), restoredMetadata);
+        check(Arrays.equals(metadata, v3Result.favoriteMetadata));
+        check(v3Result.favoritesAdded == 1 && v3Result.favoriteHashes.size() == 1);
+        RecordArchive.Result duplicate = read(v3.toByteArray(), restoredMetadata);
+        check(duplicate.favoritesSkipped == 1 && duplicate.favoriteHashes.equals(v3Result.favoriteHashes));
         File renamed = new File(root, "renamed"); check(new File(renamed, "favorites").mkdirs());
         Files.write(new File(renamed, "favorites/legacy-name.gif").toPath(), ANIMATION);
         check(read(write(Collections.emptyMap(), Collections.singletonList(favorite)), renamed).favoritesSkipped == 1);

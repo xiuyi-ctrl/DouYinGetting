@@ -10,13 +10,17 @@ import java.util.zip.*;
 /** Portable record backups. Extraction is validated in a staging directory before installation. */
 final class RecordArchive {
     private static final String MARKER = "xiuyi-records.version";
+    private static final String FAVORITE_METADATA = "favorite-metadata.json";
     private static final long MAX_BYTES = 2L * 1024 * 1024 * 1024;
+    private static final int MAX_METADATA_BYTES = 4 * 1024 * 1024;
     interface Validator { List<String> files(File folder) throws Exception; }
     interface FavoriteValidator { String extension(File file) throws Exception; }
     static final class Result {
         final HashSet<String> added = new HashSet<>();
+        final HashSet<String> favoriteHashes = new HashSet<>();
         int skipped;
         int favoritesAdded, favoritesSkipped;
+        byte[] favoriteMetadata;
     }
     static boolean leaf(String name) {
         return !name.isEmpty() && !name.equals(".") && !name.equals("..")
@@ -24,12 +28,24 @@ final class RecordArchive {
     }
     static int write(OutputStream output, Map<String, File> records, Collection<File> favorites,
                      Validator validator, FavoriteValidator favoriteValidator) throws Exception {
+        return write(output, records, favorites, null, validator, favoriteValidator);
+    }
+    static int write(OutputStream output, Map<String, File> records, Collection<File> favorites,
+                     byte[] favoriteMetadata, Validator validator, FavoriteValidator favoriteValidator) throws Exception {
+        if (favoriteMetadata != null && (favoriteMetadata.length > MAX_METADATA_BYTES || favorites.isEmpty()))
+            throw new IOException("收藏备份元数据过大或缺少收藏文件");
         int favoriteCount = 0;
         try (ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(output))) {
             zip.putNextEntry(new ZipEntry(MARKER));
-            zip.write("2\n".getBytes(StandardCharsets.UTF_8));
+            zip.write((favoriteMetadata == null ? "2\n" : "3\n").getBytes(StandardCharsets.UTF_8));
             zip.closeEntry();
             long total = 0;
+            if (favoriteMetadata != null) {
+                zip.putNextEntry(new ZipEntry(FAVORITE_METADATA));
+                zip.write(favoriteMetadata);
+                zip.closeEntry();
+                total += favoriteMetadata.length;
+            }
             for (Map.Entry<String, File> record : records.entrySet()) {
                 if (!record.getKey().matches("[A-Za-z0-9_-]{1,80}")) throw new IOException("记录编号无效");
                 for (String name : new LinkedHashSet<>(validator.files(record.getValue()))) {
@@ -81,7 +97,8 @@ final class RecordArchive {
                         if (zip.read() != -1) throw new IOException("备份目录无效");
                         continue;
                     }
-                    if (!name.equals(MARKER) && !(parts.length == 2 && parts[0].equals("favorites") && leaf(parts[1]))
+                    if (!name.equals(MARKER) && !name.equals(FAVORITE_METADATA)
+                            && !(parts.length == 2 && parts[0].equals("favorites") && leaf(parts[1]))
                             && !(parts.length == 3 && parts[0].equals("records")
                             && parts[1].matches("[A-Za-z0-9_-]{1,80}") && leaf(parts[2])))
                         throw new IOException("备份文件路径无效");
@@ -93,6 +110,7 @@ final class RecordArchive {
                         while ((count = zip.read(buffer)) != -1) {
                             total += count; size += count;
                             if (total > MAX_BYTES || (file.getName().equals("manifest.json") && size > 4 * 1024 * 1024)
+                                    || (name.equals(FAVORITE_METADATA) && size > MAX_METADATA_BYTES)
                                     || (name.equals(MARKER) && size > 32)) throw new IOException("备份过大或文件无效");
                             out.write(buffer, 0, count);
                         }
@@ -103,20 +121,30 @@ final class RecordArchive {
             }
             File marker = new File(staging, MARKER);
             String version = marker.isFile() ? new String(Files.readAllBytes(marker.toPath()), StandardCharsets.UTF_8).trim() : "";
-            if (!(version.equals("1") || version.equals("2"))) throw new IOException("请选择咻咿提取导出的备份");
+            if (!(version.equals("1") || version.equals("2") || version.equals("3")))
+                throw new IOException("请选择咻咿提取导出的备份");
             File[] folders = new File(staging, "records").listFiles();
             if (folders == null) folders = new File[0];
             File[] favorites = new File(staging, "favorites").listFiles();
             if (favorites == null) favorites = new File[0];
             if ((version.equals("1") && favorites.length > 0) || (folders.length == 0 && favorites.length == 0))
                 throw new IOException("备份内容无效或为空");
+            File metadata = new File(staging, FAVORITE_METADATA);
+            if (version.equals("3")) {
+                if (favorites.length == 0 || !metadata.isFile()) throw new IOException("收藏备份元数据缺失");
+                result.favoriteMetadata = Files.readAllBytes(metadata.toPath());
+            } else if (metadata.exists()) throw new IOException("备份版本与收藏元数据不匹配");
             for (File folder : folders) {
                 List<String> expected = validator.files(folder);
                 for (File file : Objects.requireNonNull(folder.listFiles()))
                     if (!expected.contains(file.getName())) throw new IOException("备份含有记录之外的文件");
             }
             LinkedHashMap<File, String> favoriteNames = new LinkedHashMap<>();
-            for (File favorite : favorites) favoriteNames.put(favorite, hash(favorite) + favoriteValidator.extension(favorite));
+            for (File favorite : favorites) {
+                String hash = hash(favorite);
+                favoriteNames.put(favorite, hash + favoriteValidator.extension(favorite));
+                result.favoriteHashes.add(hash);
+            }
             HashSet<String> favoriteHashes = new HashSet<>();
             File[] existing = favoritesDestination.listFiles();
             if (favorites.length > 0 && existing != null) for (File file : existing)

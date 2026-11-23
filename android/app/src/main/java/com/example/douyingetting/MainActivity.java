@@ -72,6 +72,7 @@ import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Collections;
 import java.util.UUID;
@@ -98,7 +99,8 @@ public class MainActivity extends Activity {
     private TextView readerRecordsButton;
     private View readerLinkInput;
     private View readerOpenButton;
-    private final android.util.SparseArray<Typeface> homeFonts = new android.util.SparseArray<>();
+    private static final android.util.SparseArray<Typeface> HOME_FONTS = new android.util.SparseArray<>();
+    private static android.graphics.fonts.Font homeFontSource;
     private Typeface homeTitleFont;
     private Bitmap homeRabbit;
     private ScanRecord currentRecord;
@@ -141,8 +143,8 @@ public class MainActivity extends Activity {
     private Button scanButton;
     private PopupWindow noticePopup;
     private PopupWindow recordUndoPopup;
-    private Runnable refreshRecordList;
-    private PendingRecordDeletion pendingRecordDeletion;
+    private Runnable refreshRecordList = () -> {};
+    private final ArrayList<PendingRecordDeletion> pendingRecordDeletions = new ArrayList<>();
     private static final long RECORD_UNDO_MS = 8000;
     private LinearLayout readerRoot;
     private FrameLayout stage;
@@ -355,10 +357,12 @@ public class MainActivity extends Activity {
     private static final class PendingRecordDeletion {
         final ScanRecord record;
         final File staged;
+        final long expiresAt;
 
         PendingRecordDeletion(ScanRecord record, File staged) {
             this.record = record;
             this.staged = staged;
+            expiresAt = android.os.SystemClock.elapsedRealtime() + RECORD_UNDO_MS;
         }
     }
 
@@ -382,6 +386,12 @@ public class MainActivity extends Activity {
         batch.restore(getPreferences(MODE_PRIVATE).getString("extraction_queue", "[]"));
         showHome();
         updateSystemBars();
+        if (getLastNonConfigurationInstance() instanceof PendingRecordDeletion[]) {
+            for (PendingRecordDeletion deletion : (PendingRecordDeletion[]) getLastNonConfigurationInstance()) {
+                trackRecordDeletion(deletion);
+            }
+            stage.post(this::refreshRecordUndoNotice);
+        }
         if (state == null) handleSharedPost(getIntent());
     }
 
@@ -405,28 +415,14 @@ public class MainActivity extends Activity {
             else showTopNotice(sharedQueuedNotice(added));
             return;
         }
-        String douyin = extractLink(shared, false);
-        String xhs = extractLink(shared, true);
-        String kuaishou = KuaishouPost.extractLink(shared);
-        int first = Integer.MAX_VALUE;
-        int platform = -1;
-        String[] links = {WorkMedia.isShareLink(douyin, false) ? douyin : null,
-                WorkMedia.isShareLink(xhs, true) ? xhs : null, kuaishou};
-        for (int i = 0; i < links.length; i++) {
-            if (links[i] == null) continue;
-            int start = shared.indexOf(links[i]);
-            if (start >= 0 && start < first) {
-                first = start;
-                platform = i;
-            }
-        }
-        if (platform < 0) {
+        if (incoming.tasks.isEmpty()) {
             showTopNotice("分享内容中没有找到抖音、小红书或快手作品链接");
             return;
         }
-        int selectedPlatform = platform;
-        String link = links[platform];
-        String name = new String[]{"抖音", "小红书", "快手"}[platform];
+        BatchExtraction.Task task = incoming.tasks.get(0);
+        int platform = task.platform;
+        String link = task.link;
+        String name = BatchExtraction.PLATFORMS[platform];
         String caption = "作品链接";
         for (ScanRecord record : records) {
             if (link.equals(record.link) && !record.caption.isEmpty()) {
@@ -437,10 +433,10 @@ public class MainActivity extends Activity {
         android.app.Dialog dialog = new android.app.Dialog(this);
         LinearLayout panel = sheetPanel("选择提取方式", name + " · " + caption);
         addSheetChoice(panel, "提取作品正文", "保存作品图片或视频", R.drawable.extract_download, true,
-                () -> dismissCardDialog(dialog, () -> openSharedPost(link, selectedPlatform, false)));
+                () -> dismissCardDialog(dialog, () -> openSharedPost(link, platform, false)));
         if (platform != 2) {
             addSheetChoice(panel, "提取评论素材", "打开评论区后扫描", R.drawable.extract_scan, false,
-                    () -> dismissCardDialog(dialog, () -> openSharedPost(link, selectedPlatform, true)));
+                    () -> dismissCardDialog(dialog, () -> openSharedPost(link, platform, true)));
         }
         showBottomSheet(dialog, panel);
     }
@@ -1629,11 +1625,21 @@ public class MainActivity extends Activity {
     }
 
     private Typeface homeTypeface(int weight) {
-        Typeface font = homeFonts.get(weight);
+        Typeface font = HOME_FONTS.get(weight);
         if (font == null) {
-            font = new Typeface.Builder(getAssets(), "fonts/NotoSansSC.ttf")
-                    .setFontVariationSettings("'wght' " + weight).setWeight(weight).build();
-            homeFonts.put(weight, font);
+            try {
+                if (homeFontSource == null) {
+                    homeFontSource = new android.graphics.fonts.Font.Builder(getAssets(), "fonts/NotoSansSC.ttf").build();
+                }
+                android.graphics.fonts.Font weighted = new android.graphics.fonts.Font.Builder(homeFontSource)
+                        .setFontVariationSettings("'wght' " + weight).setWeight(weight).build();
+                android.graphics.fonts.FontFamily family = new android.graphics.fonts.FontFamily.Builder(weighted).build();
+                font = new Typeface.CustomFallbackBuilder(family)
+                        .setStyle(weighted.getStyle()).build();
+            } catch (java.io.IOException error) {
+                font = Typeface.create(Typeface.DEFAULT, weight, false);
+            }
+            HOME_FONTS.put(weight, font);
         }
         return font;
     }
@@ -1790,9 +1796,9 @@ public class MainActivity extends Activity {
     private void chooseBackupScope() {
         if (recordTransferBusy) return;
         android.app.Dialog dialog = new android.app.Dialog(this);
-        LinearLayout panel = dialogPanel(R.drawable.extract_download, false, "选择备份内容", "收藏备份包含图片、动图和视频原文件。");
+        LinearLayout panel = dialogPanel(R.drawable.extract_download, false, "选择备份内容", "收藏备份包含原文件、分组和作品来源。");
         String[] names = {"扫描记录", "收藏表情", "全部"};
-        String[] details = {"记录、扫描进度和提取素材", "只备份收藏夹中的原文件", "扫描记录和收藏表情一起备份"};
+        String[] details = {"记录、扫描进度和提取素材", "备份收藏夹、分组与作品来源", "扫描记录和收藏表情一起备份"};
         for (int i = 0; i < names.length; i++) {
             int scope = i;
             addMenuCard(panel, scope == 1 ? R.drawable.dialog_heart : R.drawable.dialog_file, names[i], details[i], v ->
@@ -1883,6 +1889,8 @@ public class MainActivity extends Activity {
         ArrayList<ScanRecord> snapshot = new ArrayList<>(records);
         final int scope = backupScope;
         if (exporting && scope == 1) snapshot.clear();
+        List<File> favorites = exporting && scope != 0 ? backupFavorites() : Collections.emptyList();
+        byte[] favoriteMetadata = favorites.isEmpty() ? null : favoriteBackupMetadata(favorites);
         HashSet<String> known = new HashSet<>();
         for (ScanRecord record : snapshot) known.add(record.id);
         recordTransferBusy = true;
@@ -1912,6 +1920,7 @@ public class MainActivity extends Activity {
             ArrayList<ScanRecord> imported = new ArrayList<>();
             int favoriteCount = 0;
             boolean favoritesInBackup = false;
+            RecordArchive.Result restored = null;
             try {
                 if (exporting) {
                     java.util.LinkedHashMap<String, File> folders = new java.util.LinkedHashMap<>();
@@ -1922,12 +1931,11 @@ public class MainActivity extends Activity {
                     }
                     try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
                         if (output == null) throw new java.io.IOException("无法写入所选位置");
-                        favoriteCount = RecordArchive.write(output, folders, scope == 0 ? Collections.emptyList() : backupFavorites(),
+                        favoriteCount = RecordArchive.write(output, folders, favorites, favoriteMetadata,
                                 this::recordArchiveFiles, this::favoriteArchiveExtension);
                     }
                     message = "导出成功：记录 " + snapshot.size() + " 条，收藏 " + favoriteCount + " 个";
                 } else {
-                    RecordArchive.Result restored;
                     try (InputStream input = getContentResolver().openInputStream(uri)) {
                         if (input == null) throw new java.io.IOException("无法读取所选备份");
                         restored = RecordArchive.read(input, new File(getCacheDir(), "record-import-" + UUID.randomUUID()),
@@ -1950,12 +1958,14 @@ public class MainActivity extends Activity {
             }
             String report = message;
             boolean success = succeeded;
+            RecordArchive.Result importedBackup = restored;
             ArrayList<ScanRecord> added = imported;
             boolean showImportedFavorites = imported.isEmpty() && favoritesInBackup;
             runOnUiThread(() -> {
                 recordTransferBusy = false;
                 if (isFinishing() || isDestroyed()) return;
                 progress.dismiss();
+                if (success && importedBackup != null) mergeFavoriteBackup(importedBackup);
                 records.addAll(added);
                 records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
                 if (showingMy) showMy();
@@ -3280,6 +3290,10 @@ public class MainActivity extends Activity {
     }
 
     private void showCardDialog(android.app.Dialog dialog, View panel) {
+        showCardDialog(dialog, panel, 320, 48);
+    }
+
+    private void showCardDialog(android.app.Dialog dialog, View panel, int maxWidth, int horizontalMargin) {
         if (isFinishing() || isDestroyed()) return;
         dialog.setContentView(panel);
         android.view.Window window = dialog.getWindow();
@@ -3289,7 +3303,7 @@ public class MainActivity extends Activity {
         window.setGravity(Gravity.CENTER);
         window.setWindowAnimations(0);
         dialog.show();
-        window.setLayout(Math.min(dp(320), getResources().getDisplayMetrics().widthPixels - dp(48)), -2);
+        window.setLayout(Math.min(dp(maxWidth), getResources().getDisplayMetrics().widthPixels - dp(horizontalMargin)), -2);
         if (motionEnabled) {
             panel.setAlpha(0f);
             panel.setScaleX(0.97f);
@@ -3382,11 +3396,8 @@ public class MainActivity extends Activity {
                     return;
                 }
                 rememberDeletedRecordSources(record);
-                if (pendingRecordDeletion != null) expireRecordDeletion(pendingRecordDeletion);
-                PendingRecordDeletion pending = new PendingRecordDeletion(record, staged);
-                pendingRecordDeletion = pending;
-                showNotice("记录已删除", "撤销", () -> undoRecordDeletion(pending), true, true);
-                stripHandler.postDelayed(() -> expireRecordDeletion(pending), RECORD_UNDO_MS);
+                trackRecordDeletion(new PendingRecordDeletion(record, staged));
+                refreshRecordUndoNotice();
             });
         });
     }
@@ -3397,32 +3408,57 @@ public class MainActivity extends Activity {
         refreshRecordList.run();
     }
 
-    private void expireRecordDeletion(PendingRecordDeletion pending) {
-        if (pendingRecordDeletion != pending) return;
-        pendingRecordDeletion = null;
-        worker.execute(() -> purgeRecordTrash(pending.staged.getParentFile()));
+    private void trackRecordDeletion(PendingRecordDeletion pending) {
+        pendingRecordDeletions.add(pending);
+        long remaining = Math.max(0, pending.expiresAt - android.os.SystemClock.elapsedRealtime());
+        stripHandler.postDelayed(() -> {
+            if (pendingRecordDeletions.remove(pending)) {
+                worker.execute(() -> purgeRecordTrash(pending.staged.getParentFile()));
+                refreshRecordUndoNotice();
+            }
+        }, remaining);
     }
 
-    private void undoRecordDeletion(PendingRecordDeletion pending) {
-        if (pendingRecordDeletion != pending) return;
-        pendingRecordDeletion = null;
+    private void refreshRecordUndoNotice() {
+        if (recordUndoPopup != null) {
+            recordUndoPopup.dismiss();
+            recordUndoPopup = null;
+        }
+        int count = pendingRecordDeletions.size();
+        if (count == 0) return;
+        long end = pendingRecordDeletions.get(count - 1).expiresAt;
+        long remaining = end - android.os.SystemClock.elapsedRealtime();
+        if (remaining <= 0) return;
+        showNotice(count == 1 ? "记录已删除" : "已删除 " + count + " 条记录", "撤销",
+                this::undoRecordDeletions, true, remaining);
+    }
+
+    private void undoRecordDeletions() {
+        ArrayList<PendingRecordDeletion> pending = new ArrayList<>(pendingRecordDeletions);
+        pendingRecordDeletions.clear();
+        long requestedAt = android.os.SystemClock.elapsedRealtime();
         worker.execute(() -> {
-            boolean restored;
-            try {
-                Files.move(pending.staged.toPath(), pending.record.folder.toPath());
-                pending.staged.getParentFile().delete();
-                restored = true;
-            } catch (java.io.IOException error) {
-                restored = false;
+            ArrayList<ScanRecord> restored = new ArrayList<>();
+            for (PendingRecordDeletion deletion : pending) {
+                if (requestedAt >= deletion.expiresAt) {
+                    purgeRecordTrash(deletion.staged.getParentFile());
+                    continue;
+                }
+                try {
+                    Files.move(deletion.staged.toPath(), deletion.record.folder.toPath());
+                    deletion.staged.getParentFile().delete();
+                    restored.add(deletion.record);
+                } catch (java.io.IOException ignored) { }
             }
-            boolean success = restored;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
-                if (success) {
-                    restoreRecordListEntry(pending.record);
-                    showBottomNotice("已恢复记录和暂存素材");
+                records.addAll(restored);
+                records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
+                refreshRecordList.run();
+                if (!restored.isEmpty()) {
+                    showBottomNotice("已恢复 " + restored.size() + " 条记录和暂存素材");
                 } else {
-                    showMessage(R.drawable.dialog_trash, "未能撤销删除", "暂存目录无法恢复。");
+                    showBottomNotice("未能撤销删除");
                 }
             });
         });
@@ -5738,20 +5774,43 @@ public class MainActivity extends Activity {
 
     private void addPreviewAction(LinearLayout row, String text, int resource, boolean primary, View.OnClickListener action) {
         Button button = dialogButton(text, primary, false, action);
-        button.setTextSize(11);
+        button.setTextSize(12);
         button.setSingleLine(true);
-        button.setAutoSizeTextTypeUniformWithConfiguration(7, 11, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
-        button.setPadding(dp(2), dp(8), dp(2), dp(8));
-        if (text.length() <= 2) {
-            Drawable drawable = getDrawable(resource).mutate();
-            drawable.setTint(primary ? Color.WHITE : INK2);
-            drawable.setBounds(0, 0, dp(14), dp(14));
-            button.setCompoundDrawablesRelative(drawable, null, null, null);
-            button.setCompoundDrawablePadding(dp(3));
-        }
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
-        if (row.getChildCount() > 0) params.leftMargin = dp(5);
+        button.setIncludeFontPadding(false);
+        button.setGravity(Gravity.CENTER);
+        button.setAutoSizeTextTypeUniformWithConfiguration(10, 12, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
+        button.setPadding(dp(2), dp(10), dp(2), dp(8));
+        Drawable drawable = getDrawable(resource).mutate();
+        drawable.setTint(primary ? Color.WHITE : resource == R.drawable.dialog_heart_filled ? ACCENT : INK);
+        drawable.setBounds(0, 0, dp(18), dp(18));
+        if (resource == R.drawable.dialog_heart_filled) button.setTextColor(ACCENT);
+        button.setCompoundDrawablesRelative(null, drawable, null, null);
+        button.setCompoundDrawablePadding(dp(5));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(58), 1);
+        if (row.getChildCount() > 0) params.leftMargin = dp(8);
         row.addView(button, params);
+    }
+
+    private void addPreviewLinkRow(LinearLayout panel, String title, String detail, int resource, Runnable action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), 0, dp(8), 0);
+        row.setBackground(shape(TRACK, 10));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(44));
+        params.topMargin = dp(8);
+        panel.addView(row, params);
+        row.addView(icon(resource, ACCENT), new LinearLayout.LayoutParams(dp(18), dp(18)));
+        LinearLayout.LayoutParams label = new LinearLayout.LayoutParams(0, -2, 1);
+        label.leftMargin = dp(8);
+        row.addView(homeLabel(title, 13, INK, 650), label);
+        TextView value = homeLabel(detail, 11, INK2, 500);
+        value.setMaxWidth(dp(90));
+        value.setSingleLine(true);
+        value.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        row.addView(value);
+        row.addView(icon(R.drawable.home_chevron, INK2), new LinearLayout.LayoutParams(dp(15), dp(15)));
+        row.setOnClickListener(v -> action.run());
+        pressFeedback(row);
     }
 
     private void preview(Media item) {
@@ -5759,12 +5818,16 @@ public class MainActivity extends Activity {
         try {
             boolean isVideo = item.mime.startsWith("video/");
             LinearLayout panel = dialogPanel(0, false, "素材预览", null);
+            panel.setPadding(dp(16), dp(16), dp(16), dp(16));
+            boolean favorite = isFavorite(item);
+            ScanRecord work = showingReader ? currentRecord : showingKuaishou && favoriteScreen != null
+                    ? favoriteScreen.kuaishouPostRecord : null;
             String formatName = item.mime.substring(item.mime.indexOf('/') + 1).toUpperCase(Locale.ROOT);
             TextView info = homeLabel(formatName, 11, INK2, 400);
             panel.addView(info);
-            int limit = Math.min(dp(320), getResources().getDisplayMetrics().heightPixels / 3);
+            int limit = Math.min(dp(264), Math.round(getResources().getDisplayMetrics().heightPixels * 0.30f));
             FrameLayout frame = new FrameLayout(this);
-            frame.setBackground(shape(ACCENT_SOFT, 16));
+            frame.setBackground(shape(TRACK, 15));
             frame.setClipToOutline(true);
             LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(-1, limit);
             fp.topMargin = dp(16);
@@ -5811,7 +5874,7 @@ public class MainActivity extends Activity {
             if (showingFavorites) {
                 JSONObject source = favoriteSource(item);
                 if (source != null) {
-                    addRetryChoice(panel, "查看作品来源", favoriteSourcePlatform(source.optString("link")),
+                    addPreviewLinkRow(panel, "查看作品来源", favoriteSourcePlatform(source.optString("link")),
                             R.drawable.extract_link, () -> dismissCardDialog(dialog, () -> showFavoriteSource(source)));
                 } else {
                     TextView unavailable = homeLabel("暂无作品来源", 12, INK2, 450);
@@ -5819,18 +5882,32 @@ public class MainActivity extends Activity {
                     unavailableParams.topMargin = dp(8);
                     panel.addView(unavailable, unavailableParams);
                 }
+                if (favorite) {
+                    String current = favoriteAssignments.getOrDefault(item.hash, "");
+                    addPreviewLinkRow(panel, "移到分组", groupName(current), R.drawable.blue_folder,
+                            () -> dismissCardDialog(dialog, () -> showFavoriteDestination(current, current, 1,
+                                    group -> movePreviewFavorite(item, group), () -> preview(item))));
+                }
             }
+            View divider = new View(this);
+            divider.setBackgroundColor(LINE);
+            LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(-1, dp(1));
+            dividerParams.topMargin = dp(14);
+            panel.addView(divider, dividerParams);
             LinearLayout actions = new LinearLayout(this);
             LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(-1, -2);
-            ap.topMargin = dp(16);
+            ap.topMargin = dp(12);
             panel.addView(actions, ap);
-            addPreviewAction(actions, isFavorite(item) ? "取消收藏" : "收藏", R.drawable.dialog_heart, false,
-                    v -> dismissCardDialog(dialog, () -> toggleFavorite(item)));
+            addPreviewAction(actions, favorite ? "取消收藏" : "收藏",
+                    favorite ? R.drawable.dialog_heart_filled : R.drawable.dialog_heart, false,
+                    v -> dismissCardDialog(dialog, () -> {
+                        if (favorite) setFavorite(item, false, "", work);
+                        else showFavoriteDestination(null, "", 1, group -> setFavorite(item, true, group, work),
+                                () -> preview(item));
+                    }));
             addPreviewAction(actions, "分享", R.drawable.dialog_share, false, v -> shareMedia(Collections.singletonList(item)));
             addPreviewAction(actions, "关闭", R.drawable.dialog_close, false, v -> dismissCardDialog(dialog, null));
             addPreviewAction(actions, "保存", R.drawable.extract_download, true, v -> dismissCardDialog(dialog, () -> {
-                ScanRecord work = showingReader ? currentRecord : showingKuaishou && favoriteScreen != null
-                        ? favoriteScreen.kuaishouPostRecord : null;
                 if (canOrganizeSave(work)) {
                     saveMedia(new ArrayList<>(Collections.singletonList(item)), work, null, null);
                     return;
@@ -5848,7 +5925,10 @@ public class MainActivity extends Activity {
                     }
                 });
             }));
-            showCardDialog(dialog, panel);
+            ScrollView scroll = new ScrollView(this);
+            scroll.setVerticalScrollBarEnabled(false);
+            scroll.addView(panel, new ScrollView.LayoutParams(-1, -2));
+            showCardDialog(dialog, scroll, 360, 32);
             if (animation != null) animation.start();
         } catch (Exception error) {
             dialog.dismiss();
@@ -5913,6 +5993,54 @@ public class MainActivity extends Activity {
         getPreferences(MODE_PRIVATE).edit().putString("favorite_sources", favoriteSources.toString()).apply();
     }
 
+    private byte[] favoriteBackupMetadata(List<File> favorites) {
+        JSONObject assignments = new JSONObject();
+        JSONObject sources = new JSONObject();
+        try {
+            for (File file : favorites) {
+                String name = file.getName();
+                int extension = name.lastIndexOf('.');
+                if (extension <= 0) continue;
+                String hash = name.substring(0, extension);
+                assignments.put(hash, favoriteAssignments.get(hash));
+                sources.put(hash, favoriteSources.optJSONObject(hash));
+            }
+            return new JSONObject().put("groups", new JSONArray(favoriteGroups))
+                    .put("assignments", assignments).put("sources", sources).toString().getBytes(StandardCharsets.UTF_8);
+        } catch (org.json.JSONException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private void mergeFavoriteBackup(RecordArchive.Result backup) {
+        if (backup.favoriteMetadata == null) return;
+        try {
+            JSONObject data = new JSONObject(new String(backup.favoriteMetadata, StandardCharsets.UTF_8));
+            JSONArray names = data.optJSONArray("groups");
+            if (names != null) {
+                for (int i = 0; i < names.length(); i++) {
+                    String name = names.optString(i).trim();
+                    if (!name.isEmpty() && name.length() <= 24 && !"全部收藏".equals(name) && !"未分组".equals(name))
+                        favoriteGroups.add(name);
+                }
+            }
+            JSONObject assignments = data.optJSONObject("assignments");
+            JSONObject sources = data.optJSONObject("sources");
+            for (String hash : backup.favoriteHashes) {
+                if (assignments != null) {
+                    String group = assignments.optString(hash);
+                    if (favoriteGroups.contains(group)) favoriteAssignments.putIfAbsent(hash, group);
+                }
+                JSONObject source = sources == null ? null : sources.optJSONObject(hash);
+                if (!favoriteSources.has(hash) && source != null && isFavoriteSourceLink(source.optString("link"))) {
+                    favoriteSources.put(hash, source);
+                }
+            }
+            saveFavoriteGroups();
+            saveFavoriteSources();
+        } catch (org.json.JSONException ignored) { }
+    }
+
     private String favoriteSourcePlatform(String link) {
         return WorkMedia.isShareLink(link, true) ? "小红书" : WorkMedia.isShareLink(link, false) ? "抖音" : "快手";
     }
@@ -5965,26 +6093,214 @@ public class MainActivity extends Activity {
         } catch (org.json.JSONException ignored) { }
     }
 
-    private void toggleFavorite(Media item) {
-        boolean adding = !isFavorite(item);
-        ScanRecord source = showingReader ? currentRecord : showingKuaishou && favoriteScreen != null
-                ? favoriteScreen.kuaishouPostRecord : null;
+    private String groupName(String name) {
+        return name == null ? "全部收藏" : name.isEmpty() ? "未分组" : name;
+    }
+
+    private void showFavoriteDestination(String current, String selection, int count,
+                                         java.util.function.Consumer<String> onConfirm, Runnable onCancel) {
+        boolean moving = current != null;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        String detail = moving ? "当前分组 · " + groupName(current)
+                : count == 1 ? "为这张素材选择一个收藏分组" : "为 " + count + " 个素材选择收藏分组";
+        LinearLayout panel = sheetPanel(moving ? "移到分组" : "收藏到分组", detail);
+        ScrollView scroll = dialogScroll();
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout.LayoutParams listParams = new LinearLayout.LayoutParams(-1, -2);
+        listParams.topMargin = dp(8);
+        panel.addView(scroll, listParams);
+        LinearLayout choices = new LinearLayout(this);
+        choices.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(choices);
+        String[] selected = {selection};
+        TextView addGroup = homeLabel("新建分组", 12, ACCENT, 650);
+        Drawable plus = getDrawable(R.drawable.group_add).mutate();
+        plus.setTint(ACCENT);
+        plus.setBounds(0, 0, dp(15), dp(15));
+        addGroup.setCompoundDrawablesRelative(plus, null, null, null);
+        addGroup.setCompoundDrawablePadding(dp(5));
+        addGroup.setGravity(Gravity.CENTER_VERTICAL);
+        addGroup.setPadding(dp(4), 0, dp(4), 0);
+        panel.addView(addGroup, new LinearLayout.LayoutParams(-1, dp(44)));
+        addGroup.setOnClickListener(v -> dismissCardDialog(dialog, () ->
+                editGroupName(null, name -> showFavoriteDestination(current, name, count, onConfirm, onCancel),
+                        () -> showFavoriteDestination(current, selected[0], count, onConfirm, onCancel))));
+        dialogActions(dialog, panel, "取消", moving ? "确认移动" : "确认收藏", false, onCancel,
+                () -> onConfirm.accept(selected[0]));
+        LinearLayout buttons = (LinearLayout) panel.getChildAt(panel.getChildCount() - 1);
+        Button confirm = (Button) buttons.getChildAt(1);
+        ((LinearLayout.LayoutParams) confirm.getLayoutParams()).weight = 2;
+        dialog.setOnCancelListener(ignored -> { if (onCancel != null) onCancel.run(); });
+
+        ArrayList<String> names = new ArrayList<>();
+        names.add("");
+        names.addAll(favoriteGroups);
+        Runnable renderChoices = new Runnable() {
+            @Override public void run() {
+                choices.removeAllViews();
+                for (String name : names) {
+                    boolean checked = name.equals(selected[0]);
+                    addCheckedSheetChoice(choices, groupName(name), "", R.drawable.blue_folder, checked, () -> {
+                        selected[0] = name;
+                        run();
+                    });
+                    LinearLayout row = (LinearLayout) choices.getChildAt(choices.getChildCount() - 1);
+                    row.setPadding(dp(10), dp(5), dp(10), dp(5));
+                    row.setMinimumHeight(dp(42));
+                    ((LinearLayout.LayoutParams) row.getLayoutParams()).topMargin = dp(6);
+                    if (checked) {
+                        GradientDrawable background = shape(ACCENT_SOFT, 10);
+                        background.setStroke(dp(1), ACCENT);
+                        row.setBackground(background);
+                    }
+                    ImageView indicator = (ImageView) row.getChildAt(row.getChildCount() - 1);
+                    if (checked) {
+                        indicator.setLayoutParams(new LinearLayout.LayoutParams(dp(20), dp(20)));
+                        indicator.setPadding(dp(4), dp(4), dp(4), dp(4));
+                        indicator.setBackground(shape(ACCENT, 10));
+                        indicator.setImageTintList(ColorStateList.valueOf(Color.WHITE));
+                    } else indicator.setVisibility(View.GONE);
+                    if (name.equals(current)) {
+                        TextView tag = homeLabel("当前", 11, INK2, 600);
+                        tag.setPadding(0, 0, dp(5), 0);
+                        row.addView(tag, row.indexOfChild(indicator), new LinearLayout.LayoutParams(-2, -2));
+                    }
+                }
+                boolean enabled = !moving || !selected[0].equals(current);
+                confirm.setEnabled(enabled);
+                confirm.setAlpha(enabled ? 1f : 0.45f);
+            }
+        };
+        renderChoices.run();
+        presentBottomSheet(dialog, panel);
+        int selectedIndex = names.indexOf(selection);
+        if (selectedIndex > 0) {
+            scroll.post(() -> {
+                View selectedRow = choices.getChildAt(selectedIndex);
+                if (selectedRow != null && selectedRow.getBottom() > scroll.getHeight())
+                    scroll.scrollTo(0, selectedRow.getBottom() - scroll.getHeight());
+            });
+        }
+    }
+
+    private void movePreviewFavorite(Media item, String group) {
+        if (!isFavorite(item)) {
+            showBottomNotice("素材已不在收藏夹中");
+            return;
+        }
+        if (assignFavoriteGroup(item, group)) saveFavoriteGroups();
+        if (showingFavorites && favoriteScreen != null) favoriteScreen.render();
+        showBottomNotice("已移到「" + groupName(group) + "」");
+    }
+
+    private boolean assignFavoriteGroup(Media item, String group) {
+        if (group.isEmpty() || !favoriteGroups.contains(group)) return favoriteAssignments.remove(item.hash) != null;
+        return !group.equals(favoriteAssignments.put(item.hash, group));
+    }
+
+    private void editGroupName(String oldName, java.util.function.Consumer<String> onSaved) {
+        editGroupName(oldName, onSaved, null);
+    }
+
+    private void editGroupName(String oldName, java.util.function.Consumer<String> onSaved, Runnable onCancel) {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        boolean creating = oldName == null;
+        LinearLayout panel = sheetPanel(creating ? "新建分组" : "重命名分组", null);
+        panel.setFocusableInTouchMode(true);
+
+        TextView fieldLabel = homeLabel("分组名称", 12, ACCENT, 650);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(-1, -2);
+        labelParams.topMargin = dp(14);
+        panel.addView(fieldLabel, labelParams);
+        EditText name = new EditText(this);
+        name.setSingleLine(true);
+        name.setHint("例如：壁纸");
+        name.setTextColor(INK);
+        name.setHintTextColor(INK3);
+        name.setTextSize(15);
+        name.setBackground(outlined(10, SURFACE));
+        name.setPadding(dp(12), 0, dp(12), 0);
+        name.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        name.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(24)});
+        if (!creating) name.setText(oldName);
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, dp(46));
+        nameParams.topMargin = dp(5);
+        panel.addView(name, nameParams);
+        TextView length = homeLabel("", 11, INK2, 450);
+        length.setGravity(Gravity.END);
+        length.setPadding(0, dp(4), dp(2), 0);
+        panel.addView(length);
+
+        dialogActions(dialog, panel, "取消", creating ? "创建" : "保存", false, onCancel, null);
+        if (onCancel != null) dialog.setOnCancelListener(ignored -> onCancel.run());
+        LinearLayout buttons = (LinearLayout) panel.getChildAt(panel.getChildCount() - 1);
+        Button saveName = (Button) buttons.getChildAt(1);
+        Runnable update = () -> {
+            length.setText(name.length() + " / 24");
+            saveName.setEnabled(!name.getText().toString().trim().isEmpty());
+            saveName.setAlpha(saveName.isEnabled() ? 1f : 0.45f);
+        };
+        name.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable text) { update.run(); }
+        });
+        saveName.setOnClickListener(v -> {
+            String value = name.getText().toString().trim();
+            if (value.isEmpty()) return;
+            if (!value.equals(oldName) && (favoriteGroups.contains(value) || value.equals("全部收藏") || value.equals("未分组"))) {
+                name.setError("分组名称已存在");
+                return;
+            }
+            if (!value.equals(oldName)) {
+                if (creating) favoriteGroups.add(value);
+                else {
+                    ArrayList<String> order = new ArrayList<>(favoriteGroups);
+                    order.set(order.indexOf(oldName), value);
+                    favoriteGroups.clear();
+                    favoriteGroups.addAll(order);
+                    favoriteAssignments.replaceAll((hash, group) -> oldName.equals(group) ? value : group);
+                    if (favoriteScreen != null && oldName.equals(favoriteScreen.activeGroup)) favoriteScreen.activeGroup = value;
+                }
+                saveFavoriteGroups();
+            }
+            dismissCardDialog(dialog, () -> onSaved.accept(value));
+        });
+        name.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId != android.view.inputmethod.EditorInfo.IME_ACTION_DONE || !saveName.isEnabled()) return false;
+            saveName.performClick();
+            return true;
+        });
+        update.run();
+        panel.requestFocus();
+        dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        presentBottomSheet(dialog, panel);
+    }
+
+    private void copyMediaToFavorites(Media item) throws java.io.IOException {
+        File target = favoriteFile(item);
+        if (target.isFile()) return;
+        File folder = target.getParentFile();
+        if (!folder.isDirectory() && !folder.mkdirs()) throw new java.io.IOException("无法创建收藏夹");
+        File temp = new File(folder, target.getName() + ".tmp");
+        try {
+            Files.copy(item.file.toPath(), temp.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } finally { temp.delete(); }
+    }
+
+    private void setFavorite(Media item, boolean adding, String group, ScanRecord source) {
         worker.execute(() -> {
             String message;
             try {
-                File target = favoriteFile(item);
-                if (target.isFile()) {
-                    if (!target.delete()) throw new Exception("无法移除收藏");
-                    message = "已取消收藏";
+                if (adding) {
+                    copyMediaToFavorites(item);
+                    message = "已收藏到「" + groupName(group) + "」";
                 } else {
-                    File folder = target.getParentFile();
-                    if (!folder.isDirectory() && !folder.mkdirs()) throw new Exception("无法创建收藏夹");
-                    File temp = new File(folder, target.getName() + ".tmp");
-                    try {
-                        Files.copy(item.file.toPath(), temp.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                        Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                    } finally { temp.delete(); }
-                    message = "已收藏，相同素材只保留一份";
+                    if (!Files.deleteIfExists(favoriteFile(item).toPath()))
+                        throw new java.io.IOException("素材已不在收藏夹中");
+                    message = "已取消收藏";
                 }
             } catch (Exception error) { message = "收藏操作失败：" + error.getMessage(); }
             String result = message;
@@ -5993,8 +6309,9 @@ public class MainActivity extends Activity {
                 if (!saved) {
                     if (favoriteAssignments.remove(item.hash) != null) saveFavoriteGroups();
                     if (favoriteSources.remove(item.hash) != null) saveFavoriteSources();
-                } else if (adding && rememberFavoriteSource(item.hash, source, false)) {
-                    saveFavoriteSources();
+                } else if (adding) {
+                    if (assignFavoriteGroup(item, group)) saveFavoriteGroups();
+                    if (rememberFavoriteSource(item.hash, source, false)) saveFavoriteSources();
                 }
                 if (adding && saved && (showingReader || showingWechat || showingKuaishou) && !isFinishing()) {
                     if (showingKuaishou) {
@@ -6004,7 +6321,11 @@ public class MainActivity extends Activity {
                     else showFavoriteNotice();
                     return;
                 }
-                if (showingFavorites) showFavorites();
+                if (showingFavorites && !saved && favoriteScreen != null) {
+                    favoriteScreen.items.removeIf(media -> item.hash.equals(media.hash));
+                    favoriteScreen.selected.removeIf(media -> item.hash.equals(media.hash));
+                    favoriteScreen.render();
+                }
                 showBottomNotice(result);
             });
         });
@@ -6709,28 +7030,30 @@ public class MainActivity extends Activity {
 
         private void collectImported() {
             ArrayList<Media> snapshot = actionItems();
+            if (snapshot.isEmpty()) return;
+            showFavoriteDestination(null, "", snapshot.size(), group -> collectImportedInto(snapshot, group), null);
+        }
+
+        private void collectImportedInto(ArrayList<Media> snapshot, String group) {
             ScanRecord source = kuaishouPostRecord;
             busy = true;
             updateActions();
             worker.execute(() -> {
                 ArrayList<Media> collected = new ArrayList<>();
                 for (Media item : snapshot) {
-                    File target = favoriteFile(item);
-                    File temp = new File(target.getParentFile(), target.getName() + ".tmp");
                     try {
-                        if (!target.isFile()) {
-                            if (!target.getParentFile().isDirectory() && !target.getParentFile().mkdirs())
-                                throw new java.io.IOException("无法创建收藏目录");
-                            Files.copy(item.file.toPath(), temp.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                        }
+                        copyMediaToFavorites(item);
                         collected.add(item);
                     } catch (Exception ignored) { }
-                    finally { temp.delete(); }
                 }
                 runOnUiThread(() -> {
                     boolean sourcesChanged = false;
-                    for (Media item : collected) sourcesChanged |= rememberFavoriteSource(item.hash, source, false);
+                    boolean groupsChanged = false;
+                    for (Media item : collected) {
+                        groupsChanged |= assignFavoriteGroup(item, group);
+                        sourcesChanged |= rememberFavoriteSource(item.hash, source, false);
+                    }
+                    if (groupsChanged) saveFavoriteGroups();
                     if (sourcesChanged) saveFavoriteSources();
                     int saved = collected.size();
                     busy = false;
@@ -6766,10 +7089,6 @@ public class MainActivity extends Activity {
             if (activeGroup == null) return true;
             String group = favoriteAssignments.get(item.hash);
             return activeGroup.isEmpty() ? group == null : activeGroup.equals(group);
-        }
-
-        private String groupName(String name) {
-            return name == null ? "全部收藏" : name.isEmpty() ? "未分组" : name;
         }
 
         private void showGroupPicker(ArrayList<Media> moving) {
@@ -6938,81 +7257,6 @@ public class MainActivity extends Activity {
                 presentBottomSheet(dialog, panel);
             });
             popup.showAsDropDown(anchor, 0, dp(4), Gravity.END);
-        }
-
-        private void editGroupName(String oldName, java.util.function.Consumer<String> onSaved) {
-            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
-            boolean creating = oldName == null;
-            LinearLayout panel = sheetPanel(creating ? "新建分组" : "重命名分组", null);
-            panel.setFocusableInTouchMode(true);
-
-            TextView fieldLabel = homeLabel("分组名称", 12, ACCENT, 650);
-            LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(-1, -2);
-            labelParams.topMargin = dp(14);
-            panel.addView(fieldLabel, labelParams);
-            EditText name = new EditText(MainActivity.this);
-            name.setSingleLine(true);
-            name.setHint("例如：壁纸");
-            name.setTextColor(INK);
-            name.setHintTextColor(INK3);
-            name.setTextSize(15);
-            name.setBackground(outlined(10, SURFACE));
-            name.setPadding(dp(12), 0, dp(12), 0);
-            name.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
-            name.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(24)});
-            if (!creating) name.setText(oldName);
-            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, dp(46));
-            nameParams.topMargin = dp(5);
-            panel.addView(name, nameParams);
-            TextView length = homeLabel("", 11, INK2, 450);
-            length.setGravity(Gravity.END);
-            length.setPadding(0, dp(4), dp(2), 0);
-            panel.addView(length);
-
-            dialogActions(dialog, panel, "取消", creating ? "创建" : "保存", false, null, null);
-            LinearLayout buttons = (LinearLayout) panel.getChildAt(panel.getChildCount() - 1);
-            Button saveName = (Button) buttons.getChildAt(1);
-            Runnable update = () -> {
-                length.setText(name.length() + " / 24");
-                saveName.setEnabled(!name.getText().toString().trim().isEmpty());
-                saveName.setAlpha(saveName.isEnabled() ? 1f : 0.45f);
-            };
-            name.addTextChangedListener(new TextWatcher() {
-                @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
-                @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
-                @Override public void afterTextChanged(Editable text) { update.run(); }
-            });
-            saveName.setOnClickListener(v -> {
-                String value = name.getText().toString().trim();
-                if (value.isEmpty()) return;
-                if (!value.equals(oldName) && (favoriteGroups.contains(value) || value.equals("全部收藏") || value.equals("未分组"))) {
-                    name.setError("分组名称已存在");
-                    return;
-                }
-                if (!value.equals(oldName)) {
-                    if (creating) favoriteGroups.add(value);
-                    else {
-                        ArrayList<String> order = new ArrayList<>(favoriteGroups);
-                        order.set(order.indexOf(oldName), value);
-                        favoriteGroups.clear();
-                        favoriteGroups.addAll(order);
-                        favoriteAssignments.replaceAll((hash, group) -> oldName.equals(group) ? value : group);
-                        if (oldName.equals(activeGroup)) activeGroup = value;
-                    }
-                    saveFavoriteGroups();
-                }
-                dismissCardDialog(dialog, () -> onSaved.accept(value));
-            });
-            name.setOnEditorActionListener((view, actionId, event) -> {
-                if (actionId != android.view.inputmethod.EditorInfo.IME_ACTION_DONE || !saveName.isEnabled()) return false;
-                saveName.performClick();
-                return true;
-            });
-            update.run();
-            panel.requestFocus();
-            dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-                    | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
-            presentBottomSheet(dialog, panel);
         }
 
         private void renderGroupChips() {
@@ -7307,11 +7551,12 @@ public class MainActivity extends Activity {
     }
 
     private void showNotice(String message, String actionLabel, Runnable action, boolean bottom) {
-        showNotice(message, actionLabel, action, bottom && recordUndoPopup == null, false);
+        showNotice(message, actionLabel, action, bottom && recordUndoPopup == null, 0);
     }
 
-    private void showNotice(String message, String actionLabel, Runnable action, boolean bottom, boolean undo) {
+    private void showNotice(String message, String actionLabel, Runnable action, boolean bottom, long undoDuration) {
         if (isFinishing() || isDestroyed()) return;
+        boolean undo = undoDuration > 0;
         PopupWindow previous = undo ? recordUndoPopup : noticePopup;
         if (previous != null) previous.dismiss();
         View decor = getWindow().getDecorView();
@@ -7378,7 +7623,7 @@ public class MainActivity extends Activity {
                 popup.dismiss();
                 recordUndoPopup = null;
             }
-        }, undo ? RECORD_UNDO_MS : action == null ? 2000 : 4000);
+        }, undo ? undoDuration : action == null ? 2000 : 4000);
     }
 
     private void saveToDownloads(Media item) throws Exception {
@@ -7414,6 +7659,10 @@ public class MainActivity extends Activity {
             catch (Exception cleanupError) { error.addSuppressed(cleanupError); }
             throw error;
         }
+    }
+
+    @Override public Object onRetainNonConfigurationInstance() {
+        return pendingRecordDeletions.toArray(new PendingRecordDeletion[0]);
     }
 
     @Override protected void onDestroy() {
