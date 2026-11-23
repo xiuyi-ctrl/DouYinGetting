@@ -39,6 +39,7 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -101,6 +102,7 @@ public class MainActivity extends Activity {
     private boolean showingKuaishou;
     private boolean kuaishouRecords;
     private final java.util.HashMap<String, String> recordSearches = new java.util.HashMap<>();
+    private final java.util.HashMap<String, Integer> recordTypes = new java.util.HashMap<>();
     private FavoritesScreen kuaishouRecordsOrigin;
     private WechatImportRecord currentWechatImport;
     private static class WechatImportRecord {
@@ -122,6 +124,7 @@ public class MainActivity extends Activity {
     private TextView status;
     private TextView scanCountLine;
     private TextView scanDetails;
+    private PostStatusStrip readerPostStatus;
     private ProgressBar scanProgress;
     private LinearLayout results;
     private Button scanButton;
@@ -193,6 +196,7 @@ public class MainActivity extends Activity {
     private boolean showingRecordPlatforms;
     private boolean showingSettings;
     private boolean showingFavorites;
+    private boolean showingGroupManager;
     private FavoritesScreen favoriteScreen;
     private final java.util.LinkedHashSet<String> favoriteGroups = new java.util.LinkedHashSet<>();
     private final java.util.HashMap<String, String> favoriteAssignments = new java.util.HashMap<>();
@@ -383,16 +387,22 @@ public class MainActivity extends Activity {
         int selectedPlatform = platform;
         String link = links[platform];
         String name = new String[]{"抖音", "小红书", "快手"}[platform];
+        String caption = "作品链接";
+        for (ScanRecord record : records) {
+            if (link.equals(record.link) && !record.caption.isEmpty()) {
+                caption = record.caption;
+                break;
+            }
+        }
         android.app.Dialog dialog = new android.app.Dialog(this);
-        LinearLayout panel = dialogPanel(R.drawable.extract_link, false, "选择提取方式", name + "作品");
-        addRetryChoice(panel, "提取作品正文", "提取作品的图片或视频", R.drawable.extract_download,
+        LinearLayout panel = sheetPanel("选择提取方式", name + " · " + caption);
+        addSheetChoice(panel, "提取作品正文", "保存作品图片或视频", R.drawable.extract_download, true,
                 () -> dismissCardDialog(dialog, () -> openSharedPost(link, selectedPlatform, false)));
         if (platform != 2) {
-            addRetryChoice(panel, "提取评论素材", "打开作品，进入评论区后点击扫描", R.drawable.extract_scan,
+            addSheetChoice(panel, "提取评论素材", "打开评论区后扫描", R.drawable.extract_scan, false,
                     () -> dismissCardDialog(dialog, () -> openSharedPost(link, selectedPlatform, true)));
         }
-        dialogActions(dialog, panel, "取消", null, false, null, null);
-        showCardDialog(dialog, panel);
+        showBottomSheet(dialog, panel);
     }
 
     private void openSharedPost(String link, int platform, boolean comments) {
@@ -632,6 +642,7 @@ public class MainActivity extends Activity {
         showingRecordPlatforms = false;
         showingSettings = false;
         showingFavorites = false;
+        showingGroupManager = false;
         showingMy = false;
     }
 
@@ -2346,28 +2357,32 @@ public class MainActivity extends Activity {
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
         toolbar.setPadding(dp(20), dp(6), dp(20), dp(6));
         root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
-        TextView back = label("‹", 22, INK, false);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(card(10));
+        ImageView back = icon(R.drawable.extract_back, INK);
+        back.setPadding(dp(8), dp(8), dp(8), dp(8));
+        back.setContentDescription("返回");
         back.setOnClickListener(v -> leaveRecords());
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(34), dp(34)));
-        TextView heading = label(kuaishouRecords ? "快手正文记录" : "扫描记录", 16, INK, true);
-        heading.setGravity(Gravity.CENTER);
+        TextView heading = homeLabel(kuaishouRecords ? "快手提取记录" : "提取记录", 18, INK, 750);
+        heading.setPadding(dp(8), 0, 0, 0);
         toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
         TextView total = label("", 12, INK2, true);
         total.setGravity(Gravity.CENTER);
-        total.setBackground(card(16));
         toolbar.addView(total, new LinearLayout.LayoutParams(dp(66), dp(32)));
 
         root.setFocusableInTouchMode(true);
         String platform = kuaishouRecords ? "kuaishou" : xhsMode ? "xhs" : "douyin";
         EditText search = new EditText(this);
         search.setSingleLine(true);
-        search.setHint("搜索标题、链接、平台或提取类型");
+        search.setHint("搜索标题或作品链接");
         search.setTextSize(13);
         search.setTextColor(INK);
         search.setHintTextColor(INK3);
-        search.setBackground(card(12));
+        search.setBackground(shape(TRACK, 12));
+        Drawable searchIcon = getDrawable(R.drawable.record_search).mutate();
+        searchIcon.setTint(INK2);
+        searchIcon.setBounds(0, 0, dp(18), dp(18));
+        search.setCompoundDrawablesRelative(searchIcon, null, null, null);
+        search.setCompoundDrawablePadding(dp(8));
         search.setPadding(dp(14), 0, dp(14), 0);
         search.setText(recordSearches.getOrDefault(platform, ""));
         LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, dp(44));
@@ -2375,22 +2390,53 @@ public class MainActivity extends Activity {
         root.addView(search, searchParams);
         root.requestFocus();
 
+        Button[] filters = new Button[kuaishouRecords ? 0 : 3];
+        if (!kuaishouRecords) {
+            LinearLayout filterRow = new LinearLayout(this);
+            filterRow.setPadding(dp(3), dp(3), dp(3), dp(3));
+            filterRow.setBackground(shape(TRACK, 12));
+            LinearLayout.LayoutParams filterParams = new LinearLayout.LayoutParams(-1, dp(38));
+            filterParams.setMargins(dp(20), 0, dp(20), dp(4));
+            root.addView(filterRow, filterParams);
+            String[] names = {"全部", "正文", "评论"};
+            for (int i = 0; i < names.length; i++) {
+                filters[i] = shareButton(names[i], null);
+                filterRow.addView(filters[i], new LinearLayout.LayoutParams(0, -1, 1));
+            }
+        }
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(BG);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(20), dp(6), dp(20), dp(28));
+        page.setPadding(dp(16), dp(6), dp(16), dp(28));
         scroll.addView(page);
-        addRecordCards(page, total, search);
+        Runnable renderRecords = () -> {
+            int type = recordTypes.getOrDefault(platform, 0);
+            for (int i = 0; i < filters.length; i++) {
+                filters[i].setBackground(i == type ? shape(ACCENT, 9) : null);
+                filters[i].setTextColor(i == type ? Color.WHITE : INK2);
+                filters[i].setSelected(i == type);
+            }
+            addRecordCards(page, total, search, type);
+            scroll.scrollTo(0, 0);
+        };
+        for (int i = 0; i < filters.length; i++) {
+            int target = i;
+            filters[i].setOnClickListener(v -> {
+                recordTypes.put(platform, target);
+                renderRecords.run();
+            });
+        }
+        renderRecords.run();
         search.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
             @Override public void afterTextChanged(Editable text) {
                 recordSearches.put(platform, text.toString());
-                addRecordCards(page, total, search);
-                scroll.scrollTo(0, 0);
+                renderRecords.run();
             }
         });
         presentSecondary(root);
@@ -2410,17 +2456,13 @@ public class MainActivity extends Activity {
         return kuaishouRecords ? record.kuaishou : !record.kuaishou && isXhsLink(record.link) == xhsMode;
     }
 
-    private void addRecordCards(LinearLayout page, TextView total, EditText search) {
+    private void addRecordCards(LinearLayout page, TextView total, EditText search, int filter) {
         page.removeAllViews();
         String query = search.getText().toString().trim().toLowerCase(Locale.ROOT);
-        TextView hint = label("本机暂存 · 删除记录不会影响已保存到下载目录的文件", 11, INK3, false);
-        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
-        hintParams.topMargin = dp(2);
-        hintParams.bottomMargin = dp(14);
-        page.addView(hint, hintParams);
         ArrayList<ScanRecord> visibleRecords = new ArrayList<>();
         for (ScanRecord record : records) {
-            if (!matchesRecordPlatform(record)) continue;
+            boolean post = record.kuaishou || record.workMedia;
+            if (!matchesRecordPlatform(record) || (filter != 0 && post != (filter == 1))) continue;
             String platform = record.kuaishou ? "快手" : isXhsLink(record.link) ? "小红书" : "抖音";
             String type = record.kuaishou || record.workMedia ? "作品正文 提取作品" : "评论扫描 扫描评论";
             String searchable = (record.caption + " " + record.link + " " + platform + " " + type).toLowerCase(Locale.ROOT);
@@ -2428,7 +2470,7 @@ public class MainActivity extends Activity {
         }
         total.setText("共 " + visibleRecords.size() + " 条");
         if (visibleRecords.isEmpty()) {
-            TextView empty = label(!query.isEmpty() ? "没有符合条件的记录。" : kuaishouRecords ? "读取过的快手作品会显示在这里。" : "扫描过的作品会暂存在这里，方便随时查看和删除。", 12, INK3, false);
+            TextView empty = label((!query.isEmpty() || filter != 0) ? "没有符合条件的记录。" : kuaishouRecords ? "读取过的快手作品会显示在这里。" : "扫描过的作品会暂存在这里，方便随时查看和删除。", 12, INK3, false);
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(dp(18), dp(26), dp(18), dp(26));
             empty.setBackground(card(16));
@@ -2436,103 +2478,181 @@ public class MainActivity extends Activity {
             return;
         }
         SimpleDateFormat date = new SimpleDateFormat("MM-dd HH:mm", Locale.CHINA);
+        int coverWidth = Math.min(92, Math.max(68, getResources().getConfiguration().screenWidthDp - 268));
         for (ScanRecord record : visibleRecords) {
             boolean xhsRecord = isXhsLink(record.link);
+            Media cover;
+            synchronized (record) { cover = record.items.isEmpty() ? null : record.items.get(0); }
             LinearLayout card = new LinearLayout(this);
-            card.setOrientation(LinearLayout.VERTICAL);
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setMinimumHeight(dp(128));
+            card.setPadding(dp(12), dp(12), dp(12), dp(12));
             card.setBackground(card(16));
             LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, -2);
             cardParams.bottomMargin = dp(10);
             page.addView(card, cardParams);
 
-            LinearLayout head = new LinearLayout(this);
-            head.setGravity(Gravity.CENTER_VERTICAL);
-            head.setPadding(dp(14), dp(12), dp(14), dp(12));
-            card.addView(head);
-
             ImageView icon = new ImageView(this);
-            icon.setImageResource(record.kuaishou ? R.drawable.extract_globe : xhsRecord ? R.drawable.xhs_nav : R.drawable.douyin_nav);
+            icon.setImageResource(record.kuaishou ? R.drawable.home_kuaishou : xhsRecord ? R.drawable.home_xiaohongshu : R.drawable.home_douyin);
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            icon.setPadding(dp(9), dp(9), dp(9), dp(9));
-            icon.setBackground(shape(ACCENT_SOFT, 11));
-            head.addView(icon, new LinearLayout.LayoutParams(dp(38), dp(38)));
+            icon.setBackground(shape(ACCENT_SOFT, 9));
+            icon.setClipToOutline(true);
+            card.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            if (cover != null) {
+                ImageView preview = recordCover(cover);
+                LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(dp(coverWidth), dp(102));
+                coverParams.leftMargin = dp(10);
+                card.addView(preview, coverParams);
+            }
 
             LinearLayout info = new LinearLayout(this);
             info.setOrientation(LinearLayout.VERTICAL);
             LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(0, -2, 1);
-            infoParams.leftMargin = dp(12);
-            infoParams.rightMargin = dp(14);
-            head.addView(info, infoParams);
+            infoParams.leftMargin = dp(11);
+            card.addView(info, infoParams);
+            LinearLayout heading = new LinearLayout(this);
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            info.addView(heading, new LinearLayout.LayoutParams(-1, -2));
             String shortLink = record.link.replaceFirst("^https?://", "").replaceFirst("\\?.*$", "").replaceFirst("/$", "");
             if (shortLink.length() > 24) shortLink = shortLink.substring(0, 23) + "…";
-            TextView title = label(!record.caption.isEmpty() ? record.caption : shortLink, 13, INK, true);
+            TextView title = homeLabel(!record.caption.isEmpty() ? record.caption : shortLink, 14, INK, 750);
             title.setSingleLine(true);
             title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            info.addView(title);
+            heading.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
 
             int count;
-            synchronized (record) { count = record.items.size(); }
+            boolean hasFailures;
+            synchronized (record) {
+                count = record.items.size();
+                hasFailures = !record.postFailures.isEmpty() || !record.failedMedia.isEmpty() || !record.failedReplies.isEmpty();
+            }
             String progress = xhsRecord || record.includeReplies
                     ? "主 " + record.mainScanned + " · 回 " + record.replyScanned
                     : record.scanned + " 条评论";
             if (xhsRecord && record.scanned > 0 && record.mainScanned + record.replyScanned == 0)
                 progress = record.scanned + " 条评论";
-            String detail = ("legacy".equals(record.id) ? "旧版缓存" : date.format(record.createdAt) + (record.kuaishou ? "" : record.workMedia ? " · 作品正文" : " · " + progress))
-                    + " · " + count + " 素材";
-            TextView sub = label(detail, 11, INK3, false);
+            String type = record.kuaishou || record.workMedia ? "正文" : "评论";
+            String detail = ("legacy".equals(record.id) ? "旧版缓存" : type) + " · " + count + " 项";
+            if ("评论".equals(type) && !"legacy".equals(record.id)) detail += " · " + progress;
+            if (!"legacy".equals(record.id)) detail += " · " + date.format(record.createdAt);
+            TextView sub = homeLabel(detail, 12, INK2, 450);
             sub.setSingleLine(true);
             sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
             LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(-1, -2);
-            subParams.topMargin = dp(4);
+            subParams.topMargin = dp(2);
             info.addView(sub, subParams);
 
-            TextView state = label(record.complete ? "已完成" : "暂存中", 11, record.complete ? ACCENT : INK3, true);
+            TextView state = homeLabel(hasFailures ? "有失败" : record.complete ? "已完成" : "暂存中",
+                    11, hasFailures ? DANGER : record.complete ? ACCENT : INK2, 650);
+            state.setBackground(shape(hasFailures ? (darkMode ? 0xff422b3b : 0xffffedf0) : ACCENT_SOFT, 12));
             state.setGravity(Gravity.CENTER);
-            head.addView(state, new LinearLayout.LayoutParams(dp(44), -2));
-
-            View divider = new View(this);
-            divider.setBackgroundColor(LINE);
-            card.addView(divider, new LinearLayout.LayoutParams(-1, 1));
+            LinearLayout.LayoutParams stateParams = new LinearLayout.LayoutParams(dp(51), dp(25));
+            stateParams.leftMargin = dp(6);
+            heading.addView(state, stateParams);
 
             LinearLayout actions = new LinearLayout(this);
             actions.setGravity(Gravity.CENTER_VERTICAL);
-            actions.setPadding(dp(14), dp(10), dp(14), dp(11));
-            card.addView(actions);
-            TextView view = label("查看预览", 12, INK2, true);
-            view.setOnClickListener(v -> showRecord(record));
-            actions.addView(view);
-            if (canResume(record)) {
-                TextView resume = label("继续扫描", 12, ACCENT, true);
-                LinearLayout.LayoutParams resumeParams = new LinearLayout.LayoutParams(-2, -2);
-                resumeParams.leftMargin = dp(12);
-                actions.addView(resume, resumeParams);
-                resume.setOnClickListener(v -> {
-                    boolean live = isLiveRecord(record);
-                    showRecord(record);
-                    if (!live) openSavedRecordPage(record);
-                });
-            }
-            if (record.link.startsWith("http")) {
-                TextView copy = label("复制链接", 12, INK2, true);
-                LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(-2, -2);
-                copyParams.leftMargin = dp(12);
-                copy.setOnClickListener(v -> {
-                    if (copyLink(record.link)) flashCopied(copy, "复制链接");
-                    else showTopNotice("复制失败：剪贴板不可用");
-                });
-                actions.addView(copy, copyParams);
-            }
-            TextView delete = label("删除记录", 12, DANGER, true);
-            LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(-2, -2);
-            deleteParams.leftMargin = dp(12);
-            delete.setOnClickListener(v -> confirmDelete(record, () -> {
+            info.addView(actions);
+            Button preview = shareButton("查看预览", v -> showRecord(record));
+            preview.setTextSize(12);
+            preview.setTypeface(homeTypeface(650));
+            preview.setBackground(new android.graphics.drawable.InsetDrawable(shape(ACCENT_SOFT, 16), 0, dp(7), 0, dp(7)));
+            preview.setPadding(0, 0, 0, 0);
+            preview.setIncludeFontPadding(false);
+            preview.setTextAlignment(View.TEXT_ALIGNMENT_CENTER);
+            preview.setGravity(Gravity.CENTER);
+            actions.addView(preview, new LinearLayout.LayoutParams(dp(88), dp(44)));
+            TextView more = homeLabel("⋯", 20, INK, 750);
+            more.setGravity(Gravity.CENTER);
+            more.setContentDescription("更多记录操作");
+            actions.addView(more, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            more.setOnClickListener(v -> showRecordActions(record, v, () -> {
                 if (!showingRecords || !page.isAttachedToWindow()) return;
-                addRecordCards(page, total, search);
+                String platform = kuaishouRecords ? "kuaishou" : xhsMode ? "xhs" : "douyin";
+                addRecordCards(page, total, search, recordTypes.getOrDefault(platform, 0));
             }));
-            actions.addView(delete, deleteParams);
 
             card.setOnClickListener(v -> showRecord(record));
         }
+    }
+
+    private PopupWindow recordPopup(LinearLayout panel, int width) {
+        panel.setPadding(dp(14), dp(12), dp(14), dp(12));
+        int available = getResources().getDisplayMetrics().widthPixels - dp(24);
+        PopupWindow popup = new PopupWindow(panel, Math.min(dp(width), available), -2, true);
+        popup.setBackgroundDrawable(card(16));
+        popup.setElevation(dp(10));
+        popup.setOutsideTouchable(true);
+        popup.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);
+        return popup;
+    }
+
+    private void showRecordActions(ScanRecord record, View anchor, Runnable onDeleted) {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        PopupWindow popup = recordPopup(panel, 186);
+        panel.setPadding(dp(6), dp(6), dp(6), dp(6));
+        if (record.link.startsWith("http")) {
+            addRecordAction(panel, "复制链接", R.drawable.extract_copy, INK, () -> {
+                popup.dismiss();
+                showBottomNotice(copyLink(record.link) ? "链接已复制" : "复制失败：剪贴板不可用");
+            });
+            View divider = new View(this);
+            divider.setBackgroundColor(LINE);
+            LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(-1, dp(1));
+            dividerParams.setMargins(dp(10), 0, dp(10), 0);
+            panel.addView(divider, dividerParams);
+        }
+        addRecordAction(panel, "删除记录", R.drawable.dialog_trash, DANGER, () -> {
+            popup.dismiss();
+            confirmDelete(record, anchor, onDeleted);
+        });
+        showRecordPopup(popup, anchor);
+    }
+
+    private void addRecordAction(LinearLayout panel, String title, int iconRes, int color, Runnable action) {
+        TextView row = homeLabel(title, 14, color, 650);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), 0, dp(12), 0);
+        Drawable icon = getDrawable(iconRes).mutate();
+        icon.setTint(color == DANGER ? DANGER : ACCENT);
+        icon.setBounds(0, 0, dp(19), dp(19));
+        row.setCompoundDrawablesRelative(icon, null, null, null);
+        row.setCompoundDrawablePadding(dp(10));
+        row.setOnClickListener(v -> action.run());
+        pressFeedback(row);
+        panel.addView(row, new LinearLayout.LayoutParams(-1, dp(46)));
+    }
+
+    private void showRecordPopup(PopupWindow popup, View anchor) {
+        popup.showAsDropDown(anchor, (anchor.getWidth() - popup.getWidth()) / 2, dp(6), Gravity.LEFT);
+    }
+
+    private ImageView recordCover(Media item) {
+        ImageView preview = new ImageView(this) {
+            private boolean requested;
+
+            @Override protected void onDraw(android.graphics.Canvas canvas) {
+                super.onDraw(canvas);
+                if (requested || getDrawable() != null || !getLocalVisibleRect(new android.graphics.Rect())) return;
+                requested = true;
+                worker.execute(() -> {
+                    Drawable thumbnail = decodeThumbnail(item.file);
+                    runOnUiThread(() -> {
+                        if (item.thumbnail == null) item.thumbnail = thumbnail;
+                        if (isAttachedToWindow()) setImageDrawable(thumbnail);
+                    });
+                });
+            }
+        };
+        preview.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        preview.setBackground(shape(TRACK, 8));
+        preview.setClipToOutline(true);
+        if (item.thumbnail != null) {
+            Drawable.ConstantState state = item.thumbnail.getConstantState();
+            if (state != null) preview.setImageDrawable(state.newDrawable(getResources()));
+        }
+        return preview;
     }
 
     private void showRecord(ScanRecord record) {
@@ -2566,14 +2686,13 @@ public class MainActivity extends Activity {
             status.setText(scanning ? "正在扫描，离开本页不会中断" : "扫描已暂停，已提取素材保留在暂存记录中");
         } else {
             scanButton.setText(record.workMedia ? "扫描评论" : canResume(record) ? "继续扫描" : "重新扫描");
-            status.setText(record.workMedia ? postProgress(record) : canResume(record) ? "已打开本机暂存记录，可继续扫描"
+            status.setText(record.workMedia ? "已打开作品正文记录" : canResume(record) ? "已打开本机暂存记录，可继续扫描"
                     : "已打开本机暂存记录；重新扫描会生成新记录");
         }
         showReader();
         renderResults();
         updateResultLabels();
-        readerScroll.post(() -> readerScroll.smoothScrollTo(0,
-                record.workMedia && !record.postFailures.isEmpty() ? 0 : resultAnchor.getTop()));
+        readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
     }
 
     private boolean canResume(ScanRecord record) {
@@ -2650,7 +2769,10 @@ public class MainActivity extends Activity {
     private void dismissCardDialog(android.app.Dialog dialog, Runnable after) {
         if (motionEnabled && dialog.isShowing()) {
             View content = dialog.findViewById(android.R.id.content);
-            content.animate().alpha(0f).scaleX(0.97f).scaleY(0.97f).setDuration(140).withEndAction(() -> {
+            android.view.ViewPropertyAnimator motion = content.animate().alpha(0f);
+            if (dialog.getWindow().getAttributes().gravity == Gravity.BOTTOM) motion.translationY(dp(32));
+            else motion.scaleX(0.97f).scaleY(0.97f);
+            motion.setDuration(140).withEndAction(() -> {
                 dialog.dismiss();
                 if (after != null) after.run();
             }).start();
@@ -2734,10 +2856,72 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void confirmDelete(ScanRecord record, Runnable onDeleted) {
-        showConfirmation(R.drawable.dialog_trash, true, record.kuaishou ? "删除这条快手记录？" : "删除这条扫描记录？",
-                "这条记录及暂存素材将被删除。\n已保存到下载目录的文件不受影响。",
-                "保留记录", "删除记录", null, () -> {
+    private LinearLayout sheetPanel(String title, String detail) {
+        LinearLayout panel = dialogPanel(0, false, title, detail);
+        panel.setPadding(dp(18), dp(10), dp(18), dp(12));
+        GradientDrawable background = shape(SURFACE, 0);
+        float corner = dp(24);
+        background.setCornerRadii(new float[]{corner, corner, corner, corner, 0, 0, 0, 0});
+        panel.setBackground(background);
+        View handle = new View(this);
+        handle.setBackground(shape(INK3, 3));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(34), dp(4));
+        params.gravity = Gravity.CENTER_HORIZONTAL;
+        params.bottomMargin = dp(14);
+        panel.addView(handle, 0, params);
+        return panel;
+    }
+
+    private void addSheetChoice(LinearLayout panel, String title, String detail, int iconRes, boolean highlighted, Runnable action) {
+        addRetryChoice(panel, title, detail, iconRes, action);
+        LinearLayout row = (LinearLayout) panel.getChildAt(panel.getChildCount() - 1);
+        row.setBackground(highlighted ? shape(ACCENT_SOFT, 13) : card(13));
+        row.getChildAt(row.getChildCount() - 1).setRotation(-90);
+    }
+
+    private void showBottomSheet(android.app.Dialog dialog, LinearLayout panel) {
+        TextView cancel = homeLabel("取消", 14, INK2, 650);
+        cancel.setGravity(Gravity.CENTER);
+        cancel.setOnClickListener(v -> dismissCardDialog(dialog, null));
+        LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(-1, dp(48));
+        cancelParams.topMargin = dp(8);
+        panel.addView(cancel, cancelParams);
+        presentBottomSheet(dialog, panel);
+    }
+
+    private void presentBottomSheet(android.app.Dialog dialog, LinearLayout panel) {
+        if (isFinishing() || isDestroyed()) return;
+        dialog.setContentView(panel);
+        android.view.Window window = dialog.getWindow();
+        window.setBackgroundDrawableResource(android.R.color.transparent);
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        window.setDimAmount(darkMode ? 0.55f : 0.42f);
+        window.setGravity(Gravity.BOTTOM);
+        window.setWindowAnimations(0);
+        dialog.show();
+        window.setLayout(-1, -2);
+        if (motionEnabled) {
+            panel.setTranslationY(dp(48));
+            panel.setAlpha(0f);
+            panel.animate().translationY(0).alpha(1f).setDuration(200).start();
+        }
+    }
+
+    private void confirmDelete(ScanRecord record, View anchor, Runnable onDeleted) {
+        if (!anchor.isAttachedToWindow()) return;
+        LinearLayout panel = dialogPanel(0, true, "删除这条记录？", "记录和暂存素材将被删除。已保存的文件仍在下载目录。");
+        if (!record.caption.isEmpty()) dialogNote(panel, record.caption);
+        PopupWindow popup = recordPopup(panel, 284);
+        LinearLayout actions = new LinearLayout(this);
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
+        rowParams.topMargin = dp(14);
+        panel.addView(actions, rowParams);
+        actions.addView(dialogButton("保留记录", false, false, v -> popup.dismiss()),
+                new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(0, -2, 1);
+        deleteParams.leftMargin = dp(8);
+        actions.addView(dialogButton("删除记录", true, true, v -> {
+            popup.dismiss();
             if (currentRecord == record) {
                 scanning = false;
                 requestToken++;
@@ -2761,7 +2945,8 @@ public class MainActivity extends Activity {
                     }
                 });
             });
-        });
+        }), deleteParams);
+        showRecordPopup(popup, anchor);
     }
 
     private void showReader() {
@@ -2951,19 +3136,7 @@ public class MainActivity extends Activity {
         scanDetails.setMinHeight(dp(32));
         scanDetails.setVisibility(View.GONE);
         scanDetails.setOnClickListener(v -> {
-            if (currentRecord != null && currentRecord.workMedia) {
-                ScanRecord record = currentRecord;
-                retryPost(record, () -> {
-                    if (currentRecord != record || !showingReader) return;
-                    clearMediaSelection();
-                    media.clear();
-                    synchronized (record) { media.addAll(record.items); }
-                    renderResults();
-                    updateResultLabels();
-                    status.setText(postProgress(record));
-                });
-                updateScanCard();
-            } else if (currentRecord != null) showScanDetails(currentRecord);
+            if (currentRecord != null) showScanDetails(currentRecord);
         });
         scanBody.addView(scanDetails);
         status.addTextChangedListener(new TextWatcher() {
@@ -3007,11 +3180,11 @@ public class MainActivity extends Activity {
         scanButton = new Button(this);
         scanButton.setAllCaps(false);
         scanButton.setText("扫描评论");
-        scanButton.setTextColor(Color.WHITE);
+        scanButton.setTextColor(ACCENT);
         scanButton.setTextSize(14);
         scanButton.setTypeface(homeTypeface(700));
         readerIcon(scanButton, R.drawable.extract_scan, 20);
-        scanButton.setBackground(shape(ACCENT, 10));
+        scanButton.setBackground(outlined(12, SURFACE));
         scanButton.setMinHeight(0);
         scanButton.setStateListAnimator(null);
         scanButton.setOnClickListener(v -> {
@@ -3094,7 +3267,8 @@ public class MainActivity extends Activity {
         extractWorkButton = shareButton("提取作品", v -> startWorkExtraction());
         extractWorkButton.setTextSize(14);
         extractWorkButton.setTypeface(homeTypeface(700));
-        extractWorkButton.setBackground(outlined(12, SURFACE));
+        extractWorkButton.setTextColor(Color.WHITE);
+        extractWorkButton.setBackground(shape(ACCENT, 12));
         readerIcon(extractWorkButton, R.drawable.extract_download, 18);
         LinearLayout.LayoutParams extractParams = new LinearLayout.LayoutParams(-1, dp(40));
         extractParams.topMargin = dp(8);
@@ -3131,6 +3305,23 @@ public class MainActivity extends Activity {
             updateResultLabels();
         });
         resultHeader.addView(selectionAction, new LinearLayout.LayoutParams(dp(70), dp(36)));
+        readerPostStatus = new PostStatusStrip();
+        content.addView(readerPostStatus, postStatusParams());
+        readerPostStatus.retry.setOnClickListener(v -> {
+            ScanRecord record = currentRecord;
+            if (record == null || !record.workMedia || record.processingPage) return;
+            retryPost(record, () -> {
+                if (currentRecord != record || !showingReader) return;
+                clearMediaSelection();
+                media.clear();
+                synchronized (record) { media.addAll(record.items); }
+                renderResults();
+                updateResultLabels();
+                status.setText("作品正文已读取");
+            });
+            readerPostStatus.update(record);
+        });
+
         LinearLayout filters = new LinearLayout(this);
         filters.setOrientation(LinearLayout.HORIZONTAL);
         readerFilterTrack = new FrameLayout(this);
@@ -3228,21 +3419,17 @@ public class MainActivity extends Activity {
         } else scanStatusIcon.clearAnimation();
         if (scanButton != null && !Boolean.valueOf(scanning).equals(scanButton.getTag())) {
             Drawable drawable = getDrawable(scanning ? R.drawable.extract_pause : R.drawable.extract_scan).mutate();
-            drawable.setTint(Color.WHITE);
+            scanButton.setTextColor(scanning ? Color.WHITE : ACCENT);
+            scanButton.setBackground(scanning ? shape(ACCENT, 12) : outlined(12, SURFACE));
+            drawable.setTint(scanButton.getCurrentTextColor());
             drawable.setBounds(0, 0, dp(20), dp(20));
             scanButton.setCompoundDrawablesRelative(drawable, null, null, null);
             scanButton.setTag(scanning);
         }
         ScanRecord record = currentRecord;
         boolean showCommentDetails = record != null && !record.workMedia;
-        if (record != null && record.workMedia) {
-            synchronized (record) {
-                scanDetails.setText("重试失败项");
-                scanDetails.setVisibility(!record.processingPage && !record.postFailures.isEmpty() ? View.VISIBLE : View.GONE);
-            }
-        } else {
-            scanDetails.setVisibility(showCommentDetails ? View.VISIBLE : View.GONE);
-        }
+        if (readerPostStatus != null) readerPostStatus.update(record != null && record.workMedia ? record : null);
+        scanDetails.setVisibility(showCommentDetails ? View.VISIBLE : View.GONE);
         scanCountLine.setVisibility(showCommentDetails ? View.VISIBLE : View.GONE);
         if (!showCommentDetails) return;
         scanCountLine.setText(scanCounts(record) + (scanning ? "\n已找到 " + media.size() + " 个素材" : ""));
@@ -3921,6 +4108,42 @@ public class MainActivity extends Activity {
     private void finishWorkExtraction() {
         extractWorkButton.setEnabled(true);
         extractWorkButton.setText("提取作品");
+    }
+
+    private LinearLayout.LayoutParams postStatusParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(8);
+        return params;
+    }
+
+    private class PostStatusStrip extends LinearLayout {
+        private final TextView summary;
+        final TextView retry;
+
+        PostStatusStrip() {
+            super(MainActivity.this);
+            setGravity(Gravity.CENTER_VERTICAL);
+            setMinimumHeight(dp(40));
+            setPadding(dp(12), 0, dp(8), 0);
+            setBackground(shape(ACCENT_SOFT, 10));
+            summary = homeLabel("", 11, INK, 550);
+            addView(summary, new LinearLayout.LayoutParams(0, -2, 1));
+            retry = homeLabel("重试失败项", 12, ACCENT, 700);
+            retry.setGravity(Gravity.CENTER);
+            retry.setPadding(dp(8), 0, dp(4), 0);
+            retry.setMinHeight(dp(44));
+            addView(retry, new LinearLayout.LayoutParams(-2, -2));
+            setVisibility(View.GONE);
+        }
+
+        void update(ScanRecord record) {
+            setVisibility(record == null ? View.GONE : View.VISIBLE);
+            if (record == null) return;
+            synchronized (record) {
+                summary.setText(record.processingPage ? "正在重试失败素材…" : postProgress(record));
+                retry.setVisibility(!record.processingPage && !record.postFailures.isEmpty() ? View.VISIBLE : View.GONE);
+            }
+        }
     }
 
     private String postProgress(ScanRecord record) {
@@ -4744,6 +4967,7 @@ public class MainActivity extends Activity {
     }
 
     private void updateResultLabels() {
+        if (readerPostStatus != null) readerPostStatus.update(currentRecord != null && currentRecord.workMedia ? currentRecord : null);
         updateSelectAll(readerSelectAll, selectingMedia, false, media, selectedMedia, this::matchesFilter);
         int gifCount = 0;
         for (Media item : media) if (item.animated) gifCount++;
@@ -5172,15 +5396,15 @@ public class MainActivity extends Activity {
         String name = WorkExport.name(record.caption, record.link);
         String path = SAVE_DIRECTORY + "/" + platform;
         android.app.Dialog dialog = new android.app.Dialog(this);
-        LinearLayout panel = dialogPanel(R.drawable.extract_download, false, "选择保存方式", "保存 " + items.size() + " 项素材");
-        addRetryChoice(panel, "直接保存", "下载 / DouYinGetting", R.drawable.extract_download,
+        LinearLayout panel = sheetPanel("选择保存方式", "准备保存 " + items.size() + " 项素材");
+        addSheetChoice(panel, "直接保存", "下载 / DouYinGetting", R.drawable.extract_download, false,
                 () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, SAVE_DIRECTORY, null, before, after)));
-        addRetryChoice(panel, "按作品建文件夹", platform + " / " + name, R.drawable.dialog_file,
+        addSheetChoice(panel, "按作品建文件夹", platform + " / " + name, R.drawable.blue_folder, true,
                 () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, path + "/" + name, null, before, after)));
-        addRetryChoice(panel, "打包 ZIP", platform + " / " + name + ".zip", R.drawable.dialog_file,
+        addSheetChoice(panel, "打包 ZIP", platform + " / " + name + ".zip", R.drawable.dialog_file, false,
                 () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, path, name + ".zip", before, after)));
-        dialogActions(dialog, panel, "取消", null, false, null, null);
-        showCardDialog(dialog, panel);
+        dialogNote(panel, "下载 / DouYinGetting / " + platform);
+        showBottomSheet(dialog, panel);
     }
 
     private void saveMediaBatch(ArrayList<Media> items, String directory, String zipName, Runnable before, Runnable after) {
@@ -5320,7 +5544,8 @@ public class MainActivity extends Activity {
         private Button save;
         private Button remove;
         private Button move;
-        private TextView groupFilter;
+        private LinearLayout groupChips;
+        private PostStatusStrip kuaishouPostStatus;
         private String activeGroup;
         private int category;
         private boolean selecting;
@@ -5376,38 +5601,22 @@ public class MainActivity extends Activity {
             progressParams.leftMargin = dp(12);
             statusCard.addView(progress, progressParams);
 
-            Button retry = shareButton("重试失败项", v -> {});
-            LinearLayout.LayoutParams retryParams = new LinearLayout.LayoutParams(-1, dp(40));
-            retryParams.topMargin = dp(8);
-            content.addView(retry, retryParams);
-            Runnable updateRetry = () -> {
-                ScanRecord record = kuaishouPostRecord;
-                if (record == null) retry.setVisibility(View.GONE);
-                else synchronized (record) {
-                    retry.setVisibility(record.postFailures.isEmpty() ? View.GONE : View.VISIBLE);
-                }
-            };
-            updateRetry.run();
-            retry.setOnClickListener(v -> {
+            kuaishouPostStatus.retry.setOnClickListener(v -> {
                 ScanRecord record = kuaishouPostRecord;
                 if (busy || record == null || record.processingPage) return;
                 busy = true;
                 fetch.setEnabled(false);
-                retry.setEnabled(false);
-                progress.setText("正在重试失败素材…");
                 updateActions();
                 retryPost(record, () -> {
                     busy = false;
                     fetch.setEnabled(true);
-                    retry.setEnabled(true);
-                    progress.setText(postProgress(record));
                     synchronized (record) {
                         items.clear();
                         items.addAll(record.items);
                     }
-                    updateRetry.run();
                     setSelecting(false);
                 });
+                kuaishouPostStatus.update(record);
             });
 
             TextView caption = homeLabel("", 13, INK, 450);
@@ -5424,7 +5633,7 @@ public class MainActivity extends Activity {
                 link.setText(savedKuaishou.link);
                 caption.setText(savedKuaishou.caption);
                 caption.setVisibility(savedKuaishou.caption.isEmpty() ? View.GONE : View.VISIBLE);
-                progress.setText(savedKuaishou.postTotal > 0 ? postProgress(savedKuaishou) : "已打开本机提取记录");
+                progress.setText("已打开本机提取记录");
             }
             fetch.setOnClickListener(v -> {
                 if (busy) return;
@@ -5467,7 +5676,7 @@ public class MainActivity extends Activity {
                         if (downloadPostFailures(record)) {
                             saved = record;
                             found.addAll(record.items);
-                            message = record.postTotal == 0 ? "已读取作品文案" : postProgress(record);
+                            message = record.postTotal == 0 ? "已读取作品文案" : "作品正文已读取";
                         } else {
                             deleteRecordFiles(record);
                             message = "无法保存提取记录，请检查存储空间后重试";
@@ -5488,7 +5697,6 @@ public class MainActivity extends Activity {
                         progress.setText(statusText);
                         if (newRecord != null) {
                             kuaishouPostRecord = newRecord;
-                            updateRetry.run();
                             items.clear();
                             items.addAll(found);
                             caption.setText(newRecord.caption);
@@ -5561,6 +5769,7 @@ public class MainActivity extends Activity {
                 content.setOrientation(LinearLayout.VERTICAL);
                 content.setPadding(dp(16), dp(10), dp(16), dp(20));
                 scroll.addView(content);
+                kuaishouPostStatus = new PostStatusStrip();
                 addKuaishouInput(content);
                 LinearLayout resultHeader = new LinearLayout(MainActivity.this);
                 resultHeader.setGravity(Gravity.CENTER_VERTICAL);
@@ -5573,6 +5782,7 @@ public class MainActivity extends Activity {
                 resultHeader.addView(selectAll, selectAllParams);
                 resultHeader.addView(select, new LinearLayout.LayoutParams(dp(70), dp(36)));
                 readerIcon(select, R.drawable.extract_select, 16);
+                content.addView(kuaishouPostStatus, postStatusParams());
             }
             if (wechat) {
                 LinearLayout introduction = new LinearLayout(MainActivity.this);
@@ -5590,14 +5800,17 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams groupParams = new LinearLayout.LayoutParams(-1, dp(42));
                 groupParams.setMargins(dp(20), 0, dp(20), 0);
                 root.addView(groups, groupParams);
-                groupFilter = shareButton("全部收藏 ▾", v -> showGroupPicker(null));
-                groupFilter.setSingleLine(true);
-                groupFilter.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                groups.addView(groupFilter, new LinearLayout.LayoutParams(0, -1, 1));
-                Button manage = shareButton("管理分组", v -> manageGroups());
-                LinearLayout.LayoutParams manageParams = new LinearLayout.LayoutParams(dp(86), -1);
-                manageParams.leftMargin = dp(8);
-                groups.addView(manage, manageParams);
+                HorizontalScrollView chips = new HorizontalScrollView(MainActivity.this);
+                chips.setHorizontalScrollBarEnabled(false);
+                groups.addView(chips, new LinearLayout.LayoutParams(0, -1, 1));
+                groupChips = new LinearLayout(MainActivity.this);
+                groupChips.setGravity(Gravity.CENTER_VERTICAL);
+                chips.addView(groupChips, new HorizontalScrollView.LayoutParams(-2, -1));
+                ImageView manage = icon(R.drawable.blue_folder, INK);
+                manage.setPadding(dp(10), dp(10), dp(10), dp(10));
+                manage.setContentDescription("管理分组");
+                manage.setOnClickListener(v -> manageGroups());
+                groups.addView(manage, new LinearLayout.LayoutParams(dp(44), dp(42)));
             }
 
             filterTrack = new FrameLayout(MainActivity.this);
@@ -5690,7 +5903,14 @@ public class MainActivity extends Activity {
                 else confirmRemove();
             });
             remove.setTextColor(imported ? ACCENT : DANGER);
-            if (!imported) move = addAction("移到分组", v -> showGroupPicker(selection()));
+            if (!imported) {
+                move = addAction("移到分组", v -> showGroupPicker(selection()));
+                move.setBackground(shape(ACCENT, 10));
+                move.setTextColor(Color.WHITE);
+                move.setTypeface(homeTypeface(700));
+                actions.removeView(move);
+                actions.addView(move, 0);
+            }
             if (kuaishou) {
                 save.setSingleLine(true);
                 save.setTypeface(homeTypeface(700));
@@ -5868,81 +6088,236 @@ public class MainActivity extends Activity {
         }
 
         private void manageGroups() {
-            if (busy) return;
-            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
-            LinearLayout panel = dialogPanel(R.drawable.dialog_heart, false, "管理分组", null);
-            ScrollView scroll = dialogScroll();
-            panel.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
-            LinearLayout choices = new LinearLayout(MainActivity.this);
-            choices.setOrientation(LinearLayout.VERTICAL);
-            scroll.addView(choices);
-            for (String name : favoriteGroups) {
-                addRetryChoice(choices, name, "重命名或删除", R.drawable.dialog_heart,
-                        () -> dismissCardDialog(dialog, () -> editGroup(name)));
-            }
-            dialogActions(dialog, panel, "关闭", "新建分组", false, null,
-                    () -> editGroupName(null, name -> {
-                        activeGroup = name;
-                        category = 0;
-                        positionFilter(false);
-                        setSelecting(false);
-                    }));
-            showCardDialog(dialog, panel);
+            if (busy || !loaded) return;
+            resetPages();
+            showingGroupManager = true;
+            currentPage = -7;
+            LinearLayout page = pageRoot();
+            header(page, "管理分组", true, this::leaveGroupManager);
+
+            ScrollView scroll = new ScrollView(MainActivity.this);
+            page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+            LinearLayout groups = new LinearLayout(MainActivity.this);
+            groups.setOrientation(LinearLayout.VERTICAL);
+            groups.setPadding(dp(16), dp(6), dp(16), dp(12));
+            scroll.addView(groups);
+            renderManagedGroups(groups);
+
+            Button create = dialogButton("新建分组", true, false, v -> editGroupName(null, name -> {
+                activeGroup = name;
+                category = 0;
+                positionFilter(false);
+                setSelecting(false);
+                renderManagedGroups(groups);
+            }));
+            readerIcon(create, R.drawable.group_add, 19);
+            LinearLayout.LayoutParams createParams = new LinearLayout.LayoutParams(-1, dp(48));
+            createParams.setMargins(dp(16), dp(8), dp(16), dp(16));
+            page.addView(create, createParams);
+            presentSecondary(page);
         }
 
-        private void editGroup(String group) {
-            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
-            LinearLayout panel = dialogPanel(R.drawable.dialog_heart, false, group, null);
-            addRetryChoice(panel, "重命名分组", "", R.drawable.dialog_heart,
-                    () -> dismissCardDialog(dialog, () -> editGroupName(group, name -> render())));
-            addRetryChoice(panel, "删除分组", "素材移回未分组", R.drawable.dialog_trash,
-                    () -> dismissCardDialog(dialog, () -> showConfirmation(R.drawable.dialog_trash, true,
-                            "删除分组？", "分组内的素材将移回「未分组」。", "取消", "删除分组", null, () -> {
-                                favoriteGroups.remove(group);
-                                favoriteAssignments.values().removeIf(group::equals);
-                                if (group.equals(activeGroup)) activeGroup = null;
-                                saveFavoriteGroups();
-                                setSelecting(false);
-                            })));
-            dialogActions(dialog, panel, "关闭", null, false, null, null);
-            showCardDialog(dialog, panel);
+        private void leaveGroupManager() {
+            showingGroupManager = false;
+            showingFavorites = true;
+            render();
+            showMainPage(root, 0);
+        }
+
+        private void renderManagedGroups(LinearLayout groups) {
+            groups.removeAllViews();
+            if (favoriteGroups.isEmpty()) {
+                TextView empty = homeLabel("还没有自定义分组", 13, INK2, 450);
+                empty.setGravity(Gravity.CENTER);
+                empty.setPadding(dp(16), dp(30), dp(16), dp(30));
+                empty.setBackground(card(14));
+                groups.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+                return;
+            }
+            java.util.HashMap<String, Integer> counts = new java.util.HashMap<>();
+            for (Media item : items) {
+                String name = favoriteAssignments.get(item.hash);
+                if (name != null) counts.merge(name, 1, Integer::sum);
+            }
+            for (String group : favoriteGroups) {
+                int count = counts.getOrDefault(group, 0);
+                LinearLayout row = new LinearLayout(MainActivity.this);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(12), dp(10), dp(8), dp(10));
+                row.setBackground(card(14));
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+                params.bottomMargin = dp(10);
+                groups.addView(row, params);
+
+                ImageView folder = icon(R.drawable.blue_folder, ACCENT);
+                folder.setPadding(dp(11), dp(11), dp(11), dp(11));
+                folder.setBackground(shape(ACCENT_SOFT, 12));
+                row.addView(folder, new LinearLayout.LayoutParams(dp(50), dp(50)));
+
+                LinearLayout info = new LinearLayout(MainActivity.this);
+                info.setOrientation(LinearLayout.VERTICAL);
+                LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(0, -2, 1);
+                infoParams.leftMargin = dp(12);
+                row.addView(info, infoParams);
+                TextView title = homeLabel(group, 16, INK, 750);
+                title.setSingleLine(true);
+                title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                info.addView(title);
+                info.addView(homeLabel(count + " 项", 12, INK2, 450));
+
+                TextView more = homeLabel("⋯", 22, INK, 750);
+                more.setGravity(Gravity.CENTER);
+                more.setContentDescription(group + "的分组操作");
+                more.setOnClickListener(v -> editGroup(group, count, v, groups));
+                row.addView(more, new LinearLayout.LayoutParams(dp(44), dp(48)));
+            }
+        }
+
+        private void editGroup(String group, int count, View anchor, LinearLayout groups) {
+            LinearLayout options = new LinearLayout(MainActivity.this);
+            options.setOrientation(LinearLayout.VERTICAL);
+            PopupWindow popup = recordPopup(options, 154);
+            options.setPadding(dp(5), dp(5), dp(5), dp(5));
+            addRecordAction(options, "重命名", R.drawable.group_edit, INK, () -> {
+                popup.dismiss();
+                editGroupName(group, name -> renderManagedGroups(groups));
+            });
+            addRecordAction(options, "删除分组", R.drawable.dialog_trash, DANGER, () -> {
+                popup.dismiss();
+                android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
+                LinearLayout panel = sheetPanel("删除分组？", null);
+                TextView summary = homeLabel(group + " · " + count + " 项", 14, INK, 650);
+                summary.setGravity(Gravity.CENTER_VERTICAL);
+                summary.setPadding(dp(12), dp(10), dp(12), dp(10));
+                Drawable folder = getDrawable(R.drawable.blue_folder).mutate();
+                folder.setTint(DANGER);
+                folder.setBounds(0, 0, dp(20), dp(20));
+                summary.setCompoundDrawablesRelative(folder, null, null, null);
+                summary.setCompoundDrawablePadding(dp(10));
+                summary.setBackground(shape(ACCENT_SOFT, 10));
+                LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(-1, -2);
+                summaryParams.topMargin = dp(12);
+                panel.addView(summary, summaryParams);
+                TextView detail = homeLabel("组内素材会移到「未分组」。", 14, INK2, 450);
+                LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
+                detailParams.topMargin = dp(12);
+                panel.addView(detail, detailParams);
+                dialogActions(dialog, panel, "保留分组", "删除分组", true, null, () -> {
+                    favoriteGroups.remove(group);
+                    favoriteAssignments.values().removeIf(group::equals);
+                    if (group.equals(activeGroup)) activeGroup = null;
+                    saveFavoriteGroups();
+                    setSelecting(false);
+                    renderManagedGroups(groups);
+                });
+                presentBottomSheet(dialog, panel);
+            });
+            popup.showAsDropDown(anchor, 0, dp(4), Gravity.END);
         }
 
         private void editGroupName(String oldName, java.util.function.Consumer<String> onSaved) {
             android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
-            LinearLayout panel = dialogPanel(R.drawable.dialog_heart, false, oldName == null ? "新建分组" : "重命名分组", null);
+            boolean creating = oldName == null;
+            LinearLayout panel = sheetPanel(creating ? "新建分组" : "重命名分组", null);
+            panel.setFocusableInTouchMode(true);
+
+            TextView fieldLabel = homeLabel("分组名称", 12, ACCENT, 650);
+            LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(-1, -2);
+            labelParams.topMargin = dp(14);
+            panel.addView(fieldLabel, labelParams);
             EditText name = new EditText(MainActivity.this);
             name.setSingleLine(true);
-            name.setHint("分组名称");
+            name.setHint("例如：壁纸");
             name.setTextColor(INK);
             name.setHintTextColor(INK3);
-            name.setText(oldName);
-            if (oldName != null) name.selectAll();
-            panel.addView(name);
-            dialogActions(dialog, panel, "取消", "保存", false, null, null);
+            name.setTextSize(15);
+            name.setBackground(outlined(10, SURFACE));
+            name.setPadding(dp(12), 0, dp(12), 0);
+            name.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+            name.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(24)});
+            if (!creating) name.setText(oldName);
+            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, dp(46));
+            nameParams.topMargin = dp(5);
+            panel.addView(name, nameParams);
+            TextView length = homeLabel("", 11, INK2, 450);
+            length.setGravity(Gravity.END);
+            length.setPadding(0, dp(4), dp(2), 0);
+            panel.addView(length);
+
+            dialogActions(dialog, panel, "取消", creating ? "创建" : "保存", false, null, null);
             LinearLayout buttons = (LinearLayout) panel.getChildAt(panel.getChildCount() - 1);
-            buttons.getChildAt(1).setOnClickListener(v -> {
+            Button saveName = (Button) buttons.getChildAt(1);
+            Runnable update = () -> {
+                length.setText(name.length() + " / 24");
+                saveName.setEnabled(!name.getText().toString().trim().isEmpty());
+                saveName.setAlpha(saveName.isEnabled() ? 1f : 0.45f);
+            };
+            name.addTextChangedListener(new TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+                @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
+                @Override public void afterTextChanged(Editable text) { update.run(); }
+            });
+            saveName.setOnClickListener(v -> {
                 String value = name.getText().toString().trim();
-                if (value.isEmpty() || value.length() > 24) {
-                    name.setError("请输入 1 到 24 个字符");
-                    return;
-                }
+                if (value.isEmpty()) return;
                 if (!value.equals(oldName) && (favoriteGroups.contains(value) || value.equals("全部收藏") || value.equals("未分组"))) {
                     name.setError("分组名称已存在");
                     return;
                 }
                 if (!value.equals(oldName)) {
-                    if (oldName != null) {
-                        favoriteGroups.remove(oldName);
+                    if (creating) favoriteGroups.add(value);
+                    else {
+                        ArrayList<String> order = new ArrayList<>(favoriteGroups);
+                        order.set(order.indexOf(oldName), value);
+                        favoriteGroups.clear();
+                        favoriteGroups.addAll(order);
                         favoriteAssignments.replaceAll((hash, group) -> oldName.equals(group) ? value : group);
                         if (oldName.equals(activeGroup)) activeGroup = value;
                     }
-                    favoriteGroups.add(value);
                     saveFavoriteGroups();
                 }
                 dismissCardDialog(dialog, () -> onSaved.accept(value));
             });
-            showCardDialog(dialog, panel);
+            name.setOnEditorActionListener((view, actionId, event) -> {
+                if (actionId != android.view.inputmethod.EditorInfo.IME_ACTION_DONE || !saveName.isEnabled()) return false;
+                saveName.performClick();
+                return true;
+            });
+            update.run();
+            panel.requestFocus();
+            dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+            presentBottomSheet(dialog, panel);
+        }
+
+        private void renderGroupChips() {
+            groupChips.removeAllViews();
+            ArrayList<String> names = new ArrayList<>();
+            names.add(null);
+            names.addAll(favoriteGroups);
+            names.add("");
+            for (String name : names) {
+                boolean active = java.util.Objects.equals(activeGroup, name);
+                Button chip = shareButton(groupName(name), v -> {
+                    if (busy || java.util.Objects.equals(activeGroup, name)) return;
+                    activeGroup = name;
+                    category = 0;
+                    positionFilter(false);
+                    setSelecting(false);
+                });
+                chip.setSingleLine(true);
+                chip.setMinimumWidth(0);
+                chip.setMinWidth(0);
+                chip.setMaxWidth(dp(156));
+                chip.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                chip.setPadding(dp(13), 0, dp(13), 0);
+                chip.setTextColor(active ? Color.WHITE : INK2);
+                chip.setBackground(shape(active ? ACCENT : TRACK, 18));
+                chip.setSelected(active);
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, dp(34));
+                params.rightMargin = dp(6);
+                groupChips.addView(chip, params);
+            }
         }
 
         private void render() {
@@ -5953,7 +6328,8 @@ public class MainActivity extends Activity {
                     counts[type(item)]++;
                 }
             }
-            if (groupFilter != null) groupFilter.setText(groupName(activeGroup) + " ▾");
+            if (groupChips != null) renderGroupChips();
+            if (kuaishouPostStatus != null) kuaishouPostStatus.update(kuaishouPostRecord);
             for (int i = 0; i < filters.length; i++) {
                 boolean active = category == i;
                 filters[i].setSelected(active);
@@ -6056,7 +6432,10 @@ public class MainActivity extends Activity {
                 button.setEnabled((imported && !selecting ? !items.isEmpty() : !selected.isEmpty()) && !busy);
                 button.setAlpha(button.isEnabled() ? 1f : 0.45f);
             }
-            if (move != null) move.setEnabled(!busy && !selected.isEmpty());
+            if (move != null) {
+                move.setEnabled(!busy && !selected.isEmpty());
+                move.setAlpha(move.isEnabled() ? 1f : 0.45f);
+            }
         }
 
         private void confirmRemove() {
@@ -6327,6 +6706,7 @@ public class MainActivity extends Activity {
         if (showingWechat && currentWechatImport == null) showHome();
         else if (showingWechat) favoriteScreen.back();
         else if (showingKuaishou) favoriteScreen.back();
+        else if (showingGroupManager) favoriteScreen.leaveGroupManager();
         else if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) returnToRecordsOrigin();
