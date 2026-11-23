@@ -100,6 +100,7 @@ public class MainActivity extends Activity {
     private boolean showingWechat;
     private boolean showingKuaishou;
     private boolean kuaishouRecords;
+    private final java.util.HashMap<String, String> recordSearches = new java.util.HashMap<>();
     private FavoritesScreen kuaishouRecordsOrigin;
     private WechatImportRecord currentWechatImport;
     private static class WechatImportRecord {
@@ -193,6 +194,8 @@ public class MainActivity extends Activity {
     private boolean showingSettings;
     private boolean showingFavorites;
     private FavoritesScreen favoriteScreen;
+    private final java.util.LinkedHashSet<String> favoriteGroups = new java.util.LinkedHashSet<>();
+    private final java.util.HashMap<String, String> favoriteAssignments = new java.util.HashMap<>();
     private Runnable returnFromFavorites;
     private boolean recordsFromSettings;
     private int douyinPageDelayMs = 2000;
@@ -273,9 +276,21 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static class PostFailure {
+        final JSONArray urls;
+        final boolean video;
+
+        PostFailure(JSONArray urls, boolean video) {
+            this.urls = urls;
+            this.video = video;
+        }
+    }
+
     private static class ScanRecord {
         boolean kuaishou;
         boolean workMedia;
+        int postTotal;
+        final ArrayList<PostFailure> postFailures = new ArrayList<>();
         String caption = "";
         final String id;
         final String link;
@@ -329,12 +344,74 @@ public class MainActivity extends Activity {
         buildReader();
         buildStage();
         loadRecords();
-        if (Intent.ACTION_SEND.equals(getIntent().getAction())) {
-            String shared = getIntent().getStringExtra(Intent.EXTRA_TEXT);
-            if (shared != null) input.setText(shared);
-        }
+        loadFavoriteGroups();
         showHome();
         updateSystemBars();
+        if (state == null) handleSharedPost(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleSharedPost(intent);
+    }
+
+    private void handleSharedPost(Intent intent) {
+        if (!Intent.ACTION_SEND.equals(intent.getAction())) return;
+        CharSequence sharedText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        if (sharedText == null) return;
+        String shared = sharedText.toString().replace("\\:", ":");
+        String douyin = extractLink(shared, false);
+        String xhs = extractLink(shared, true);
+        String kuaishou = KuaishouPost.extractLink(shared);
+        int first = Integer.MAX_VALUE;
+        int platform = -1;
+        String[] links = {WorkMedia.isShareLink(douyin, false) ? douyin : null,
+                WorkMedia.isShareLink(xhs, true) ? xhs : null, kuaishou};
+        for (int i = 0; i < links.length; i++) {
+            if (links[i] == null) continue;
+            int start = shared.indexOf(links[i]);
+            if (start >= 0 && start < first) {
+                first = start;
+                platform = i;
+            }
+        }
+        if (platform < 0) {
+            showTopNotice("分享内容中没有找到抖音、小红书或快手作品链接");
+            return;
+        }
+        int selectedPlatform = platform;
+        String link = links[platform];
+        String name = new String[]{"抖音", "小红书", "快手"}[platform];
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.extract_link, false, "选择提取方式", name + "作品");
+        addRetryChoice(panel, "提取作品正文", "提取作品的图片或视频", R.drawable.extract_download,
+                () -> dismissCardDialog(dialog, () -> openSharedPost(link, selectedPlatform, false)));
+        if (platform != 2) {
+            addRetryChoice(panel, "提取评论素材", "打开作品，进入评论区后点击扫描", R.drawable.extract_scan,
+                    () -> dismissCardDialog(dialog, () -> openSharedPost(link, selectedPlatform, true)));
+        }
+        dialogActions(dialog, panel, "取消", null, false, null, null);
+        showCardDialog(dialog, panel);
+    }
+
+    private void openSharedPost(String link, int platform, boolean comments) {
+        if (platform == 2) {
+            showKuaishou();
+            favoriteScreen.kuaishouLink.setText(link);
+            favoriteScreen.kuaishouFetch.performClick();
+        } else {
+            if (!comments && !extractWorkButton.isEnabled()) {
+                showTopNotice("有作品正在提取，请完成后再试");
+                return;
+            }
+            stopScanForNavigation();
+            resetPages();
+            selectMode(platform == 1);
+            input.setText(link);
+            if (comments) openLink();
+            else startWorkExtraction();
+        }
     }
 
     private TextView label(String value, int size, int color, boolean bold) {
@@ -2277,12 +2354,26 @@ public class MainActivity extends Activity {
         TextView heading = label(kuaishouRecords ? "快手正文记录" : "扫描记录", 16, INK, true);
         heading.setGravity(Gravity.CENTER);
         toolbar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        int visibleCount = 0;
-        for (ScanRecord record : records) if (matchesRecordPlatform(record)) visibleCount++;
-        TextView total = label("共 " + visibleCount + " 条", 12, INK2, true);
+        TextView total = label("", 12, INK2, true);
         total.setGravity(Gravity.CENTER);
         total.setBackground(card(16));
         toolbar.addView(total, new LinearLayout.LayoutParams(dp(66), dp(32)));
+
+        root.setFocusableInTouchMode(true);
+        String platform = kuaishouRecords ? "kuaishou" : xhsMode ? "xhs" : "douyin";
+        EditText search = new EditText(this);
+        search.setSingleLine(true);
+        search.setHint("搜索标题、链接、平台或提取类型");
+        search.setTextSize(13);
+        search.setTextColor(INK);
+        search.setHintTextColor(INK3);
+        search.setBackground(card(12));
+        search.setPadding(dp(14), 0, dp(14), 0);
+        search.setText(recordSearches.getOrDefault(platform, ""));
+        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, dp(44));
+        searchParams.setMargins(dp(20), dp(4), dp(20), dp(8));
+        root.addView(search, searchParams);
+        root.requestFocus();
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -2292,7 +2383,16 @@ public class MainActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(20), dp(6), dp(20), dp(28));
         scroll.addView(page);
-        addRecordCards(page, total);
+        addRecordCards(page, total, search);
+        search.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable text) {
+                recordSearches.put(platform, text.toString());
+                addRecordCards(page, total, search);
+                scroll.scrollTo(0, 0);
+            }
+        });
         presentSecondary(root);
     }
 
@@ -2310,16 +2410,25 @@ public class MainActivity extends Activity {
         return kuaishouRecords ? record.kuaishou : !record.kuaishou && isXhsLink(record.link) == xhsMode;
     }
 
-    private void addRecordCards(LinearLayout page, TextView total) {
+    private void addRecordCards(LinearLayout page, TextView total, EditText search) {
+        page.removeAllViews();
+        String query = search.getText().toString().trim().toLowerCase(Locale.ROOT);
         TextView hint = label("本机暂存 · 删除记录不会影响已保存到下载目录的文件", 11, INK3, false);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
         hintParams.topMargin = dp(2);
         hintParams.bottomMargin = dp(14);
         page.addView(hint, hintParams);
         ArrayList<ScanRecord> visibleRecords = new ArrayList<>();
-        for (ScanRecord record : records) if (matchesRecordPlatform(record)) visibleRecords.add(record);
+        for (ScanRecord record : records) {
+            if (!matchesRecordPlatform(record)) continue;
+            String platform = record.kuaishou ? "快手" : isXhsLink(record.link) ? "小红书" : "抖音";
+            String type = record.kuaishou || record.workMedia ? "作品正文 提取作品" : "评论扫描 扫描评论";
+            String searchable = (record.caption + " " + record.link + " " + platform + " " + type).toLowerCase(Locale.ROOT);
+            if (java.util.Arrays.stream(query.split("\\s+")).allMatch(searchable::contains)) visibleRecords.add(record);
+        }
+        total.setText("共 " + visibleRecords.size() + " 条");
         if (visibleRecords.isEmpty()) {
-            TextView empty = label(kuaishouRecords ? "读取过的快手作品会显示在这里。" : "扫描过的作品会暂存在这里，方便随时查看和删除。", 12, INK3, false);
+            TextView empty = label(!query.isEmpty() ? "没有符合条件的记录。" : kuaishouRecords ? "读取过的快手作品会显示在这里。" : "扫描过的作品会暂存在这里，方便随时查看和删除。", 12, INK3, false);
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(dp(18), dp(26), dp(18), dp(26));
             empty.setBackground(card(16));
@@ -2356,7 +2465,7 @@ public class MainActivity extends Activity {
             head.addView(info, infoParams);
             String shortLink = record.link.replaceFirst("^https?://", "").replaceFirst("\\?.*$", "").replaceFirst("/$", "");
             if (shortLink.length() > 24) shortLink = shortLink.substring(0, 23) + "…";
-            TextView title = label(record.kuaishou && !record.caption.isEmpty() ? record.caption : shortLink, 13, INK, true);
+            TextView title = label(!record.caption.isEmpty() ? record.caption : shortLink, 13, INK, true);
             title.setSingleLine(true);
             title.setEllipsize(android.text.TextUtils.TruncateAt.END);
             info.addView(title);
@@ -2418,14 +2527,7 @@ public class MainActivity extends Activity {
             deleteParams.leftMargin = dp(12);
             delete.setOnClickListener(v -> confirmDelete(record, () -> {
                 if (!showingRecords || !page.isAttachedToWindow()) return;
-                page.removeView(card);
-                int remaining = 0;
-                for (ScanRecord item : records) if (matchesRecordPlatform(item)) remaining++;
-                total.setText("共 " + remaining + " 条");
-                if (remaining == 0) {
-                    page.removeAllViews();
-                    addRecordCards(page, total);
-                }
+                addRecordCards(page, total, search);
             }));
             actions.addView(delete, deleteParams);
 
@@ -2464,13 +2566,14 @@ public class MainActivity extends Activity {
             status.setText(scanning ? "正在扫描，离开本页不会中断" : "扫描已暂停，已提取素材保留在暂存记录中");
         } else {
             scanButton.setText(record.workMedia ? "扫描评论" : canResume(record) ? "继续扫描" : "重新扫描");
-            status.setText(record.workMedia ? "已打开作品正文记录" : canResume(record) ? "已打开本机暂存记录，可继续扫描"
+            status.setText(record.workMedia ? postProgress(record) : canResume(record) ? "已打开本机暂存记录，可继续扫描"
                     : "已打开本机暂存记录；重新扫描会生成新记录");
         }
         showReader();
         renderResults();
         updateResultLabels();
-        readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
+        readerScroll.post(() -> readerScroll.smoothScrollTo(0,
+                record.workMedia && !record.postFailures.isEmpty() ? 0 : resultAnchor.getTop()));
     }
 
     private boolean canResume(ScanRecord record) {
@@ -2848,7 +2951,19 @@ public class MainActivity extends Activity {
         scanDetails.setMinHeight(dp(32));
         scanDetails.setVisibility(View.GONE);
         scanDetails.setOnClickListener(v -> {
-            if (currentRecord != null) showScanDetails(currentRecord);
+            if (currentRecord != null && currentRecord.workMedia) {
+                ScanRecord record = currentRecord;
+                retryPost(record, () -> {
+                    if (currentRecord != record || !showingReader) return;
+                    clearMediaSelection();
+                    media.clear();
+                    synchronized (record) { media.addAll(record.items); }
+                    renderResults();
+                    updateResultLabels();
+                    status.setText(postProgress(record));
+                });
+                updateScanCard();
+            } else if (currentRecord != null) showScanDetails(currentRecord);
         });
         scanBody.addView(scanDetails);
         status.addTextChangedListener(new TextWatcher() {
@@ -2947,6 +3062,7 @@ public class MainActivity extends Activity {
                     String id = UUID.randomUUID().toString();
                     ScanRecord record = new ScanRecord(id, activeLink == null ? page : activeLink,
                             System.currentTimeMillis(), new File(recordsFolder(), id));
+                    record.caption = currentNoteTitle(page);
                     currentRecord = record;
                     record.includeReplies = douyinReadReplies;
                     records.add(0, record);
@@ -3074,7 +3190,7 @@ public class MainActivity extends Activity {
         saveButton.setOnClickListener(v -> {
             ArrayList<Media> snapshot = new ArrayList<>();
             for (Media item : media) if (!selectingMedia || selectedMedia.contains(item)) snapshot.add(item);
-            saveMediaBatch(snapshot, this::showSaveBatchResult);
+            chooseMediaSave(snapshot, currentRecord, null, null);
         });
         saveBar.addView(saveButton, new LinearLayout.LayoutParams(dp(118), dp(40)));
         shareSelectedButton = shareButton("分享", v -> {
@@ -3119,7 +3235,14 @@ public class MainActivity extends Activity {
         }
         ScanRecord record = currentRecord;
         boolean showCommentDetails = record != null && !record.workMedia;
-        scanDetails.setVisibility(showCommentDetails ? View.VISIBLE : View.GONE);
+        if (record != null && record.workMedia) {
+            synchronized (record) {
+                scanDetails.setText("重试失败项");
+                scanDetails.setVisibility(!record.processingPage && !record.postFailures.isEmpty() ? View.VISIBLE : View.GONE);
+            }
+        } else {
+            scanDetails.setVisibility(showCommentDetails ? View.VISIBLE : View.GONE);
+        }
         scanCountLine.setVisibility(showCommentDetails ? View.VISIBLE : View.GONE);
         if (!showCommentDetails) return;
         scanCountLine.setText(scanCounts(record) + (scanning ? "\n已找到 " + media.size() + " 个素材" : ""));
@@ -3249,7 +3372,7 @@ public class MainActivity extends Activity {
         wp.rightMargin = dp(8);
         row.addView(words, wp);
         words.addView(homeLabel(title, 13, INK, 650));
-        words.addView(homeLabel(detail, 11, INK2, 400));
+        if (!detail.isEmpty()) words.addView(homeLabel(detail, 11, INK2, 400));
         row.addView(icon(R.drawable.extract_chevron, INK2), new LinearLayout.LayoutParams(dp(14), dp(14)));
         row.setOnClickListener(v -> action.run());
         pressFeedback(row);
@@ -3473,6 +3596,15 @@ public class MainActivity extends Activity {
                 record.kuaishou = "kuaishou".equals(data.optString("platform"));
                 record.workMedia = data.optBoolean("workMedia");
                 record.caption = data.optString("caption");
+                record.postTotal = Math.max(0, data.optInt("postTotal"));
+                JSONArray postFailures = data.optJSONArray("postFailures");
+                if (record.kuaishou || record.workMedia) {
+                    for (int i = 0; postFailures != null && i < postFailures.length(); i++) {
+                        JSONObject failure = postFailures.optJSONObject(i);
+                        JSONArray urls = failure == null ? null : failure.optJSONArray("urls");
+                        if (urls != null) record.postFailures.add(new PostFailure(urls, failure.optBoolean("video")));
+                    }
+                }
                 record.scanned = data.optInt("scanned");
                 record.mainScanned = data.optInt("mainScanned");
                 record.replyScanned = data.optInt("replyScanned");
@@ -3581,9 +3713,19 @@ public class MainActivity extends Activity {
             data.put("createdAt", record.createdAt);
             if (record.kuaishou) {
                 data.put("platform", "kuaishou");
-                data.put("caption", record.caption);
             }
             if (record.workMedia) data.put("workMedia", true);
+            if (!record.caption.isEmpty()) data.put("caption", record.caption);
+            if (record.kuaishou || record.workMedia) {
+                data.put("postTotal", record.postTotal);
+                JSONArray pending = new JSONArray();
+                synchronized (record) {
+                    for (PostFailure failure : record.postFailures) {
+                        pending.put(new JSONObject().put("video", failure.video).put("urls", failure.urls));
+                    }
+                }
+                data.put("postFailures", pending);
+            }
             data.put("scanned", record.scanned);
             data.put("mainScanned", record.mainScanned);
             data.put("replyScanned", record.replyScanned);
@@ -3700,7 +3842,7 @@ public class MainActivity extends Activity {
 
     private void startWorkExtraction() {
         if (scanning || currentRecord != null && currentRecord.processingPage) {
-            showTopNotice("请先暂停评论扫描，等当前页保存完毕");
+            showTopNotice("请暂停扫描并等待当前操作完成");
             return;
         }
         String link = extractLink(input.getText().toString(), xhsMode);
@@ -3725,6 +3867,11 @@ public class MainActivity extends Activity {
     private boolean isCurrentWork(String link, int token) {
         return showingReader && requestToken == token && link.equals(activeLink)
                 && link.equals(extractLink(input.getText().toString(), xhsMode));
+    }
+
+    private String currentNoteTitle(String page) {
+        String title = WorkMedia.pageId(page, xhsMode) == null ? null : browser.getTitle();
+        return title == null ? "" : title.replaceFirst("\\s*-\\s*(?:抖音|小红书)\\s*$", "").trim();
     }
 
     private void pollWorkMedia(String link, boolean xhs, int token, long deadline) {
@@ -3754,7 +3901,8 @@ public class MainActivity extends Activity {
                     if (page.equals(browser.getUrl()) && pageId.equals(data.optString("id"))
                             && (images.length() > 0 || videos.length() > 0)) {
                         extractWorkButton.setText("正在保存作品…");
-                        worker.execute(() -> saveWorkMedia(link, token, images, videos));
+                        String title = data.optString("title");
+                        worker.execute(() -> saveWorkMedia(link, token, title, images, videos));
                         return;
                     }
                 } catch (org.json.JSONException ignored) { }
@@ -3775,45 +3923,93 @@ public class MainActivity extends Activity {
         extractWorkButton.setText("提取作品");
     }
 
-    private void saveWorkMedia(String link, int token, JSONArray images, JSONArray videos) {
-        String id = UUID.randomUUID().toString();
-        ScanRecord record = new ScanRecord(id, link, System.currentTimeMillis(), new File(recordsFolder(), id));
-        record.workMedia = true;
-        int saved = 0;
-        for (int i = 0; i < images.length(); i++) {
-            JSONArray variants = images.optJSONArray(i);
-            if (variants == null) continue;
-            for (int j = 0; j < variants.length(); j++) {
+    private String postProgress(ScanRecord record) {
+        synchronized (record) {
+            if (record.postTotal == 0) return "已提取 " + record.items.size() + " 个作品素材";
+            int failed = record.postFailures.size();
+            return "已发现 " + record.postTotal + " 项 · 成功 " + (record.postTotal - failed) + " · 失败 " + failed;
+        }
+    }
+
+    private boolean downloadPostFailures(ScanRecord record) {
+        ArrayList<PostFailure> pending;
+        synchronized (record) { pending = new ArrayList<>(record.postFailures); }
+        ArrayList<PostFailure> remaining = new ArrayList<>();
+        ArrayList<Media> downloaded = new ArrayList<>();
+        for (PostFailure failure : pending) {
+            Media media = null;
+            for (int i = 0; i < failure.urls.length(); i++) {
                 try {
-                    Media item = readPostImage(new URL(variants.getString(j)), record);
-                    if (record.hashes.add(item.hash)) record.items.add(item);
-                    saved++;
+                    URL url = new URL(failure.urls.getString(i));
+                    media = failure.video ? readPostVideo(url, record) : readPostImage(url, record);
                     break;
                 } catch (Exception ignored) { }
             }
+            if (media == null) remaining.add(failure);
+            else downloaded.add(media);
         }
-        for (int i = 0; i < videos.length(); i++) {
-            try {
-                Media item = readPostVideo(new URL(videos.getString(i)), record);
-                if (record.hashes.add(item.hash)) record.items.add(item);
-                saved++;
-                break;
-            } catch (Exception ignored) { }
+        synchronized (record) {
+            boolean previouslyComplete = record.complete;
+            ArrayList<Media> added = new ArrayList<>();
+            for (Media item : downloaded) {
+                if (record.hashes.add(item.hash)) added.add(item);
+            }
+            record.items.addAll(added);
+            record.postFailures.clear();
+            record.postFailures.addAll(remaining);
+            record.complete = remaining.isEmpty();
+            if (persistRecord(record)) return true;
+            record.complete = previouslyComplete;
+            record.postFailures.clear();
+            record.postFailures.addAll(pending);
+            for (Media item : added) {
+                record.items.remove(item);
+                record.hashes.remove(item.hash);
+                item.file.delete();
+            }
+            return false;
         }
-        int failed = images.length() + (videos.length() > 0 ? 1 : 0) - saved;
-        record.complete = failed == 0;
-        boolean stored = !record.items.isEmpty() && persistRecord(record);
+    }
+
+    private void retryPost(ScanRecord record, Runnable onFinished) {
+        synchronized (record) {
+            if (record.processingPage || record.postFailures.isEmpty()) return;
+            record.processingPage = true;
+        }
+        worker.execute(() -> {
+            boolean stored = downloadPostFailures(record);
+            runOnUiThread(() -> {
+                record.processingPage = false;
+                onFinished.run();
+                if (!stored) showTopNotice("无法保存重试结果，请检查存储空间");
+                else if (!record.complete) showTopNotice("仍有素材下载失败。若地址已失效，请重新提取作品");
+            });
+        });
+    }
+
+    private void saveWorkMedia(String link, int token, String title, JSONArray images, JSONArray videos) {
+        String id = UUID.randomUUID().toString();
+        ScanRecord record = new ScanRecord(id, link, System.currentTimeMillis(), new File(recordsFolder(), id));
+        record.workMedia = true;
+        record.caption = title.trim();
+        for (int i = 0; i < images.length(); i++) {
+            JSONArray urls = images.optJSONArray(i);
+            if (urls != null) record.postFailures.add(new PostFailure(urls, false));
+        }
+        if (videos.length() > 0) record.postFailures.add(new PostFailure(videos, true));
+        record.postTotal = record.postFailures.size();
+        boolean stored = downloadPostFailures(record);
         if (!stored) deleteRecordFiles(record);
         runOnUiThread(() -> {
             finishWorkExtraction();
             if (stored) records.add(0, record);
             if (!isCurrentWork(link, token)) return;
             if (!stored) {
-                showTopNotice(record.items.isEmpty() ? "作品素材下载失败，请检查网络后重试" : "无法保存作品记录，请检查存储空间");
+                showTopNotice("无法保存作品记录，请检查存储空间");
                 return;
             }
             showRecord(record);
-            showBottomNotice("已提取 " + record.items.size() + " 个作品素材" + (failed > 0 ? "，" + failed + " 项下载失败" : ""));
+            showBottomNotice(postProgress(record));
         });
     }
 
@@ -3930,6 +4126,7 @@ public class MainActivity extends Activity {
             String id = UUID.randomUUID().toString();
             ScanRecord record = new ScanRecord(id, activeLink == null ? page : activeLink,
                     System.currentTimeMillis(), new File(recordsFolder(), id));
+            record.caption = currentNoteTitle(page);
             currentRecord = record;
             records.add(0, record);
             scanned = 0;
@@ -4821,6 +5018,12 @@ public class MainActivity extends Activity {
             addPreviewAction(actions, "分享", R.drawable.dialog_share, false, v -> shareMedia(Collections.singletonList(item)));
             addPreviewAction(actions, "关闭", R.drawable.dialog_close, false, v -> dismissCardDialog(dialog, null));
             addPreviewAction(actions, "保存", R.drawable.extract_download, true, v -> dismissCardDialog(dialog, () -> {
+                ScanRecord work = showingReader ? currentRecord : showingKuaishou && favoriteScreen != null
+                        ? favoriteScreen.kuaishouPostRecord : null;
+                if (canOrganizeSave(work)) {
+                    chooseMediaSave(new ArrayList<>(Collections.singletonList(item)), work, null, null);
+                    return;
+                }
                 worker.execute(() -> {
                     try {
                         saveToDownloads(item);
@@ -4851,6 +5054,27 @@ public class MainActivity extends Activity {
         return favoriteFile(item).isFile();
     }
 
+    private void loadFavoriteGroups() {
+        try {
+            JSONObject data = new JSONObject(getPreferences(MODE_PRIVATE).getString("favorite_groups", "{}"));
+            JSONArray names = data.optJSONArray("names");
+            for (int i = 0; names != null && i < names.length(); i++) favoriteGroups.add(names.getString(i));
+            JSONObject assignments = data.optJSONObject("assignments");
+            if (assignments != null) assignments.keys().forEachRemaining(hash -> {
+                String name = assignments.optString(hash);
+                if (favoriteGroups.contains(name)) favoriteAssignments.put(hash, name);
+            });
+        } catch (org.json.JSONException ignored) { }
+    }
+
+    private void saveFavoriteGroups() {
+        try {
+            JSONObject data = new JSONObject().put("names", new JSONArray(favoriteGroups))
+                    .put("assignments", new JSONObject(favoriteAssignments));
+            getPreferences(MODE_PRIVATE).edit().putString("favorite_groups", data.toString()).apply();
+        } catch (org.json.JSONException ignored) { }
+    }
+
     private void toggleFavorite(Media item) {
         boolean adding = !isFavorite(item);
         worker.execute(() -> {
@@ -4873,6 +5097,7 @@ public class MainActivity extends Activity {
             } catch (Exception error) { message = "收藏操作失败：" + error.getMessage(); }
             String result = message;
             runOnUiThread(() -> {
+                if (!isFavorite(item) && favoriteAssignments.remove(item.hash) != null) saveFavoriteGroups();
                 if (adding && isFavorite(item) && (showingReader || showingWechat || showingKuaishou) && !isFinishing()) {
                     if (showingKuaishou) {
                         FavoritesScreen screen = favoriteScreen;
@@ -4928,14 +5153,65 @@ public class MainActivity extends Activity {
         new FavoritesScreen().show();
     }
 
-    private void saveMediaBatch(ArrayList<Media> items, java.util.function.BiConsumer<Integer, Integer> onResult) {
+    private static final String SAVE_DIRECTORY = Environment.DIRECTORY_DOWNLOADS + "/DouYinGetting";
+
+    private boolean canOrganizeSave(ScanRecord record) {
+        return record != null && (record.kuaishou || WorkMedia.isShareLink(record.link, isXhsLink(record.link)));
+    }
+
+    private void chooseMediaSave(ArrayList<Media> items, ScanRecord record, Runnable before, Runnable after) {
+        if (items.isEmpty()) {
+            showBottomNotice("没有可保存的文件");
+            return;
+        }
+        if (!canOrganizeSave(record)) {
+            saveMediaBatch(items, SAVE_DIRECTORY, null, before, after);
+            return;
+        }
+        String platform = record.kuaishou ? "快手" : isXhsLink(record.link) ? "小红书" : "抖音";
+        String name = WorkExport.name(record.caption, record.link);
+        String path = SAVE_DIRECTORY + "/" + platform;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.extract_download, false, "选择保存方式", "保存 " + items.size() + " 项素材");
+        addRetryChoice(panel, "直接保存", "下载 / DouYinGetting", R.drawable.extract_download,
+                () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, SAVE_DIRECTORY, null, before, after)));
+        addRetryChoice(panel, "按作品建文件夹", platform + " / " + name, R.drawable.dialog_file,
+                () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, path + "/" + name, null, before, after)));
+        addRetryChoice(panel, "打包 ZIP", platform + " / " + name + ".zip", R.drawable.dialog_file,
+                () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, path, name + ".zip", before, after)));
+        dialogActions(dialog, panel, "取消", null, false, null, null);
+        showCardDialog(dialog, panel);
+    }
+
+    private void saveMediaBatch(ArrayList<Media> items, String directory, String zipName, Runnable before, Runnable after) {
+        if (before != null) before.run();
         worker.execute(() -> {
+            if (zipName != null) {
+                try {
+                    ArrayList<File> files = new ArrayList<>();
+                    for (Media item : items) files.add(item.file);
+                    writeDownload(zipName, "application/zip", directory, out -> WorkExport.writeZip(out, files));
+                    runOnUiThread(() -> {
+                        if (after != null) after.run();
+                        showBottomNotice("已保存 ZIP · " + items.size() + " 项素材");
+                    });
+                } catch (Exception error) {
+                    runOnUiThread(() -> {
+                        if (after != null) after.run();
+                        showMessage(R.drawable.extract_download, "ZIP 未能保存", fileFailureReason(error));
+                    });
+                }
+                return;
+            }
             int saved = 0;
             for (Media item : items) {
-                try { saveToDownloads(item); saved++; } catch (Exception ignored) { }
+                try { saveToDownloads(item, directory); saved++; } catch (Exception ignored) { }
             }
             int success = saved, failed = items.size() - saved;
-            runOnUiThread(() -> onResult.accept(success, failed));
+            runOnUiThread(() -> {
+                if (after != null) after.run();
+                showSaveBatchResult(success, failed);
+            });
         });
     }
 
@@ -5013,6 +5289,9 @@ public class MainActivity extends Activity {
         private final boolean imported;
         private final WechatImportRecord wechatRecord;
         private final ScanRecord savedKuaishou;
+        private ScanRecord kuaishouPostRecord;
+        private EditText kuaishouLink;
+        private Button kuaishouFetch;
         FavoritesScreen() { this(false); }
         FavoritesScreen(boolean wechat) { this(wechat, false, null); }
         FavoritesScreen(boolean wechat, boolean kuaishou, ScanRecord savedKuaishou) {
@@ -5021,6 +5300,7 @@ public class MainActivity extends Activity {
             imported = wechat || kuaishou;
             wechatRecord = wechat ? currentWechatImport : null;
             this.savedKuaishou = savedKuaishou;
+            kuaishouPostRecord = savedKuaishou;
         }
         private final LinearLayout root = new LinearLayout(MainActivity.this);
         private final LinearLayout list = new LinearLayout(MainActivity.this);
@@ -5039,6 +5319,9 @@ public class MainActivity extends Activity {
         private Button share;
         private Button save;
         private Button remove;
+        private Button move;
+        private TextView groupFilter;
+        private String activeGroup;
         private int category;
         private boolean selecting;
         private boolean busy;
@@ -5058,12 +5341,14 @@ public class MainActivity extends Activity {
 
         private void addKuaishouInput(LinearLayout content) {
             EditText link = new EditText(MainActivity.this);
+            kuaishouLink = link;
             link.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
             link.setHint("粘贴快手作品链接或分享文案");
             content.addView(readerLinkRow(link, () -> KuaishouPost.extractLink(link.getText().toString())),
                     new LinearLayout.LayoutParams(-1, dp(46)));
 
             Button fetch = shareButton("读取正文", v -> {});
+            kuaishouFetch = fetch;
             fetch.setBackground(shape(ACCENT, 12));
             fetch.setTextSize(14);
             fetch.setTypeface(homeTypeface(700));
@@ -5091,6 +5376,40 @@ public class MainActivity extends Activity {
             progressParams.leftMargin = dp(12);
             statusCard.addView(progress, progressParams);
 
+            Button retry = shareButton("重试失败项", v -> {});
+            LinearLayout.LayoutParams retryParams = new LinearLayout.LayoutParams(-1, dp(40));
+            retryParams.topMargin = dp(8);
+            content.addView(retry, retryParams);
+            Runnable updateRetry = () -> {
+                ScanRecord record = kuaishouPostRecord;
+                if (record == null) retry.setVisibility(View.GONE);
+                else synchronized (record) {
+                    retry.setVisibility(record.postFailures.isEmpty() ? View.GONE : View.VISIBLE);
+                }
+            };
+            updateRetry.run();
+            retry.setOnClickListener(v -> {
+                ScanRecord record = kuaishouPostRecord;
+                if (busy || record == null || record.processingPage) return;
+                busy = true;
+                fetch.setEnabled(false);
+                retry.setEnabled(false);
+                progress.setText("正在重试失败素材…");
+                updateActions();
+                retryPost(record, () -> {
+                    busy = false;
+                    fetch.setEnabled(true);
+                    retry.setEnabled(true);
+                    progress.setText(postProgress(record));
+                    synchronized (record) {
+                        items.clear();
+                        items.addAll(record.items);
+                    }
+                    updateRetry.run();
+                    setSelecting(false);
+                });
+            });
+
             TextView caption = homeLabel("", 13, INK, 450);
             caption.setBackground(card(14));
             caption.setPadding(dp(12), dp(10), dp(12), dp(10));
@@ -5105,7 +5424,7 @@ public class MainActivity extends Activity {
                 link.setText(savedKuaishou.link);
                 caption.setText(savedKuaishou.caption);
                 caption.setVisibility(savedKuaishou.caption.isEmpty() ? View.GONE : View.VISIBLE);
-                progress.setText("已打开本机提取记录");
+                progress.setText(savedKuaishou.postTotal > 0 ? postProgress(savedKuaishou) : "已打开本机提取记录");
             }
             fetch.setOnClickListener(v -> {
                 if (busy) return;
@@ -5133,43 +5452,32 @@ public class MainActivity extends Activity {
                         File folder = new File(recordsFolder(), id);
                         ScanRecord record = new ScanRecord(id, post.link, System.currentTimeMillis(), folder);
                         record.kuaishou = true;
-                        for (ArrayList<java.net.URL> variants : post.images) {
-                            for (java.net.URL url : variants) {
-                                try { found.add(readPostImage(url, record)); break; }
-                                catch (Exception ignored) { }
-                            }
+                        record.caption = post.caption;
+                        for (ArrayList<URL> variants : post.images) {
+                            JSONArray urls = new JSONArray();
+                            for (URL url : variants) urls.put(url.toString());
+                            record.postFailures.add(new PostFailure(urls, false));
                         }
                         if (!post.videos.isEmpty()) {
-                            runOnUiThread(() -> progress.setText("正在下载视频…"));
-                            for (java.net.URL url : post.videos) {
-                                try { found.add(readPostVideo(url, record)); break; }
-                                catch (Exception ignored) { }
-                            }
-                            message = found.isEmpty() ? "视频下载失败，请检查网络后重试" : "已读取视频，可以预览或保存";
-                        } else if (post.images.isEmpty()) {
-                            message = "已读取文案，分享页未提供配图或视频文件";
-                        } else {
-                            int failed = post.images.size() - found.size();
-                            message = "已读取 " + found.size() + " 张配图" + (failed > 0 ? "，" + failed + " 张读取失败" : "");
+                            JSONArray urls = new JSONArray();
+                            for (URL url : post.videos) urls.put(url.toString());
+                            record.postFailures.add(new PostFailure(urls, true));
                         }
-                        if (!found.isEmpty() || (post.images.isEmpty() && post.videos.isEmpty())) {
-                            record.caption = post.caption;
-                            record.complete = post.images.size() <= found.size() && (post.videos.isEmpty() || !found.isEmpty());
-                            record.items.addAll(found);
-                            if (persistRecord(record)) saved = record;
-                            else {
-                                deleteRecordFiles(record);
-                                found.clear();
-                                message = "无法保存提取记录，请检查存储空间后重试";
-                            }
-                        } else folder.delete();
+                        record.postTotal = record.postFailures.size();
+                        if (downloadPostFailures(record)) {
+                            saved = record;
+                            found.addAll(record.items);
+                            message = record.postTotal == 0 ? "已读取作品文案" : postProgress(record);
+                        } else {
+                            deleteRecordFiles(record);
+                            message = "无法保存提取记录，请检查存储空间后重试";
+                        }
                     } catch (Exception error) {
                         String detail = error.getMessage();
                         message = detail != null && (detail.startsWith("请粘贴") || detail.startsWith("公开分享页"))
                                 ? detail : "暂时无法读取快手作品，请检查网络或链接后重试";
                     }
                     String statusText = message;
-                    KuaishouPost result = post;
                     ScanRecord newRecord = saved;
                     runOnUiThread(() -> {
                         if (newRecord != null) records.add(0, newRecord);
@@ -5178,12 +5486,14 @@ public class MainActivity extends Activity {
                         spinner.setVisibility(View.GONE);
                         info.setVisibility(View.VISIBLE);
                         progress.setText(statusText);
-                        if (result != null) {
+                        if (newRecord != null) {
+                            kuaishouPostRecord = newRecord;
+                            updateRetry.run();
                             items.clear();
                             items.addAll(found);
-                            caption.setText(result.caption);
+                            caption.setText(newRecord.caption);
                             caption.setMaxLines(3);
-                            caption.setVisibility(result.caption.isEmpty() ? View.GONE : View.VISIBLE);
+                            caption.setVisibility(newRecord.caption.isEmpty() ? View.GONE : View.VISIBLE);
                             category = 0;
                             positionFilter(false);
                             setSelecting(false);
@@ -5275,6 +5585,20 @@ public class MainActivity extends Activity {
                 introduction.addView(name);
                 introduction.addView(homeLabel("仅显示本条记录中的图片与动图", 12, INK2, 400));
             }
+            if (!imported) {
+                LinearLayout groups = new LinearLayout(MainActivity.this);
+                LinearLayout.LayoutParams groupParams = new LinearLayout.LayoutParams(-1, dp(42));
+                groupParams.setMargins(dp(20), 0, dp(20), 0);
+                root.addView(groups, groupParams);
+                groupFilter = shareButton("全部收藏 ▾", v -> showGroupPicker(null));
+                groupFilter.setSingleLine(true);
+                groupFilter.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                groups.addView(groupFilter, new LinearLayout.LayoutParams(0, -1, 1));
+                Button manage = shareButton("管理分组", v -> manageGroups());
+                LinearLayout.LayoutParams manageParams = new LinearLayout.LayoutParams(dp(86), -1);
+                manageParams.leftMargin = dp(8);
+                groups.addView(manage, manageParams);
+            }
 
             filterTrack = new FrameLayout(MainActivity.this);
             filterTrack.setPadding(dp(3), dp(3), dp(3), dp(3));
@@ -5349,12 +5673,12 @@ public class MainActivity extends Activity {
             }
             share = addAction("分享", v -> shareMedia(actionItems()));
             save = addAction(imported ? "保存全部" : "保存", v -> {
-                busy = true;
-                updateActions();
-                saveMediaBatch(actionItems(), (saved, failed) -> {
+                chooseMediaSave(actionItems(), kuaishouPostRecord, () -> {
+                    busy = true;
+                    updateActions();
+                }, () -> {
                     busy = false;
                     updateActions();
-                    showSaveBatchResult(saved, failed);
                 });
             });
             if (imported) {
@@ -5366,6 +5690,7 @@ public class MainActivity extends Activity {
                 else confirmRemove();
             });
             remove.setTextColor(imported ? ACCENT : DANGER);
+            if (!imported) move = addAction("移到分组", v -> showGroupPicker(selection()));
             if (kuaishou) {
                 save.setSingleLine(true);
                 save.setTypeface(homeTypeface(700));
@@ -5392,7 +5717,7 @@ public class MainActivity extends Activity {
             worker.execute(() -> {
                 ArrayList<Media> found;
                 if (savedKuaishou != null) {
-                    found = new ArrayList<>(savedKuaishou.items);
+                    synchronized (savedKuaishou) { found = new ArrayList<>(savedKuaishou.items); }
                     for (Media item : found) if (item.thumbnail == null) item.thumbnail = decodeThumbnail(item.file);
                 } else found = wechat ? readWechat(wechatRecord) : readFavorites();
                 runOnUiThread(() -> {
@@ -5489,13 +5814,146 @@ public class MainActivity extends Activity {
         }
 
         private boolean matchesCategory(Media item) {
-            return category == 0 || category == type(item);
+            return inFavoriteGroup(item) && (category == 0 || category == type(item));
+        }
+
+        private boolean inFavoriteGroup(Media item) {
+            if (activeGroup == null) return true;
+            String group = favoriteAssignments.get(item.hash);
+            return activeGroup.isEmpty() ? group == null : activeGroup.equals(group);
+        }
+
+        private String groupName(String name) {
+            return name == null ? "全部收藏" : name.isEmpty() ? "未分组" : name;
+        }
+
+        private void showGroupPicker(ArrayList<Media> moving) {
+            if (busy || (moving != null && moving.isEmpty())) return;
+            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
+            LinearLayout panel = dialogPanel(R.drawable.dialog_heart, false,
+                    moving == null ? "查看分组" : "移到分组", moving == null ? null : "已选 " + moving.size() + " 项");
+            ScrollView scroll = dialogScroll();
+            panel.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+            LinearLayout choices = new LinearLayout(MainActivity.this);
+            choices.setOrientation(LinearLayout.VERTICAL);
+            scroll.addView(choices);
+            ArrayList<String> names = new ArrayList<>();
+            if (moving == null) names.add(null);
+            names.add("");
+            names.addAll(favoriteGroups);
+            for (String name : names) {
+                addRetryChoice(choices, groupName(name), "", R.drawable.dialog_heart,
+                        () -> dismissCardDialog(dialog, () -> {
+                            if (moving == null) {
+                                activeGroup = name;
+                                category = 0;
+                                positionFilter(false);
+                                setSelecting(false);
+                            } else moveToGroup(moving, name);
+                        }));
+            }
+            dialogActions(dialog, panel, "取消", moving == null ? null : "新建分组", false, null,
+                    () -> editGroupName(null, name -> moveToGroup(moving, name)));
+            showCardDialog(dialog, panel);
+        }
+
+        private void moveToGroup(ArrayList<Media> moving, String name) {
+            for (Media item : moving) {
+                if (name.isEmpty()) favoriteAssignments.remove(item.hash);
+                else if (item.file.isFile()) favoriteAssignments.put(item.hash, name);
+            }
+            saveFavoriteGroups();
+            setSelecting(false);
+            showBottomNotice("已移动 " + moving.size() + " 项到「" + groupName(name) + "」");
+        }
+
+        private void manageGroups() {
+            if (busy) return;
+            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
+            LinearLayout panel = dialogPanel(R.drawable.dialog_heart, false, "管理分组", null);
+            ScrollView scroll = dialogScroll();
+            panel.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+            LinearLayout choices = new LinearLayout(MainActivity.this);
+            choices.setOrientation(LinearLayout.VERTICAL);
+            scroll.addView(choices);
+            for (String name : favoriteGroups) {
+                addRetryChoice(choices, name, "重命名或删除", R.drawable.dialog_heart,
+                        () -> dismissCardDialog(dialog, () -> editGroup(name)));
+            }
+            dialogActions(dialog, panel, "关闭", "新建分组", false, null,
+                    () -> editGroupName(null, name -> {
+                        activeGroup = name;
+                        category = 0;
+                        positionFilter(false);
+                        setSelecting(false);
+                    }));
+            showCardDialog(dialog, panel);
+        }
+
+        private void editGroup(String group) {
+            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
+            LinearLayout panel = dialogPanel(R.drawable.dialog_heart, false, group, null);
+            addRetryChoice(panel, "重命名分组", "", R.drawable.dialog_heart,
+                    () -> dismissCardDialog(dialog, () -> editGroupName(group, name -> render())));
+            addRetryChoice(panel, "删除分组", "素材移回未分组", R.drawable.dialog_trash,
+                    () -> dismissCardDialog(dialog, () -> showConfirmation(R.drawable.dialog_trash, true,
+                            "删除分组？", "分组内的素材将移回「未分组」。", "取消", "删除分组", null, () -> {
+                                favoriteGroups.remove(group);
+                                favoriteAssignments.values().removeIf(group::equals);
+                                if (group.equals(activeGroup)) activeGroup = null;
+                                saveFavoriteGroups();
+                                setSelecting(false);
+                            })));
+            dialogActions(dialog, panel, "关闭", null, false, null, null);
+            showCardDialog(dialog, panel);
+        }
+
+        private void editGroupName(String oldName, java.util.function.Consumer<String> onSaved) {
+            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
+            LinearLayout panel = dialogPanel(R.drawable.dialog_heart, false, oldName == null ? "新建分组" : "重命名分组", null);
+            EditText name = new EditText(MainActivity.this);
+            name.setSingleLine(true);
+            name.setHint("分组名称");
+            name.setTextColor(INK);
+            name.setHintTextColor(INK3);
+            name.setText(oldName);
+            if (oldName != null) name.selectAll();
+            panel.addView(name);
+            dialogActions(dialog, panel, "取消", "保存", false, null, null);
+            LinearLayout buttons = (LinearLayout) panel.getChildAt(panel.getChildCount() - 1);
+            buttons.getChildAt(1).setOnClickListener(v -> {
+                String value = name.getText().toString().trim();
+                if (value.isEmpty() || value.length() > 24) {
+                    name.setError("请输入 1 到 24 个字符");
+                    return;
+                }
+                if (!value.equals(oldName) && (favoriteGroups.contains(value) || value.equals("全部收藏") || value.equals("未分组"))) {
+                    name.setError("分组名称已存在");
+                    return;
+                }
+                if (!value.equals(oldName)) {
+                    if (oldName != null) {
+                        favoriteGroups.remove(oldName);
+                        favoriteAssignments.replaceAll((hash, group) -> oldName.equals(group) ? value : group);
+                        if (oldName.equals(activeGroup)) activeGroup = value;
+                    }
+                    favoriteGroups.add(value);
+                    saveFavoriteGroups();
+                }
+                dismissCardDialog(dialog, () -> onSaved.accept(value));
+            });
+            showCardDialog(dialog, panel);
         }
 
         private void render() {
             int[] counts = new int[categories.length];
-            counts[0] = items.size();
-            for (Media item : items) counts[type(item)]++;
+            for (Media item : items) {
+                if (inFavoriteGroup(item)) {
+                    counts[0]++;
+                    counts[type(item)]++;
+                }
+            }
+            if (groupFilter != null) groupFilter.setText(groupName(activeGroup) + " ▾");
             for (int i = 0; i < filters.length; i++) {
                 boolean active = category == i;
                 filters[i].setSelected(active);
@@ -5556,7 +6014,7 @@ public class MainActivity extends Activity {
                 String message = !loaded ? kuaishou ? "正在打开提取记录…" : wechat ? "正在读取表情…" : "正在读取收藏…"
                         : items.isEmpty() ? wechat ? "还没有导入表情\n选择电脑导出的 ZIP 后，图片和动图会显示在这里。"
                         : kuaishou ? "等待提取素材\n读取作品后，图片和视频会显示在这里" : "还没有收藏。在素材预览里点「收藏」即可添加。"
-                        : imported ? "这个分类没有素材" : "这个分类还没有收藏";
+                        : imported ? "这个分类没有素材" : "此分组或分类中没有收藏";
                 TextView empty = label(message, kuaishou ? 12 : 14, INK2, false);
                 if (kuaishou) {
                     empty.setBackground(card(16));
@@ -5598,6 +6056,7 @@ public class MainActivity extends Activity {
                 button.setEnabled((imported && !selecting ? !items.isEmpty() : !selected.isEmpty()) && !busy);
                 button.setAlpha(button.isEnabled() ? 1f : 0.45f);
             }
+            if (move != null) move.setEnabled(!busy && !selected.isEmpty());
         }
 
         private void confirmRemove() {
@@ -5613,6 +6072,9 @@ public class MainActivity extends Activity {
                         if (item.file.delete() || !item.file.exists()) removed.add(item);
                     }
                     runOnUiThread(() -> {
+                        boolean changed = false;
+                        for (Media item : removed) changed |= favoriteAssignments.remove(item.hash) != null;
+                        if (changed) saveFavoriteGroups();
                         if (favoriteScreen == this) {
                             busy = false;
                             items.removeAll(removed);
@@ -5800,26 +6262,38 @@ public class MainActivity extends Activity {
     }
 
     private void saveToDownloads(Media item) throws Exception {
+        saveToDownloads(item, SAVE_DIRECTORY);
+    }
+
+    private void saveToDownloads(Media item, String directory) throws Exception {
+        writeDownload(item.file.getName(), item.mime, directory, out -> Files.copy(item.file.toPath(), out));
+    }
+
+    private interface DownloadWriter {
+        void write(OutputStream output) throws Exception;
+    }
+
+    private void writeDownload(String name, String mime, String directory, DownloadWriter writer) throws Exception {
         ContentValues values = new ContentValues();
-        values.put(MediaStore.Downloads.DISPLAY_NAME, item.file.getName());
-        values.put(MediaStore.Downloads.MIME_TYPE, item.mime);
-        values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/DouYinGetting");
+        values.put(MediaStore.Downloads.DISPLAY_NAME, name);
+        values.put(MediaStore.Downloads.MIME_TYPE, mime);
+        values.put(MediaStore.Downloads.RELATIVE_PATH, directory);
         values.put(MediaStore.MediaColumns.IS_PENDING, 1);
         Uri target = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
         if (target == null) throw new Exception("无法创建下载文件");
-        try (InputStream in = new java.io.FileInputStream(item.file);
-             OutputStream out = getContentResolver().openOutputStream(target)) {
-            if (out == null) throw new Exception("无法写入下载文件");
-            byte[] chunk = new byte[8192];
-            int count;
-            while ((count = in.read(chunk)) != -1) out.write(chunk, 0, count);
+        try {
+            try (OutputStream out = getContentResolver().openOutputStream(target)) {
+                if (out == null) throw new Exception("无法写入下载文件");
+                writer.write(out);
+            }
+            values.clear();
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            if (getContentResolver().update(target, values, null, null) == 0) throw new Exception("无法完成保存");
         } catch (Exception error) {
-            getContentResolver().delete(target, null, null);
+            try { getContentResolver().delete(target, null, null); }
+            catch (Exception cleanupError) { error.addSuppressed(cleanupError); }
             throw error;
         }
-        values.clear();
-        values.put(MediaStore.MediaColumns.IS_PENDING, 0);
-        getContentResolver().update(target, values, null, null);
     }
 
     @Override protected void onDestroy() {

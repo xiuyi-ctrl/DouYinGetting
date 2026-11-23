@@ -93,5 +93,6 @@
         addVideo(['og:video:secure_url', 'og:video:url', 'og:video'].map(property =>
             document.querySelector('meta[property="' + property + '"]')?.content));
     }
-    return { id, images, videos: secureUrls(videos) };
+    return { id, title: (document.title || '').replace(/\s*-\s*(?:抖音|小红书)\s*$/, ''),
+        images, videos: secureUrls(videos) };
 })();
