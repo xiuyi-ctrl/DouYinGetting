@@ -87,6 +87,17 @@ public class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ArrayList<Media> media = new ArrayList<>();
     private final ArrayList<ScanRecord> records = new ArrayList<>();
+    private final BatchExtraction batch = new BatchExtraction();
+    private BatchExtraction.Task batchTask;
+    private boolean showingBatch;
+    private boolean previewingBatchRecord;
+    private TextView batchSummary;
+    private LinearLayout batchRows;
+    private LinearLayout batchFooter;
+    private View batchDivider;
+    private TextView readerRecordsButton;
+    private View readerLinkInput;
+    private View readerOpenButton;
     private final android.util.SparseArray<Typeface> homeFonts = new android.util.SparseArray<>();
     private Typeface homeTitleFont;
     private Bitmap homeRabbit;
@@ -129,6 +140,10 @@ public class MainActivity extends Activity {
     private LinearLayout results;
     private Button scanButton;
     private PopupWindow noticePopup;
+    private PopupWindow recordUndoPopup;
+    private Runnable refreshRecordList;
+    private PendingRecordDeletion pendingRecordDeletion;
+    private static final long RECORD_UNDO_MS = 8000;
     private LinearLayout readerRoot;
     private FrameLayout stage;
     private FrameLayout pageLayer;
@@ -200,6 +215,7 @@ public class MainActivity extends Activity {
     private FavoritesScreen favoriteScreen;
     private final java.util.LinkedHashSet<String> favoriteGroups = new java.util.LinkedHashSet<>();
     private final java.util.HashMap<String, String> favoriteAssignments = new java.util.HashMap<>();
+    private JSONObject favoriteSources = new JSONObject();
     private Runnable returnFromFavorites;
     private boolean recordsFromSettings;
     private int douyinPageDelayMs = 2000;
@@ -336,6 +352,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static final class PendingRecordDeletion {
+        final ScanRecord record;
+        final File staged;
+
+        PendingRecordDeletion(ScanRecord record, File staged) {
+            this.record = record;
+            this.staged = staged;
+        }
+    }
+
     @Override public void onCreate(Bundle state) {
         applyPalette();
         setTheme(darkMode ? R.style.BlueDark : R.style.BlueLight);
@@ -349,6 +375,11 @@ public class MainActivity extends Activity {
         buildStage();
         loadRecords();
         loadFavoriteGroups();
+        try {
+            favoriteSources = new JSONObject(getPreferences(MODE_PRIVATE).getString("favorite_sources", "{}"));
+        } catch (org.json.JSONException ignored) { }
+        cleanExpiredRecordTrash();
+        batch.restore(getPreferences(MODE_PRIVATE).getString("extraction_queue", "[]"));
         showHome();
         updateSystemBars();
         if (state == null) handleSharedPost(getIntent());
@@ -365,6 +396,15 @@ public class MainActivity extends Activity {
         CharSequence sharedText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
         if (sharedText == null) return;
         String shared = sharedText.toString().replace("\\:", ":");
+        BatchExtraction incoming = new BatchExtraction();
+        incoming.add(shared);
+        if (!incoming.tasks.isEmpty() && (batchTask != null || showingBatch || incoming.tasks.size() > 1)) {
+            int added = batch.add(shared);
+            saveBatch();
+            if (batchTask == null && extractWorkButton.isEnabled()) showBatch(sharedQueuedNotice(added));
+            else showTopNotice(sharedQueuedNotice(added));
+            return;
+        }
         String douyin = extractLink(shared, false);
         String xhs = extractLink(shared, true);
         String kuaishou = KuaishouPost.extractLink(shared);
@@ -422,6 +462,379 @@ public class MainActivity extends Activity {
             if (comments) openLink();
             else startWorkExtraction();
         }
+    }
+
+    private String sharedQueuedNotice(int added) {
+        return added == 0 ? "这些链接已在队列中" : "已加入 " + added + " 条链接";
+    }
+
+    private void saveBatch() {
+        getPreferences(MODE_PRIVATE).edit().putString("extraction_queue", batch.encode()).apply();
+    }
+
+    private void showBatch(String notice) {
+        if (showingBatch) {
+            refreshBatch();
+            if (notice != null) showTopNotice(notice);
+            return;
+        }
+        stopScanForNavigation();
+        resetPages();
+        showingBatch = true;
+        previewingBatchRecord = false;
+        currentPage = -8;
+        LinearLayout root = pageRoot();
+        LinearLayout top = header(root, "作品链接", true, this::showHome);
+        TextView back = (TextView) top.getChildAt(0);
+        back.setText("");
+        readerIcon(back, R.drawable.extract_back, 20);
+        TextView heading = (TextView) top.getChildAt(1);
+        heading.setTypeface(homeTypeface(750));
+        heading.setTextSize(20);
+        ScrollView scroll = new ScrollView(this);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(8), dp(16), dp(16));
+        scroll.addView(content);
+
+        LinearLayout linkCard = new LinearLayout(this);
+        linkCard.setOrientation(LinearLayout.VERTICAL);
+        linkCard.setBackground(card(15));
+        linkCard.setPadding(dp(12), dp(12), dp(12), dp(12));
+        content.addView(linkCard, new LinearLayout.LayoutParams(-1, -2));
+        EditText links = new EditText(this);
+        links.setGravity(Gravity.TOP | Gravity.START);
+        links.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        links.setTextSize(14);
+        links.setTypeface(homeTypeface(450));
+        links.setTextColor(INK);
+        links.setHintTextColor(INK3);
+        links.setHint("粘贴多条作品链接或分享文案");
+        links.setMinLines(3);
+        links.setMaxLines(5);
+        links.setPadding(dp(12), dp(10), dp(12), dp(10));
+        links.setBackground(shape(TRACK, 12));
+        linkCard.addView(links, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout inputActions = new LinearLayout(this);
+        linkCard.addView(inputActions, batchRowParams());
+        Button paste = dialogButton("粘贴", false, false, v -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            ClipData clip = clipboard == null ? null : clipboard.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) {
+                showTopNotice("剪贴板中没有可粘贴的内容");
+                return;
+            }
+            if (links.length() > 0) links.append("\n");
+            links.append(clip.getItemAt(0).coerceToText(this));
+        });
+        readerIcon(paste, R.drawable.extract_paste, 16);
+        LinearLayout.LayoutParams pasteParams = new LinearLayout.LayoutParams(dp(84), -2);
+        pasteParams.rightMargin = dp(8);
+        inputActions.addView(paste, pasteParams);
+        Button add = dialogButton("加入队列", false, false, v -> {
+            String text = links.getText().toString();
+            int added = batch.add(text);
+            if (added == 0) {
+                showTopNotice(text.trim().isEmpty() ? "请先粘贴作品链接" : "没有找到可加入的新链接");
+                return;
+            }
+            saveBatch();
+            links.getText().clear();
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(links.getWindowToken(), 0);
+            showBatch(sharedQueuedNotice(added));
+        });
+        add.setTextColor(ACCENT);
+        add.setBackground(shape(ACCENT_SOFT, 12));
+        add.setSingleLine(true);
+        add.setGravity(Gravity.CENTER);
+        Drawable plus = getDrawable(R.drawable.group_add).mutate();
+        plus.setTint(ACCENT);
+        plus.setBounds(0, 0, dp(17), dp(17));
+        add.setCompoundDrawablesRelative(plus, null, null, null);
+        add.setCompoundDrawablePadding(dp(6));
+        add.addOnLayoutChangeListener((v, l, t, r, b, oldL, oldT, oldR, oldB) -> {
+            int textWidth = (int) Math.ceil(add.getPaint().measureText(add.getText().toString()));
+            int padding = Math.max(dp(8), (r - l - textWidth - dp(33)) / 2);
+            if (add.getPaddingLeft() != padding) add.setPadding(padding, dp(8), padding, dp(8));
+        });
+        inputActions.addView(add, new LinearLayout.LayoutParams(0, -2, 1));
+
+        batchSummary = homeLabel("", 13, INK2, 650);
+        LinearLayout.LayoutParams summaryParams = batchRowParams();
+        summaryParams.topMargin = dp(18);
+        content.addView(batchSummary, summaryParams);
+        batchRows = new LinearLayout(this);
+        batchRows.setOrientation(LinearLayout.VERTICAL);
+        content.addView(batchRows, new LinearLayout.LayoutParams(-1, -2));
+        batchDivider = new View(this);
+        batchDivider.setBackgroundColor(LINE);
+        root.addView(batchDivider, new LinearLayout.LayoutParams(-1, 1));
+        batchFooter = new LinearLayout(this);
+        batchFooter.setBackgroundColor(SURFACE);
+        batchFooter.setPadding(dp(16), dp(8), dp(16), dp(12));
+        root.addView(batchFooter);
+        refreshBatch();
+        root.setFocusableInTouchMode(true);
+        root.requestFocus();
+        presentSecondary(root);
+        if (notice != null) root.post(() -> { if (showingBatch && root.isShown()) showTopNotice(notice); });
+    }
+
+    private void refreshBatch() {
+        int done = 0;
+        int left = 0;
+        for (BatchExtraction.Task task : batch.tasks) {
+            if (task.state == BatchExtraction.State.QUEUED || task.state == BatchExtraction.State.ACTION) left++;
+            else if (task.state == BatchExtraction.State.DONE) done++;
+        }
+        batchSummary.setText("队列 " + batch.tasks.size() + " 条 · 已完成 " + done + " · 待处理 " + left);
+        batchRows.removeAllViews();
+        if (batch.tasks.isEmpty()) {
+            TextView empty = homeLabel("还没有待提取的作品", 13, INK2, 450);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(12), dp(22), dp(12), dp(22));
+            empty.setBackground(card(14));
+            batchRows.addView(empty, batchRowParams());
+        }
+        for (BatchExtraction.Task task : batch.tasks) addBatchRow(batchRows, task);
+        batchFooter.removeAllViews();
+        BatchExtraction.Task next = batch.next();
+        if (next != null) {
+            Button start = dialogButton(next.state == BatchExtraction.State.ACTION ? "继续当前任务" : "开始提取",
+                    true, false, v -> startBatch());
+            batchFooter.addView(start, new LinearLayout.LayoutParams(-1, dp(46)));
+        } else if (!batch.tasks.isEmpty()) {
+            batchFooter.addView(dialogButton("清空队列", false, false, v -> {
+                batch.tasks.clear();
+                saveBatch();
+                showBatch(null);
+            }), new LinearLayout.LayoutParams(-1, dp(46)));
+        }
+        int footerVisibility = batchFooter.getChildCount() > 0 ? View.VISIBLE : View.GONE;
+        batchDivider.setVisibility(footerVisibility);
+        batchFooter.setVisibility(footerVisibility);
+    }
+
+    private LinearLayout.LayoutParams batchRowParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(10);
+        return params;
+    }
+
+    private void addBatchRow(LinearLayout content, BatchExtraction.Task task) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setBackground(card(14));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        content.addView(row, batchRowParams());
+
+        LinearLayout rowHeader = new LinearLayout(this);
+        rowHeader.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(rowHeader, new LinearLayout.LayoutParams(-1, -2));
+        int artwork = task.platform == 0 ? R.drawable.home_douyin
+                : task.platform == 1 ? R.drawable.home_xiaohongshu : R.drawable.home_kuaishou;
+        ImageView platformIcon = new ImageView(this);
+        platformIcon.setImageResource(artwork);
+        platformIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        platformIcon.setBackground(shape(SURFACE, 8));
+        platformIcon.setClipToOutline(true);
+        rowHeader.addView(platformIcon, new LinearLayout.LayoutParams(dp(36), dp(36)));
+
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wordsParams = new LinearLayout.LayoutParams(0, -2, 1);
+        wordsParams.leftMargin = dp(10);
+        wordsParams.rightMargin = dp(8);
+        rowHeader.addView(words, wordsParams);
+        words.addView(homeLabel(BatchExtraction.PLATFORMS[task.platform], 14, INK, 750));
+        TextView link = homeLabel(task.link.replaceFirst("^https://", ""), 12, INK2, 450);
+        link.setMaxLines(2);
+        link.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        words.addView(link);
+
+        boolean attention = task.state == BatchExtraction.State.ACTION || task.state == BatchExtraction.State.PARTIAL;
+        boolean highlighted = task.state == BatchExtraction.State.DONE || task.state == BatchExtraction.State.RUNNING;
+        TextView state = homeLabel(task.state.label, 11, attention ? DANGER : highlighted ? ACCENT : INK2, 650);
+        state.setGravity(Gravity.CENTER);
+        state.setPadding(dp(8), 0, dp(8), 0);
+        state.setBackground(shape(attention ? (darkMode ? 0xff422b3b : 0xffffedf0) : highlighted ? ACCENT_SOFT : TRACK, 12));
+        rowHeader.addView(state, new LinearLayout.LayoutParams(-2, dp(26)));
+        if (!task.detail.isEmpty()) {
+            TextView detail = homeLabel(task.detail, 12, attention ? DANGER : INK2, 450);
+            row.addView(detail, batchRowParams());
+        }
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(actions);
+        String method = task.comments ? "评论素材" : "作品正文";
+        if (task.state == BatchExtraction.State.QUEUED && task.platform != 2) {
+            addBatchAction(actions, method, true, () -> {
+                android.app.Dialog dialog = new android.app.Dialog(this);
+                LinearLayout panel = sheetPanel("选择提取方式", BatchExtraction.PLATFORMS[task.platform]);
+                addCheckedSheetChoice(panel, "作品正文", "提取作品里的图片或视频", R.drawable.extract_download,
+                        !task.comments, () -> setBatchMethod(dialog, task, false));
+                addCheckedSheetChoice(panel, "评论素材", "打开评论区后扫描", R.drawable.extract_scan,
+                        task.comments, () -> setBatchMethod(dialog, task, true));
+                showBottomSheet(dialog, panel);
+            });
+        } else {
+            addBatchAction(actions, method, true, null);
+        }
+        actions.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+        if (task.state == BatchExtraction.State.QUEUED) {
+            addBatchAction(actions, "移除", false, () -> {
+                batch.tasks.remove(task);
+                saveBatch();
+                showBatch(null);
+            });
+        } else if (task.state == BatchExtraction.State.ACTION) {
+            addBatchAction(actions, "跳过", false, () -> {
+                task.state = BatchExtraction.State.SKIPPED;
+                saveBatch();
+                startBatch();
+            });
+        }
+        ScanRecord record = batchRecord(task);
+        if (record != null && task.state != BatchExtraction.State.ACTION) {
+            addBatchAction(actions, "查看记录", true, () -> {
+                if (!canStartBatch()) return;
+                previewingBatchRecord = true;
+                showRecord(record);
+            });
+        }
+    }
+
+    private void addBatchAction(LinearLayout actions, String title, boolean highlighted, Runnable action) {
+        TextView button = homeLabel(title, 12, highlighted ? ACCENT : INK2, 650);
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(dp(10), 0, dp(10), 0);
+        if (highlighted) {
+            button.setBackground(new android.graphics.drawable.InsetDrawable(shape(ACCENT_SOFT, 12), 0, dp(7), 0, dp(7)));
+        }
+        if (action != null) {
+            button.setOnClickListener(v -> action.run());
+            pressFeedback(button);
+        }
+        actions.addView(button, new LinearLayout.LayoutParams(-2, dp(44)));
+    }
+
+    private void addCheckedSheetChoice(LinearLayout panel, String title, String detail, int iconRes, boolean selected, Runnable action) {
+        addSheetChoice(panel, title, detail, iconRes, selected, action);
+        LinearLayout row = (LinearLayout) panel.getChildAt(panel.getChildCount() - 1);
+        row.setSelected(selected);
+        if (selected) {
+            ImageView check = (ImageView) row.getChildAt(row.getChildCount() - 1);
+            check.setImageResource(R.drawable.extract_check);
+            check.setImageTintList(ColorStateList.valueOf(ACCENT));
+            check.setRotation(0);
+        }
+    }
+
+    private void setBatchMethod(android.app.Dialog dialog, BatchExtraction.Task task, boolean comments) {
+        dismissCardDialog(dialog, () -> {
+            task.comments = comments;
+            saveBatch();
+            showBatch(null);
+        });
+    }
+
+    private ScanRecord batchRecord(BatchExtraction.Task task) {
+        if (!task.recordId.isEmpty()) {
+            for (ScanRecord record : records) if (task.recordId.equals(record.id)) return record;
+        }
+        return null;
+    }
+
+    private boolean canStartBatch() {
+        if (!scanning && extractWorkButton.isEnabled()
+                && (currentRecord == null || !currentRecord.processingPage)
+                && (!showingKuaishou || favoriteScreen == null || !favoriteScreen.busy)) return true;
+        showTopNotice("请先结束或暂停正在进行的提取");
+        return false;
+    }
+
+    private void startBatch() {
+        if (batchTask != null || !canStartBatch()) return;
+        BatchExtraction.Task task = batch.next();
+        if (task == null) {
+            showBatch("队列处理完毕");
+            return;
+        }
+        ScanRecord record = batchRecord(task);
+        batchTask = task;
+        if (task.comments && record != null && record.complete) {
+            finishBatchTask(record);
+            return;
+        }
+        task.state = task.comments ? BatchExtraction.State.ACTION : BatchExtraction.State.RUNNING;
+        task.detail = task.comments ? "请登录网页并打开评论区，再点击扫描" : "";
+        saveBatch();
+        if (task.comments && canResume(record)) {
+            showRecord(record);
+            openSavedRecordPage(record);
+        } else {
+            openSharedPost(task.link, task.platform, task.comments);
+            if (task.comments) status.setText(task.detail);
+        }
+    }
+
+    private void batchCommentRecord(ScanRecord record) {
+        if (batchTask == null || !batchTask.comments || !batchTask.link.equals(record.link)) return;
+        batchTask.state = BatchExtraction.State.RUNNING;
+        batchTask.detail = "";
+        batchTask.recordId = record.id;
+        saveBatch();
+    }
+
+    private void batchNeedsAction(String detail) {
+        if (batchTask == null) return;
+        batchTask.state = BatchExtraction.State.ACTION;
+        batchTask.detail = detail;
+        saveBatch();
+    }
+
+    private void finishBatchTask(ScanRecord record) {
+        if (batchTask == null) return;
+        if (record == null) {
+            batchNeedsAction("提取未完成，可以重试或跳过");
+            return;
+        }
+        BatchExtraction.Task completed = batchTask;
+        completed.state = record.postFailures.isEmpty() && record.emptyReplyLists == 0
+                && record.failedReplies.isEmpty() && record.failedMedia.isEmpty()
+                ? BatchExtraction.State.DONE : BatchExtraction.State.PARTIAL;
+        completed.detail = "提取了 " + record.items.size() + " 个素材";
+        completed.recordId = record.id;
+        saveBatch();
+        worker.execute(() -> runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed() || batchTask != completed) return;
+            batchTask = null;
+            if (showingReader || showingKuaishou || showingBatch) startBatch();
+        }));
+    }
+
+    private boolean returnToBatch() {
+        if (batchTask == null && !previewingBatchRecord) return false;
+        if (!extractWorkButton.isEnabled() || showingKuaishou && favoriteScreen.busy
+                || currentRecord != null && currentRecord.processingPage) {
+            showTopNotice("请等待当前操作保存完成");
+            return true;
+        }
+        if (batchTask != null) {
+            if (scanning) {
+                scanning = false;
+                requestToken++;
+                scanButton.setText("继续扫描");
+                recordScanPause("已暂停批量提取", false);
+            }
+            if (batchTask.state == BatchExtraction.State.RUNNING) batchNeedsAction("已暂停，可继续当前任务");
+            batchTask = null;
+        }
+        previewingBatchRecord = false;
+        showBatch(null);
+        return true;
     }
 
     private TextView label(String value, int size, int color, boolean bold) {
@@ -635,6 +1048,7 @@ public class MainActivity extends Activity {
     }
 
     private void resetPages() {
+        showingBatch = false;
         showingWechat = false;
         showingKuaishou = false;
         showingReader = false;
@@ -1189,6 +1603,7 @@ public class MainActivity extends Activity {
         addHomeFeature(content, 0);
         addHomeFeature(content, 1);
         addHomeFeature(content, 3);
+        addHomeFeature(content, R.drawable.home_batch, "批量提取", "多链接 · 自动去重", false, v -> showBatch(null));
         addHomeFeature(content, 2);
         ScanRecord latest = null;
         for (ScanRecord record : records) {
@@ -1255,16 +1670,28 @@ public class MainActivity extends Activity {
         boolean xhs = platform == 1;
         boolean wechat = platform == 2;
         boolean kuaishou = platform == 3;
+        int artwork = kuaishou ? R.drawable.home_kuaishou
+                : wechat ? R.drawable.wechat_import : xhs ? R.drawable.home_xiaohongshu : R.drawable.home_douyin;
+        String name = kuaishou ? "快手提取" : wechat ? "微信表情导入" : xhs ? "小红书提取" : "抖音提取";
+        String detail = kuaishou ? "图片 · 视频 · 文案" : wechat ? "图片 · 动图 · 导入" : xhs ? "图片 · 回复 · 实况" : "图片 · 动图 · 回复";
+        addHomeFeature(content, artwork, name, detail, platform == 0, v -> {
+            if (kuaishou) showKuaishou();
+            else if (wechat) unlockWechat();
+            else selectMode(xhs);
+        });
+    }
+
+    private void addHomeFeature(LinearLayout content, int artwork, String name, String detail,
+                                boolean first, View.OnClickListener action) {
         LinearLayout row = new LinearLayout(this);
         row.setPadding(dp(16), dp(12), dp(16), dp(12));
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setBackground(card(15));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(86));
-        params.topMargin = dp(platform == 0 ? 20 : 12);
+        params.topMargin = dp(first ? 20 : 12);
         content.addView(row, params);
         ImageView image = new ImageView(this);
-        image.setImageResource(kuaishou ? R.drawable.home_kuaishou
-                : wechat ? R.drawable.wechat_import : xhs ? R.drawable.home_xiaohongshu : R.drawable.home_douyin);
+        image.setImageResource(artwork);
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setBackground(shape(SURFACE, 13));
         image.setClipToOutline(true);
@@ -1274,14 +1701,10 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(0, -2, 1);
         wp.leftMargin = dp(16);
         row.addView(words, wp);
-        words.addView(homeLabel(kuaishou ? "快手提取" : wechat ? "微信表情导入" : xhs ? "小红书提取" : "抖音提取", 20, INK, 750));
-        words.addView(homeLabel(kuaishou ? "图片 · 视频 · 文案" : wechat ? "图片 · 动图 · 导入" : xhs ? "图片 · 回复 · 实况" : "图片 · 动图 · 回复", 14, INK2, 400));
+        words.addView(homeLabel(name, 20, INK, 750));
+        words.addView(homeLabel(detail, 14, INK2, 400));
         row.addView(icon(R.drawable.home_arrow, ACCENT), new LinearLayout.LayoutParams(dp(26), dp(26)));
-        row.setOnClickListener(v -> {
-            if (kuaishou) showKuaishou();
-            else if (wechat) unlockWechat();
-            else selectMode(xhs);
-        });
+        row.setOnClickListener(action);
     }
 
     private void addMenuCard(LinearLayout parent, int resource, String name, String detail, View.OnClickListener action) {
@@ -1980,6 +2403,24 @@ public class MainActivity extends Activity {
         usage.addView(storageValue, new LinearLayout.LayoutParams(-2, -2));
         storage.addView(rowDivider());
 
+        LinearLayout modeRow = new LinearLayout(this);
+        modeRow.setGravity(Gravity.CENTER_VERTICAL);
+        modeRow.setPadding(dp(14), dp(14), dp(14), dp(14));
+        storage.addView(modeRow, new LinearLayout.LayoutParams(-1, -2));
+        modeRow.addView(icon(R.drawable.extract_download, ACCENT), new LinearLayout.LayoutParams(dp(22), dp(22)));
+        LinearLayout.LayoutParams modeLabelParams = new LinearLayout.LayoutParams(0, -2, 1);
+        modeLabelParams.leftMargin = dp(12);
+        modeRow.addView(homeLabel("保存方式", 14, INK, 700), modeLabelParams);
+        TextView modeValue = homeLabel(mediaSaveMode().label, 12, ACCENT, 650);
+        modeRow.addView(modeValue);
+        ImageView modeArrow = icon(R.drawable.home_chevron, INK2);
+        LinearLayout.LayoutParams modeArrowParams = new LinearLayout.LayoutParams(dp(16), dp(16));
+        modeArrowParams.leftMargin = dp(6);
+        modeRow.addView(modeArrow, modeArrowParams);
+        modeRow.setOnClickListener(v -> showMediaSaveSettings(modeValue));
+        pressFeedback(modeRow);
+        storage.addView(rowDivider());
+
         LinearLayout location = new LinearLayout(this);
         location.setGravity(Gravity.CENTER_VERTICAL);
         location.setPadding(dp(14), dp(14), dp(14), dp(14));
@@ -2413,6 +2854,10 @@ public class MainActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(16), dp(6), dp(16), dp(28));
         scroll.addView(page);
+        refreshRecordList = () -> {
+            if (showingRecords && page.isAttachedToWindow())
+                addRecordCards(page, total, search, recordTypes.getOrDefault(platform, 0));
+        };
         Runnable renderRecords = () -> {
             int type = recordTypes.getOrDefault(platform, 0);
             for (int i = 0; i < filters.length; i++) {
@@ -2566,11 +3011,7 @@ public class MainActivity extends Activity {
             more.setGravity(Gravity.CENTER);
             more.setContentDescription("更多记录操作");
             actions.addView(more, new LinearLayout.LayoutParams(dp(44), dp(44)));
-            more.setOnClickListener(v -> showRecordActions(record, v, () -> {
-                if (!showingRecords || !page.isAttachedToWindow()) return;
-                String platform = kuaishouRecords ? "kuaishou" : xhsMode ? "xhs" : "douyin";
-                addRecordCards(page, total, search, recordTypes.getOrDefault(platform, 0));
-            }));
+            more.setOnClickListener(v -> showRecordActions(record, v));
 
             card.setOnClickListener(v -> showRecord(record));
         }
@@ -2587,7 +3028,7 @@ public class MainActivity extends Activity {
         return popup;
     }
 
-    private void showRecordActions(ScanRecord record, View anchor, Runnable onDeleted) {
+    private void showRecordActions(ScanRecord record, View anchor) {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         PopupWindow popup = recordPopup(panel, 186);
@@ -2605,7 +3046,7 @@ public class MainActivity extends Activity {
         }
         addRecordAction(panel, "删除记录", R.drawable.dialog_trash, DANGER, () -> {
             popup.dismiss();
-            confirmDelete(record, onDeleted);
+            confirmDelete(record);
         });
         showRecordPopup(popup, anchor);
     }
@@ -2908,36 +3349,87 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void confirmDelete(ScanRecord record, Runnable onDeleted) {
-        showConfirmation(0, true, "删除这条记录？", "记录和暂存素材将被删除。已保存的文件仍在下载目录。",
-                "保留记录", "删除记录", null, () -> {
-            if (currentRecord == record) {
-                scanning = false;
-                requestToken++;
-                currentRecord = null;
-                viewingSavedRecord = false;
-                clearMediaSelection();
-                media.clear();
-                renderResults();
-                updateResultLabels();
-            }
-            worker.execute(() -> {
-                boolean deleted = deleteRecordFiles(record);
-                runOnUiThread(() -> {
-                    if (deleted) {
-                        records.remove(record);
-                        onDeleted.run();
-                        showBottomNotice("记录已删除");
-                    } else {
-                        showMessage(R.drawable.dialog_trash, "记录未能完全删除",
-                                "部分暂存文件未能删除，请稍后重试。已保存到下载目录的文件不受影响。");
-                    }
-                });
+    private void confirmDelete(ScanRecord record) {
+        showConfirmation(0, true, "删除这条记录？", "记录和暂存素材将被移除，8 秒内可撤销。已保存的文件仍在下载目录。",
+                "保留记录", "删除记录", null, () -> deleteWithUndo(record),
+                record.caption.isEmpty() ? null : record.caption);
+    }
+
+    private void deleteWithUndo(ScanRecord record) {
+        if (recordTransferBusy) {
+            showTopNotice("请等备份操作完成后再删除");
+            return;
+        }
+        if (!records.remove(record)) return;
+        if (currentRecord == record) {
+            scanning = false;
+            requestToken++;
+            currentRecord = null;
+            viewingSavedRecord = false;
+            clearMediaSelection();
+            media.clear();
+            renderResults();
+            updateResultLabels();
+        }
+        refreshRecordList.run();
+        worker.execute(() -> {
+            File staged = stageRecordDeletion(record);
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (staged == null) {
+                    restoreRecordListEntry(record);
+                    showMessage(R.drawable.dialog_trash, "记录未能删除", "暂存目录无法移动，请稍后重试。");
+                    return;
+                }
+                rememberDeletedRecordSources(record);
+                if (pendingRecordDeletion != null) expireRecordDeletion(pendingRecordDeletion);
+                PendingRecordDeletion pending = new PendingRecordDeletion(record, staged);
+                pendingRecordDeletion = pending;
+                showNotice("记录已删除", "撤销", () -> undoRecordDeletion(pending), true, true);
+                stripHandler.postDelayed(() -> expireRecordDeletion(pending), RECORD_UNDO_MS);
             });
-        }, record.caption.isEmpty() ? null : record.caption);
+        });
+    }
+
+    private void restoreRecordListEntry(ScanRecord record) {
+        records.add(record);
+        records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
+        refreshRecordList.run();
+    }
+
+    private void expireRecordDeletion(PendingRecordDeletion pending) {
+        if (pendingRecordDeletion != pending) return;
+        pendingRecordDeletion = null;
+        worker.execute(() -> purgeRecordTrash(pending.staged.getParentFile()));
+    }
+
+    private void undoRecordDeletion(PendingRecordDeletion pending) {
+        if (pendingRecordDeletion != pending) return;
+        pendingRecordDeletion = null;
+        worker.execute(() -> {
+            boolean restored;
+            try {
+                Files.move(pending.staged.toPath(), pending.record.folder.toPath());
+                pending.staged.getParentFile().delete();
+                restored = true;
+            } catch (java.io.IOException error) {
+                restored = false;
+            }
+            boolean success = restored;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (success) {
+                    restoreRecordListEntry(pending.record);
+                    showBottomNotice("已恢复记录和暂存素材");
+                } else {
+                    showMessage(R.drawable.dialog_trash, "未能撤销删除", "暂存目录无法恢复。");
+                }
+            });
+        });
     }
 
     private void showReader() {
+        showingBatch = false;
         showingReader = true;
         showingSettings = false;
         showingFavorites = false;
@@ -2945,6 +3437,13 @@ public class MainActivity extends Activity {
         currentPage = -1;
         showingRecords = false;
         showingRecordPlatforms = false;
+        boolean batchReader = batchTask != null;
+        readerRecordsButton.setText(batchReader || previewingBatchRecord ? "队列" : "记录");
+        readerLinkInput.setVisibility(batchReader ? View.GONE : View.VISIBLE);
+        readerOpenButton.setVisibility(batchReader ? View.GONE : View.VISIBLE);
+        scanButton.setVisibility(!batchReader || batchTask.comments ? View.VISIBLE : View.GONE);
+        ((View) scanButton.getParent()).setVisibility(!batchReader || batchTask.comments ? View.VISIBLE : View.GONE);
+        extractWorkButton.setVisibility(batchReader && batchTask.comments ? View.GONE : View.VISIBLE);
         presentSecondary(readerRoot);
         updateScanCard();
         for (Animatable animation : animations) animation.start();
@@ -3023,11 +3522,13 @@ public class MainActivity extends Activity {
         readerHeading.setGravity(Gravity.CENTER);
         toolbar.addView(readerHeading, new LinearLayout.LayoutParams(0, -2, 1));
         TextView recordsButton = homeLabel("记录", 12, INK2, 650);
+        readerRecordsButton = recordsButton;
         recordsButton.setSingleLine(true);
         recordsButton.setMinWidth(dp(72));
         readerIcon(recordsButton, R.drawable.extract_history, 17);
         recordsButton.setGravity(Gravity.CENTER);
         recordsButton.setOnClickListener(v -> {
+            if (returnToBatch()) return;
             recordsFromSettings = false;
             kuaishouRecords = false;
             showRecords();
@@ -3058,12 +3559,13 @@ public class MainActivity extends Activity {
         content.addView(inputCard);
         input = new EditText(this);
         input.setHint("粘贴抖音作品链接或分享文案");
-        inputCard.addView(readerLinkRow(input, () -> {
+        readerLinkInput = readerLinkRow(input, () -> {
             String link = extractLink(input.getText().toString(), xhsMode);
             return link == null && input.getText().length() == 0 ? activeLink : link;
-        }),
-                new LinearLayout.LayoutParams(-1, dp(46)));
+        });
+        inputCard.addView(readerLinkInput, new LinearLayout.LayoutParams(-1, dp(46)));
         Button open = new Button(this);
+        readerOpenButton = open;
         open.setAllCaps(false);
         open.setText("打开作品");
         open.setTextColor(ACCENT);
@@ -3242,6 +3744,7 @@ public class MainActivity extends Activity {
                     }
                 }
                 scanning = true;
+                batchCommentRecord(currentRecord);
                 requestWaits = 0;
                 pageRetries = 0;
                 stripPaused = false;
@@ -3369,7 +3872,7 @@ public class MainActivity extends Activity {
         saveButton.setOnClickListener(v -> {
             ArrayList<Media> snapshot = new ArrayList<>();
             for (Media item : media) if (!selectingMedia || selectedMedia.contains(item)) snapshot.add(item);
-            chooseMediaSave(snapshot, currentRecord, null, null);
+            saveMedia(snapshot, currentRecord, null, null);
         });
         saveBar.addView(saveButton, new LinearLayout.LayoutParams(dp(118), dp(40)));
         shareSelectedButton = shareButton("分享", v -> {
@@ -3617,6 +4120,7 @@ public class MainActivity extends Activity {
     }
 
     private void recordScanPause(String reason, boolean abnormal) {
+        if (batchTask != null && batchTask.comments) batchNeedsAction(reason);
         ScanRecord record = currentRecord;
         if (record == null) return;
         if (abnormal) {
@@ -3718,6 +4222,12 @@ public class MainActivity extends Activity {
                         && (xhsMode ? url.startsWith("https://www.xiaohongshu.com/") : url.startsWith("https://www.douyin.com/"));
                 if (resumedPage) {
                     loadingSavedRecordPage = false;
+                }
+                if (batchTask != null && !batchTask.comments) {
+                    if (batchTask.state == BatchExtraction.State.RUNNING) {
+                        status.setText(url.contains("/login") ? "请在网页中完成登录" : "正在读取作品正文");
+                    }
+                    return;
                 }
                 if (xhsMode) {
                     if (!xhsCaptureSupported && xhsCaptureScript != null && url.startsWith("https://www.xiaohongshu.com/"))
@@ -3958,20 +4468,54 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean isOwnedRecordFolder(ScanRecord record) throws java.io.IOException {
+        File folder = record.folder.getCanonicalFile();
+        return recordsFolder().getCanonicalFile().equals(folder.getParentFile())
+                || ("legacy".equals(record.id) && folder.equals(new File(getFilesDir(), "media").getCanonicalFile()));
+    }
+
+    private boolean deleteFlatFolder(File folder) {
+        File[] files = folder.listFiles();
+        if (files != null) for (File file : files) {
+            if (!file.isFile() || !file.delete()) return false;
+        }
+        return !folder.exists() || folder.delete();
+    }
+
     private boolean deleteRecordFiles(ScanRecord record) {
-        File root = recordsFolder();
+        try { return isOwnedRecordFolder(record) && deleteFlatFolder(record.folder); }
+        catch (java.io.IOException error) { return false; }
+    }
+
+    private File recordTrashFolder() {
+        return new File(getFilesDir(), "record-trash");
+    }
+
+    private File stageRecordDeletion(ScanRecord record) {
+        File container = null;
         try {
-            File parent = record.folder.getCanonicalFile().getParentFile();
-            boolean storedRecord = parent.equals(root.getCanonicalFile());
-            boolean legacyRecord = "legacy".equals(record.id)
-                    && record.folder.getCanonicalFile().equals(new File(getFilesDir(), "media").getCanonicalFile());
-            if (!storedRecord && !legacyRecord) return false;
-            File[] files = record.folder.listFiles();
-            if (files != null) for (File file : files) {
-                if (!file.isFile() || !file.delete()) return false;
-            }
-            return !record.folder.exists() || record.folder.delete();
-        } catch (Exception error) { return false; }
+            if (!isOwnedRecordFolder(record)) return null;
+            Files.createDirectories(recordTrashFolder().toPath());
+            container = Files.createTempDirectory(recordTrashFolder().toPath(), "deleted-").toFile();
+            File staged = new File(container, "record");
+            Files.move(record.folder.toPath(), staged.toPath());
+            return staged;
+        } catch (java.io.IOException error) {
+            if (container != null) container.delete();
+            return null;
+        }
+    }
+
+    private void purgeRecordTrash(File container) {
+        if (deleteFlatFolder(new File(container, "record"))) container.delete();
+    }
+
+    private void cleanExpiredRecordTrash() {
+        File[] existing = recordTrashFolder().listFiles(File::isDirectory);
+        if (existing == null || existing.length == 0) return;
+        stripHandler.postDelayed(() -> worker.execute(() -> {
+            for (File container : existing) purgeRecordTrash(container);
+        }), RECORD_UNDO_MS);
     }
 
     private void askCameraPermission(PermissionRequest request) {
@@ -4022,6 +4566,7 @@ public class MainActivity extends Activity {
         }
         String link = extractLink(input.getText().toString(), xhsMode);
         if (!WorkMedia.isShareLink(link, xhsMode)) {
+            batchNeedsAction("作品链接无法打开");
             showTopNotice(xhsMode ? "请粘贴小红书笔记链接" : "请粘贴抖音作品链接");
             return;
         }
@@ -4029,11 +4574,18 @@ public class MainActivity extends Activity {
             try {
                 workMediaScript = readScriptAsset("post-media.js");
             } catch (Exception error) {
+                batchNeedsAction("作品提取组件加载失败");
                 showTopNotice("作品提取组件加载失败");
                 return;
             }
         }
         if (!link.equals(activeLink) || WorkMedia.pageId(browser.getUrl(), xhsMode) == null) openLink();
+        if (batchTask != null && !batchTask.comments && batchTask.link.equals(link)) {
+            batchTask.state = BatchExtraction.State.RUNNING;
+            batchTask.detail = "";
+            saveBatch();
+            status.setText("正在提取批量队列中的作品");
+        }
         extractWorkButton.setEnabled(false);
         extractWorkButton.setText("正在读取作品…");
         pollWorkMedia(link, xhsMode, requestToken, android.os.SystemClock.uptimeMillis() + 40000);
@@ -4052,12 +4604,17 @@ public class MainActivity extends Activity {
     private void pollWorkMedia(String link, boolean xhs, int token, long deadline) {
         if (!isCurrentWork(link, token)) {
             finishWorkExtraction();
+            if (batchWorkMatches(link, token)) batchNeedsAction("作品提取已中断，可以重试");
             return;
         }
         String page = browser.getUrl();
         if (xhs && page != null && page.equals(finishedWorkPage)
                 && page.startsWith("https://www.xiaohongshu.com/login")) {
             finishWorkExtraction();
+            if (batchWorkMatches(link, token)) {
+                batchNeedsAction("请先在网页中登录，再点「提取作品」");
+                status.setText(batchTask.detail);
+            }
             showTopNotice("请先在小红书网页中登录，再打开笔记提取作品");
             return;
         }
@@ -4067,6 +4624,7 @@ public class MainActivity extends Activity {
             browser.evaluateJavascript(workMediaScript, value -> {
                 if (!isCurrentWork(link, token)) {
                     finishWorkExtraction();
+                    if (batchWorkMatches(link, token)) batchNeedsAction("作品提取已中断，可以重试");
                     return;
                 }
                 try {
@@ -4089,6 +4647,10 @@ public class MainActivity extends Activity {
     private void waitForWorkMedia(String link, boolean xhs, int token, long deadline) {
         if (android.os.SystemClock.uptimeMillis() >= deadline) {
             finishWorkExtraction();
+            if (batchWorkMatches(link, token)) {
+                batchNeedsAction("网页未返回素材。若要求登录或验证，完成后再点「提取作品」");
+                status.setText(batchTask.detail);
+            }
             showTopNotice("网页未提供可读取的作品素材。若页面要求登录或验证，请完成后重试");
         } else readerRoot.postDelayed(() -> pollWorkMedia(link, xhs, token, deadline), 800);
     }
@@ -4096,6 +4658,11 @@ public class MainActivity extends Activity {
     private void finishWorkExtraction() {
         extractWorkButton.setEnabled(true);
         extractWorkButton.setText("提取作品");
+    }
+
+    private boolean batchWorkMatches(String link, int token) {
+        return batchTask != null && !batchTask.comments && batchTask.platform != 2
+                && batchTask.link.equals(link) && requestToken == token;
     }
 
     private LinearLayout.LayoutParams postStatusParams() {
@@ -4216,11 +4783,14 @@ public class MainActivity extends Activity {
             if (stored) records.add(0, record);
             if (!isCurrentWork(link, token)) return;
             if (!stored) {
+                if (batchWorkMatches(link, token)) batchNeedsAction("无法保存作品记录，请检查存储空间");
                 showTopNotice("无法保存作品记录，请检查存储空间");
                 return;
             }
+            boolean batched = batchWorkMatches(link, token);
             showRecord(record);
-            showBottomNotice(postProgress(record));
+            if (batched) finishBatchTask(record);
+            else showBottomNotice(postProgress(record));
         });
     }
 
@@ -4321,6 +4891,7 @@ public class MainActivity extends Activity {
             requestToken++;
             scanButton.setText("继续扫描");
             status.setText("扫描已暂停，已提取的图片保留在暂存记录中");
+            if (batchTask != null && batchTask.comments) batchNeedsAction("已暂停，可继续当前任务");
             return;
         }
         String page = browser.getUrl();
@@ -4355,6 +4926,7 @@ public class MainActivity extends Activity {
             }
         }
         scanning = true;
+        batchCommentRecord(currentRecord);
         xhsIdlePolls = 0;
         scanButton.setText("暂停扫描");
         status.setText("正在读取小红书评论媒体…");
@@ -4396,10 +4968,17 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (xhsIdlePolls == 30) {
-                    status.setText("正在等待后续评论；如网页不再加载，请在评论区向下滑动");
                     browserPanel.setVisibility(View.VISIBLE);
                     updateWebToggle();
                     readerScroll.post(() -> readerScroll.smoothScrollTo(0, browserPanel.getTop()));
+                    if (batchTask != null && batchTask.comments) {
+                        scanning = false;
+                        scanButton.setText("继续扫描");
+                        status.setText("请在网页中打开或滑动评论区，再继续扫描");
+                        recordScanPause("正在等待网页评论，可打开评论区后继续扫描", false);
+                        return;
+                    }
+                    status.setText("正在等待后续评论；如网页不再加载，请在评论区向下滑动");
                 }
                 if (xhsIdlePolls % 4 == 0) browser.evaluateJavascript("window.__xhsCapture?.scroll()", null);
                 browser.postDelayed(() -> pollXhs(token), 500);
@@ -4463,6 +5042,10 @@ public class MainActivity extends Activity {
         status.setText("已扫描 " + record.scanned + " 条评论（主评论 " + record.mainScanned + "、回复 " + record.replyScanned + "），找到 " + media.size() + " 个不同媒体（扫描完成）");
         browserPanel.setVisibility(View.GONE);
         updateWebToggle();
+        if (batchTask != null && batchTask.comments && record.id.equals(batchTask.recordId)) {
+            finishBatchTask(record);
+            return;
+        }
         showBottomNotice("扫描完成 · 主评论 " + record.mainScanned + " · 回复 " + record.replyScanned
                 + " · 素材 " + media.size());
     }
@@ -4782,6 +5365,10 @@ public class MainActivity extends Activity {
                 + (record.emptyReplyLists > 0 ? "；" + record.emptyReplyLists + " 组回复未返回数据" : ""));
         browserPanel.setVisibility(View.GONE);
         updateWebToggle();
+        if (batchTask != null && batchTask.comments && record.id.equals(batchTask.recordId)) {
+            finishBatchTask(record);
+            return;
+        }
         readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
         showBottomNotice("扫描完成 · 主评论 " + record.mainScanned + " · 回复 " + record.replyScanned
                 + " · 素材 " + media.size()
@@ -5221,6 +5808,18 @@ public class MainActivity extends Activity {
                     dialog.setOnDismissListener(ignored -> animated.stop());
                 }
             }
+            if (showingFavorites) {
+                JSONObject source = favoriteSource(item);
+                if (source != null) {
+                    addRetryChoice(panel, "查看作品来源", favoriteSourcePlatform(source.optString("link")),
+                            R.drawable.extract_link, () -> dismissCardDialog(dialog, () -> showFavoriteSource(source)));
+                } else {
+                    TextView unavailable = homeLabel("暂无作品来源", 12, INK2, 450);
+                    LinearLayout.LayoutParams unavailableParams = new LinearLayout.LayoutParams(-1, -2);
+                    unavailableParams.topMargin = dp(8);
+                    panel.addView(unavailable, unavailableParams);
+                }
+            }
             LinearLayout actions = new LinearLayout(this);
             LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(-1, -2);
             ap.topMargin = dp(16);
@@ -5233,7 +5832,7 @@ public class MainActivity extends Activity {
                 ScanRecord work = showingReader ? currentRecord : showingKuaishou && favoriteScreen != null
                         ? favoriteScreen.kuaishouPostRecord : null;
                 if (canOrganizeSave(work)) {
-                    chooseMediaSave(new ArrayList<>(Collections.singletonList(item)), work, null, null);
+                    saveMedia(new ArrayList<>(Collections.singletonList(item)), work, null, null);
                     return;
                 }
                 worker.execute(() -> {
@@ -5266,6 +5865,85 @@ public class MainActivity extends Activity {
         return favoriteFile(item).isFile();
     }
 
+    private boolean isFavoriteSourceLink(String link) {
+        return WorkMedia.isShareLink(link, false) || WorkMedia.isShareLink(link, true)
+                || (!link.isEmpty() && link.equals(KuaishouPost.extractLink(link)));
+    }
+
+    private JSONObject favoriteSource(Media item) {
+        JSONObject known = favoriteSources.optJSONObject(item.hash);
+        if (known != null && isFavoriteSourceLink(known.optString("link"))) return known;
+        for (ScanRecord record : records) {
+            boolean matches;
+            synchronized (record) { matches = record.hashes.contains(item.hash); }
+            if (matches && rememberFavoriteSource(item.hash, record, true)) {
+                saveFavoriteSources();
+                return favoriteSources.optJSONObject(item.hash);
+            }
+        }
+        return null;
+    }
+
+    private boolean rememberFavoriteSource(String hash, ScanRecord record, boolean matched) {
+        if (record == null || !isFavoriteSourceLink(record.link)) return false;
+        JSONObject known = favoriteSources.optJSONObject(hash);
+        if (known != null && (matched || !known.optBoolean("matched"))) return false;
+        try {
+            favoriteSources.put(hash, new JSONObject().put("link", record.link)
+                    .put("caption", record.caption).put("matched", matched));
+            return true;
+        } catch (org.json.JSONException error) {
+            return false;
+        }
+    }
+
+    private void rememberDeletedRecordSources(ScanRecord record) {
+        if (!isFavoriteSourceLink(record.link)) return;
+        boolean changed = false;
+        synchronized (record) {
+            for (Media item : record.items) {
+                if (!favoriteSources.has(item.hash) && isFavorite(item))
+                    changed |= rememberFavoriteSource(item.hash, record, true);
+            }
+        }
+        if (changed) saveFavoriteSources();
+    }
+
+    private void saveFavoriteSources() {
+        getPreferences(MODE_PRIVATE).edit().putString("favorite_sources", favoriteSources.toString()).apply();
+    }
+
+    private String favoriteSourcePlatform(String link) {
+        return WorkMedia.isShareLink(link, true) ? "小红书" : WorkMedia.isShareLink(link, false) ? "抖音" : "快手";
+    }
+
+    private void showFavoriteSource(JSONObject source) {
+        String link = source.optString("link");
+        if (!isFavoriteSourceLink(link)) return;
+        String platform = favoriteSourcePlatform(link);
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("作品来源", platform + (source.optBoolean("matched") ? " · 本机记录匹配" : ""));
+        String caption = source.optString("caption");
+        if (!caption.isEmpty()) {
+            TextView title = homeLabel(caption, 14, INK, 650);
+            title.setMaxLines(2);
+            title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            panel.addView(title, batchRowParams());
+        }
+        TextView address = homeLabel(link, 12, INK2, 450);
+        address.setMaxLines(2);
+        address.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        panel.addView(address, batchRowParams());
+        addSheetChoice(panel, "打开原作品", "", R.drawable.extract_open, false,
+                () -> dismissCardDialog(dialog, () -> {
+                    try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(link))); }
+                    catch (android.content.ActivityNotFoundException error) { showBottomNotice("没有可打开该链接的应用"); }
+                }));
+        addSheetChoice(panel, "复制链接", "", R.drawable.extract_copy, false,
+                () -> dismissCardDialog(dialog, () -> showBottomNotice(copyLink(link) ? "链接已复制" : "复制失败：剪贴板不可用")));
+        showBottomSheet(dialog, panel);
+    }
+
     private void loadFavoriteGroups() {
         try {
             JSONObject data = new JSONObject(getPreferences(MODE_PRIVATE).getString("favorite_groups", "{}"));
@@ -5289,6 +5967,8 @@ public class MainActivity extends Activity {
 
     private void toggleFavorite(Media item) {
         boolean adding = !isFavorite(item);
+        ScanRecord source = showingReader ? currentRecord : showingKuaishou && favoriteScreen != null
+                ? favoriteScreen.kuaishouPostRecord : null;
         worker.execute(() -> {
             String message;
             try {
@@ -5309,8 +5989,14 @@ public class MainActivity extends Activity {
             } catch (Exception error) { message = "收藏操作失败：" + error.getMessage(); }
             String result = message;
             runOnUiThread(() -> {
-                if (!isFavorite(item) && favoriteAssignments.remove(item.hash) != null) saveFavoriteGroups();
-                if (adding && isFavorite(item) && (showingReader || showingWechat || showingKuaishou) && !isFinishing()) {
+                boolean saved = isFavorite(item);
+                if (!saved) {
+                    if (favoriteAssignments.remove(item.hash) != null) saveFavoriteGroups();
+                    if (favoriteSources.remove(item.hash) != null) saveFavoriteSources();
+                } else if (adding && rememberFavoriteSource(item.hash, source, false)) {
+                    saveFavoriteSources();
+                }
+                if (adding && saved && (showingReader || showingWechat || showingKuaishou) && !isFinishing()) {
                     if (showingKuaishou) {
                         FavoritesScreen screen = favoriteScreen;
                         showBottomNotice("已收藏", "查看收藏", () -> openFavorites(screen::restoreKuaishou));
@@ -5367,32 +6053,66 @@ public class MainActivity extends Activity {
 
     private static final String SAVE_DIRECTORY = Environment.DIRECTORY_DOWNLOADS + "/DouYinGetting";
 
+    private enum MediaSaveMode {
+        DIRECT("直接保存", "素材直接保存到下载目录", R.drawable.extract_download),
+        WORK_FOLDER("按作品建文件夹", "按平台和作品分别存放素材", R.drawable.blue_folder),
+        ZIP("打包 ZIP", "将本次保存的素材打包为 ZIP", R.drawable.dialog_file);
+
+        final String label;
+        final String detail;
+        final int icon;
+
+        MediaSaveMode(String label, String detail, int icon) {
+            this.label = label;
+            this.detail = detail;
+            this.icon = icon;
+        }
+    }
+
+    private MediaSaveMode mediaSaveMode() {
+        String stored = getPreferences(MODE_PRIVATE).getString("media_save_mode", "");
+        for (MediaSaveMode mode : MediaSaveMode.values()) {
+            if (mode.name().equals(stored)) return mode;
+        }
+        return MediaSaveMode.DIRECT;
+    }
+
+    private void showMediaSaveSettings(TextView currentValue) {
+        MediaSaveMode selected = mediaSaveMode();
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("保存方式", "应用于有作品来源的提取素材");
+        for (MediaSaveMode mode : MediaSaveMode.values()) {
+            addCheckedSheetChoice(panel, mode.label, mode.detail, mode.icon, mode == selected,
+                    () -> dismissCardDialog(dialog, () -> {
+                        getPreferences(MODE_PRIVATE).edit().putString("media_save_mode", mode.name()).apply();
+                        currentValue.setText(mode.label);
+                    }));
+        }
+        showBottomSheet(dialog, panel);
+    }
+
     private boolean canOrganizeSave(ScanRecord record) {
         return record != null && (record.kuaishou || WorkMedia.isShareLink(record.link, isXhsLink(record.link)));
     }
 
-    private void chooseMediaSave(ArrayList<Media> items, ScanRecord record, Runnable before, Runnable after) {
+    private void saveMedia(ArrayList<Media> items, ScanRecord record, Runnable before, Runnable after) {
         if (items.isEmpty()) {
             showBottomNotice("没有可保存的文件");
             return;
         }
-        if (!canOrganizeSave(record)) {
+        MediaSaveMode mode = mediaSaveMode();
+        if (mode == MediaSaveMode.DIRECT || !canOrganizeSave(record)) {
             saveMediaBatch(items, SAVE_DIRECTORY, null, before, after);
             return;
         }
         String platform = record.kuaishou ? "快手" : isXhsLink(record.link) ? "小红书" : "抖音";
         String name = WorkExport.name(record.caption, record.link);
         String path = SAVE_DIRECTORY + "/" + platform;
-        android.app.Dialog dialog = new android.app.Dialog(this);
-        LinearLayout panel = sheetPanel("选择保存方式", "准备保存 " + items.size() + " 项素材");
-        addSheetChoice(panel, "直接保存", "下载 / DouYinGetting", R.drawable.extract_download, false,
-                () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, SAVE_DIRECTORY, null, before, after)));
-        addSheetChoice(panel, "按作品建文件夹", platform + " / " + name, R.drawable.blue_folder, true,
-                () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, path + "/" + name, null, before, after)));
-        addSheetChoice(panel, "打包 ZIP", platform + " / " + name + ".zip", R.drawable.dialog_file, false,
-                () -> dismissCardDialog(dialog, () -> saveMediaBatch(items, path, name + ".zip", before, after)));
-        dialogNote(panel, "下载 / DouYinGetting / " + platform);
-        showBottomSheet(dialog, panel);
+        if (mode == MediaSaveMode.WORK_FOLDER) {
+            saveMediaBatch(items, path + "/" + name, null, before, after);
+        } else {
+            saveMediaBatch(items, path, name + ".zip", before, after);
+        }
     }
 
     private void saveMediaBatch(ArrayList<Media> items, String directory, String zipName, Runnable before, Runnable after) {
@@ -5557,8 +6277,9 @@ public class MainActivity extends Activity {
             kuaishouLink = link;
             link.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
             link.setHint("粘贴快手作品链接或分享文案");
-            content.addView(readerLinkRow(link, () -> KuaishouPost.extractLink(link.getText().toString())),
-                    new LinearLayout.LayoutParams(-1, dp(46)));
+            LinearLayout linkRow = readerLinkRow(link, () -> KuaishouPost.extractLink(link.getText().toString()));
+            if (batchTask != null) linkRow.setVisibility(View.GONE);
+            content.addView(linkRow, new LinearLayout.LayoutParams(-1, dp(46)));
 
             Button fetch = shareButton("读取正文", v -> {});
             kuaishouFetch = fetch;
@@ -5630,6 +6351,12 @@ public class MainActivity extends Activity {
                     showTopNotice("请粘贴快手作品链接或分享文案");
                     return;
                 }
+                BatchExtraction.Task queued = batchTask;
+                if (queued != null) {
+                    queued.state = BatchExtraction.State.RUNNING;
+                    queued.detail = "";
+                    saveBatch();
+                }
                 ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(link.getWindowToken(), 0);
                 link.clearFocus();
                 busy = true;
@@ -5694,6 +6421,10 @@ public class MainActivity extends Activity {
                             positionFilter(false);
                             setSelecting(false);
                         } else updateActions();
+                        if (queued != null && batchTask == queued) {
+                            if (newRecord == null) batchNeedsAction(statusText);
+                            else finishBatchTask(newRecord);
+                        }
                     });
                 });
             });
@@ -5732,11 +6463,12 @@ public class MainActivity extends Activity {
             select.setEnabled(false);
             if (!imported) header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
             if (kuaishou && savedKuaishou == null) {
-                TextView history = homeLabel("记录", 12, INK2, 650);
+                TextView history = homeLabel(batchTask != null ? "队列" : "记录", 12, INK2, 650);
                 history.setGravity(Gravity.CENTER);
                 history.setSingleLine(true);
                 readerIcon(history, R.drawable.extract_history, 17);
                 history.setOnClickListener(v -> {
+                    if (returnToBatch()) return;
                     if (busy) return;
                     kuaishouRecordsOrigin = this;
                     kuaishouRecords = true;
@@ -5874,7 +6606,7 @@ public class MainActivity extends Activity {
             }
             share = addAction("分享", v -> shareMedia(actionItems()));
             save = addAction(imported ? "保存全部" : "保存", v -> {
-                chooseMediaSave(actionItems(), kuaishouPostRecord, () -> {
+                saveMedia(actionItems(), kuaishouPostRecord, () -> {
                     busy = true;
                     updateActions();
                 }, () -> {
@@ -5964,6 +6696,7 @@ public class MainActivity extends Activity {
 
         void back() {
             if (selecting) setSelecting(false);
+            else if (kuaishou && returnToBatch()) return;
             else if (wechat) showWechat();
             else if (savedKuaishou != null) showRecords();
             else if (kuaishou) showHome();
@@ -5976,10 +6709,11 @@ public class MainActivity extends Activity {
 
         private void collectImported() {
             ArrayList<Media> snapshot = actionItems();
+            ScanRecord source = kuaishouPostRecord;
             busy = true;
             updateActions();
             worker.execute(() -> {
-                int count = 0;
+                ArrayList<Media> collected = new ArrayList<>();
                 for (Media item : snapshot) {
                     File target = favoriteFile(item);
                     File temp = new File(target.getParentFile(), target.getName() + ".tmp");
@@ -5990,12 +6724,15 @@ public class MainActivity extends Activity {
                             Files.copy(item.file.toPath(), temp.toPath(), StandardCopyOption.REPLACE_EXISTING);
                             Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
                         }
-                        count++;
+                        collected.add(item);
                     } catch (Exception ignored) { }
                     finally { temp.delete(); }
                 }
-                int saved = count;
                 runOnUiThread(() -> {
+                    boolean sourcesChanged = false;
+                    for (Media item : collected) sourcesChanged |= rememberFavoriteSource(item.hash, source, false);
+                    if (sourcesChanged) saveFavoriteSources();
+                    int saved = collected.size();
                     busy = false;
                     updateActions();
                     showBottomNotice("已收藏 " + saved + " 个" + (saved < snapshot.size() ? "，失败 " + (snapshot.size() - saved) + " 个" : ""),
@@ -6440,8 +7177,13 @@ public class MainActivity extends Activity {
                     }
                     runOnUiThread(() -> {
                         boolean changed = false;
-                        for (Media item : removed) changed |= favoriteAssignments.remove(item.hash) != null;
+                        boolean sourcesChanged = false;
+                        for (Media item : removed) {
+                            changed |= favoriteAssignments.remove(item.hash) != null;
+                            sourcesChanged |= favoriteSources.remove(item.hash) != null;
+                        }
                         if (changed) saveFavoriteGroups();
+                        if (sourcesChanged) saveFavoriteSources();
                         if (favoriteScreen == this) {
                             busy = false;
                             items.removeAll(removed);
@@ -6565,8 +7307,13 @@ public class MainActivity extends Activity {
     }
 
     private void showNotice(String message, String actionLabel, Runnable action, boolean bottom) {
+        showNotice(message, actionLabel, action, bottom && recordUndoPopup == null, false);
+    }
+
+    private void showNotice(String message, String actionLabel, Runnable action, boolean bottom, boolean undo) {
         if (isFinishing() || isDestroyed()) return;
-        if (noticePopup != null) noticePopup.dismiss();
+        PopupWindow previous = undo ? recordUndoPopup : noticePopup;
+        if (previous != null) previous.dismiss();
         View decor = getWindow().getDecorView();
         LinearLayout notice = new LinearLayout(this);
         notice.setGravity(Gravity.CENTER_VERTICAL);
@@ -6593,6 +7340,7 @@ public class MainActivity extends Activity {
             button.setOnClickListener(v -> {
                 popup.dismiss();
                 if (noticePopup == popup) noticePopup = null;
+                if (recordUndoPopup == popup) recordUndoPopup = null;
                 action.run();
             });
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, dp(40));
@@ -6607,7 +7355,8 @@ public class MainActivity extends Activity {
         notice.measure(View.MeasureSpec.makeMeasureSpec(maxWidth, View.MeasureSpec.AT_MOST),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         popup.setWidth(notice.getMeasuredWidth());
-        noticePopup = popup;
+        if (undo) recordUndoPopup = popup;
+        else noticePopup = popup;
         int[] location = new int[2];
         decor.getLocationOnScreen(location);
         Rect frame = new Rect();
@@ -6625,7 +7374,11 @@ public class MainActivity extends Activity {
                 popup.dismiss();
                 noticePopup = null;
             }
-        }, action == null ? 2000 : 4000);
+            if (recordUndoPopup == popup) {
+                popup.dismiss();
+                recordUndoPopup = null;
+            }
+        }, undo ? RECORD_UNDO_MS : action == null ? 2000 : 4000);
     }
 
     private void saveToDownloads(Media item) throws Exception {
@@ -6668,6 +7421,7 @@ public class MainActivity extends Activity {
         stripHandler.removeCallbacksAndMessages(null);
         if (themeAnimation != null) themeAnimation.cancel();
         if (noticePopup != null) noticePopup.dismiss();
+        if (recordUndoPopup != null) recordUndoPopup.dismiss();
         for (Animatable animation : animations) animation.stop();
         worker.shutdownNow();
         browser.destroy();
@@ -6685,13 +7439,15 @@ public class MainActivity extends Activity {
     }
 
     private void leaveReader() {
+        if (returnToBatch()) return;
         if (viewingSavedRecord && !resumedFromHome) showRecords();
         else showHome();
     }
 
     @Override public void onBackPressed() {
         if (themeAnimation != null) themeAnimation.end();
-        if (showingWechat && currentWechatImport == null) showHome();
+        if (showingBatch) showHome();
+        else if (showingWechat && currentWechatImport == null) showHome();
         else if (showingWechat) favoriteScreen.back();
         else if (showingKuaishou) favoriteScreen.back();
         else if (showingGroupManager) favoriteScreen.leaveGroupManager();
