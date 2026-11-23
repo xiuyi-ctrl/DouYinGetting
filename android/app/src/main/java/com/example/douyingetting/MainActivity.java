@@ -2605,7 +2605,7 @@ public class MainActivity extends Activity {
         }
         addRecordAction(panel, "删除记录", R.drawable.dialog_trash, DANGER, () -> {
             popup.dismiss();
-            confirmDelete(record, anchor, onDeleted);
+            confirmDelete(record, onDeleted);
         });
         showRecordPopup(popup, anchor);
     }
@@ -2845,6 +2845,7 @@ public class MainActivity extends Activity {
         window.setBackgroundDrawableResource(android.R.color.transparent);
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
         window.setDimAmount(darkMode ? 0.55f : 0.28f);
+        window.setGravity(Gravity.CENTER);
         window.setWindowAnimations(0);
         dialog.show();
         window.setLayout(Math.min(dp(320), getResources().getDisplayMetrics().widthPixels - dp(48)), -2);
@@ -2907,21 +2908,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void confirmDelete(ScanRecord record, View anchor, Runnable onDeleted) {
-        if (!anchor.isAttachedToWindow()) return;
-        LinearLayout panel = dialogPanel(0, true, "删除这条记录？", "记录和暂存素材将被删除。已保存的文件仍在下载目录。");
-        if (!record.caption.isEmpty()) dialogNote(panel, record.caption);
-        PopupWindow popup = recordPopup(panel, 284);
-        LinearLayout actions = new LinearLayout(this);
-        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
-        rowParams.topMargin = dp(14);
-        panel.addView(actions, rowParams);
-        actions.addView(dialogButton("保留记录", false, false, v -> popup.dismiss()),
-                new LinearLayout.LayoutParams(0, -2, 1));
-        LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(0, -2, 1);
-        deleteParams.leftMargin = dp(8);
-        actions.addView(dialogButton("删除记录", true, true, v -> {
-            popup.dismiss();
+    private void confirmDelete(ScanRecord record, Runnable onDeleted) {
+        showConfirmation(0, true, "删除这条记录？", "记录和暂存素材将被删除。已保存的文件仍在下载目录。",
+                "保留记录", "删除记录", null, () -> {
             if (currentRecord == record) {
                 scanning = false;
                 requestToken++;
@@ -2945,8 +2934,7 @@ public class MainActivity extends Activity {
                     }
                 });
             });
-        }), deleteParams);
-        showRecordPopup(popup, anchor);
+        }, record.caption.isEmpty() ? null : record.caption);
     }
 
     private void showReader() {
