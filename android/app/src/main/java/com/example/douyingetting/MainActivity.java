@@ -91,6 +91,9 @@ public class MainActivity extends Activity {
     private Bitmap homeRabbit;
     private ScanRecord currentRecord;
     private String activeLink;
+    private Button extractWorkButton;
+    private String workMediaScript;
+    private String finishedWorkPage;
     private boolean viewingSavedRecord;
     private boolean resumedFromHome;
     private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102, IMPORT_WECHAT = 7103;
@@ -272,6 +275,7 @@ public class MainActivity extends Activity {
 
     private static class ScanRecord {
         boolean kuaishou;
+        boolean workMedia;
         String caption = "";
         final String id;
         final String link;
@@ -1100,7 +1104,7 @@ public class MainActivity extends Activity {
         addHomeFeature(content, 2);
         ScanRecord latest = null;
         for (ScanRecord record : records) {
-            if (record != null && extractLink(record.link, isXhsLink(record.link)) != null) {
+            if (record != null && !record.workMedia && extractLink(record.link, isXhsLink(record.link)) != null) {
                 latest = record;
                 break;
             }
@@ -2364,7 +2368,7 @@ public class MainActivity extends Activity {
                     : record.scanned + " 条评论";
             if (xhsRecord && record.scanned > 0 && record.mainScanned + record.replyScanned == 0)
                 progress = record.scanned + " 条评论";
-            String detail = ("legacy".equals(record.id) ? "旧版缓存" : date.format(record.createdAt) + (record.kuaishou ? "" : " · " + progress))
+            String detail = ("legacy".equals(record.id) ? "旧版缓存" : date.format(record.createdAt) + (record.kuaishou ? "" : record.workMedia ? " · 作品正文" : " · " + progress))
                     + " · " + count + " 素材";
             TextView sub = label(detail, 11, INK3, false);
             sub.setSingleLine(true);
@@ -2459,8 +2463,8 @@ public class MainActivity extends Activity {
             scanButton.setText(scanning ? "暂停扫描" : "继续扫描");
             status.setText(scanning ? "正在扫描，离开本页不会中断" : "扫描已暂停，已提取素材保留在暂存记录中");
         } else {
-            scanButton.setText(canResume(record) ? "继续扫描" : "重新扫描");
-            status.setText(canResume(record) ? "已打开本机暂存记录，可继续扫描"
+            scanButton.setText(record.workMedia ? "扫描评论" : canResume(record) ? "继续扫描" : "重新扫描");
+            status.setText(record.workMedia ? "已打开作品正文记录" : canResume(record) ? "已打开本机暂存记录，可继续扫描"
                     : "已打开本机暂存记录；重新扫描会生成新记录");
         }
         showReader();
@@ -2470,7 +2474,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean canResume(ScanRecord record) {
-        return record != null && !record.kuaishou && !record.complete && extractLink(record.link, isXhsLink(record.link)) != null;
+        return record != null && !record.kuaishou && !record.workMedia && !record.complete && extractLink(record.link, isXhsLink(record.link)) != null;
     }
 
     private boolean isLiveRecord(ScanRecord record) {
@@ -2896,6 +2900,10 @@ public class MainActivity extends Activity {
         scanButton.setMinHeight(0);
         scanButton.setStateListAnimator(null);
         scanButton.setOnClickListener(v -> {
+            if (!extractWorkButton.isEnabled()) {
+                showTopNotice("正在提取作品，请稍候");
+                return;
+            }
             if (viewingSavedRecord && loadingSavedRecordPage) {
                 showTopNotice("作品正在打开，请稍候");
                 return;
@@ -2967,6 +2975,15 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams scanButtonParams = new LinearLayout.LayoutParams(0, -1, 1);
         scanButtonParams.leftMargin = dp(10);
         actionRow.addView(scanButton, scanButtonParams);
+        extractWorkButton = shareButton("提取作品", v -> startWorkExtraction());
+        extractWorkButton.setTextSize(14);
+        extractWorkButton.setTypeface(homeTypeface(700));
+        extractWorkButton.setBackground(outlined(12, SURFACE));
+        readerIcon(extractWorkButton, R.drawable.extract_download, 18);
+        LinearLayout.LayoutParams extractParams = new LinearLayout.LayoutParams(-1, dp(40));
+        extractParams.topMargin = dp(8);
+        inputCard.addView(extractWorkButton, extractParams);
+
 
         resultAnchor = homeLabel("提取结果", 18, INK, 750);
         LinearLayout resultHeader = new LinearLayout(this);
@@ -3101,9 +3118,10 @@ public class MainActivity extends Activity {
             scanButton.setTag(scanning);
         }
         ScanRecord record = currentRecord;
-        scanDetails.setVisibility(record == null ? View.GONE : View.VISIBLE);
-        scanCountLine.setVisibility(record == null ? View.GONE : View.VISIBLE);
-        if (record == null) return;
+        boolean showCommentDetails = record != null && !record.workMedia;
+        scanDetails.setVisibility(showCommentDetails ? View.VISIBLE : View.GONE);
+        scanCountLine.setVisibility(showCommentDetails ? View.VISIBLE : View.GONE);
+        if (!showCommentDetails) return;
         scanCountLine.setText(scanCounts(record) + (scanning ? "\n已找到 " + media.size() + " 个素材" : ""));
         synchronized (record) {
             int issues = record.issueCount + Math.max(0, record.emptyReplyLists - record.loggedEmptyReplyLists);
@@ -3313,6 +3331,15 @@ public class MainActivity extends Activity {
         worker.execute(() -> persistRecord(record));
     }
 
+    private String readScriptAsset(String name) throws java.io.IOException {
+        try (InputStream source = getAssets().open(name); ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+            byte[] chunk = new byte[8192];
+            int count;
+            while ((count = source.read(chunk)) != -1) buffer.write(chunk, 0, count);
+            return buffer.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
     private void setupBrowser() {
         browser = new WebView(this);
         browser.setOnTouchListener((view, event) -> {
@@ -3328,17 +3355,20 @@ public class MainActivity extends Activity {
         browser.getSettings().setDisplayZoomControls(false);
         browser.getSettings().setUserAgentString(DESKTOP_USER_AGENT);
         CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true);
-        try (InputStream source = getAssets().open("xhs-capture.js"); ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
-            byte[] chunk = new byte[8192];
-            int count;
-            while ((count = source.read(chunk)) != -1) buffer.write(chunk, 0, count);
-            xhsCaptureScript = buffer.toString(StandardCharsets.UTF_8.name());
+        try {
+            xhsCaptureScript = readScriptAsset("xhs-capture.js");
             xhsCaptureSupported = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
             if (xhsCaptureSupported) WebViewCompat.addDocumentStartJavaScript(browser, xhsCaptureScript,
                     Collections.singleton("https://www.xiaohongshu.com"));
         } catch (Exception error) {
             xhsCaptureSupported = false;
         }
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                WebViewCompat.addDocumentStartJavaScript(browser, readScriptAsset("post-media-capture.js"),
+                        Collections.singleton("https://www.douyin.com"));
+            }
+        } catch (Exception ignored) { }
         browser.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri url = request.getUrl();
@@ -3379,7 +3409,12 @@ public class MainActivity extends Activity {
                 }
                 return null;
             }
+            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                finishedWorkPage = null;
+            }
+
             @Override public void onPageFinished(WebView view, String url) {
+                if (url.equals(view.getUrl())) finishedWorkPage = url;
                 if ("about:blank".equals(url)) return;
                 boolean resumedPage = viewingSavedRecord && loadingSavedRecordPage && url.equals(view.getUrl())
                         && (xhsMode ? url.startsWith("https://www.xiaohongshu.com/") : url.startsWith("https://www.douyin.com/"));
@@ -3436,6 +3471,7 @@ public class MainActivity extends Activity {
                 JSONObject data = new JSONObject(new String(Files.readAllBytes(manifest.toPath()), StandardCharsets.UTF_8));
                 ScanRecord record = new ScanRecord(folder.getName(), data.getString("link"), data.getLong("createdAt"), folder);
                 record.kuaishou = "kuaishou".equals(data.optString("platform"));
+                record.workMedia = data.optBoolean("workMedia");
                 record.caption = data.optString("caption");
                 record.scanned = data.optInt("scanned");
                 record.mainScanned = data.optInt("mainScanned");
@@ -3547,6 +3583,7 @@ public class MainActivity extends Activity {
                 data.put("platform", "kuaishou");
                 data.put("caption", record.caption);
             }
+            if (record.workMedia) data.put("workMedia", true);
             data.put("scanned", record.scanned);
             data.put("mainScanned", record.mainScanned);
             data.put("replyScanned", record.replyScanned);
@@ -3661,6 +3698,125 @@ public class MainActivity extends Activity {
         else webToggleArrow.setRotation(expanded ? 180f : 0f);
     }
 
+    private void startWorkExtraction() {
+        if (scanning || currentRecord != null && currentRecord.processingPage) {
+            showTopNotice("请先暂停评论扫描，等当前页保存完毕");
+            return;
+        }
+        String link = extractLink(input.getText().toString(), xhsMode);
+        if (!WorkMedia.isShareLink(link, xhsMode)) {
+            showTopNotice(xhsMode ? "请粘贴小红书笔记链接" : "请粘贴抖音作品链接");
+            return;
+        }
+        if (workMediaScript == null) {
+            try {
+                workMediaScript = readScriptAsset("post-media.js");
+            } catch (Exception error) {
+                showTopNotice("作品提取组件加载失败");
+                return;
+            }
+        }
+        if (!link.equals(activeLink) || WorkMedia.pageId(browser.getUrl(), xhsMode) == null) openLink();
+        extractWorkButton.setEnabled(false);
+        extractWorkButton.setText("正在读取作品…");
+        pollWorkMedia(link, xhsMode, requestToken, android.os.SystemClock.uptimeMillis() + 40000);
+    }
+
+    private boolean isCurrentWork(String link, int token) {
+        return showingReader && requestToken == token && link.equals(activeLink)
+                && link.equals(extractLink(input.getText().toString(), xhsMode));
+    }
+
+    private void pollWorkMedia(String link, boolean xhs, int token, long deadline) {
+        if (!isCurrentWork(link, token)) {
+            finishWorkExtraction();
+            return;
+        }
+        String page = browser.getUrl();
+        if (xhs && page != null && page.equals(finishedWorkPage)
+                && page.startsWith("https://www.xiaohongshu.com/login")) {
+            finishWorkExtraction();
+            showTopNotice("请先在小红书网页中登录，再打开笔记提取作品");
+            return;
+        }
+        String pageId = WorkMedia.pageId(page, xhs);
+        String linkId = WorkMedia.pageId(link, xhs);
+        if (pageId != null && (linkId == null || linkId.equals(pageId)) && page.equals(finishedWorkPage)) {
+            browser.evaluateJavascript(workMediaScript, value -> {
+                if (!isCurrentWork(link, token)) {
+                    finishWorkExtraction();
+                    return;
+                }
+                try {
+                    JSONObject data = new JSONObject(value);
+                    JSONArray images = data.getJSONArray("images");
+                    JSONArray videos = data.getJSONArray("videos");
+                    if (page.equals(browser.getUrl()) && pageId.equals(data.optString("id"))
+                            && (images.length() > 0 || videos.length() > 0)) {
+                        extractWorkButton.setText("正在保存作品…");
+                        worker.execute(() -> saveWorkMedia(link, token, images, videos));
+                        return;
+                    }
+                } catch (org.json.JSONException ignored) { }
+                waitForWorkMedia(link, xhs, token, deadline);
+            });
+        } else waitForWorkMedia(link, xhs, token, deadline);
+    }
+
+    private void waitForWorkMedia(String link, boolean xhs, int token, long deadline) {
+        if (android.os.SystemClock.uptimeMillis() >= deadline) {
+            finishWorkExtraction();
+            showTopNotice("网页未提供可读取的作品素材。若页面要求登录或验证，请完成后重试");
+        } else readerRoot.postDelayed(() -> pollWorkMedia(link, xhs, token, deadline), 800);
+    }
+
+    private void finishWorkExtraction() {
+        extractWorkButton.setEnabled(true);
+        extractWorkButton.setText("提取作品");
+    }
+
+    private void saveWorkMedia(String link, int token, JSONArray images, JSONArray videos) {
+        String id = UUID.randomUUID().toString();
+        ScanRecord record = new ScanRecord(id, link, System.currentTimeMillis(), new File(recordsFolder(), id));
+        record.workMedia = true;
+        int saved = 0;
+        for (int i = 0; i < images.length(); i++) {
+            JSONArray variants = images.optJSONArray(i);
+            if (variants == null) continue;
+            for (int j = 0; j < variants.length(); j++) {
+                try {
+                    Media item = readPostImage(new URL(variants.getString(j)), record);
+                    if (record.hashes.add(item.hash)) record.items.add(item);
+                    saved++;
+                    break;
+                } catch (Exception ignored) { }
+            }
+        }
+        for (int i = 0; i < videos.length(); i++) {
+            try {
+                Media item = readPostVideo(new URL(videos.getString(i)), record);
+                if (record.hashes.add(item.hash)) record.items.add(item);
+                saved++;
+                break;
+            } catch (Exception ignored) { }
+        }
+        int failed = images.length() + (videos.length() > 0 ? 1 : 0) - saved;
+        record.complete = failed == 0;
+        boolean stored = !record.items.isEmpty() && persistRecord(record);
+        if (!stored) deleteRecordFiles(record);
+        runOnUiThread(() -> {
+            finishWorkExtraction();
+            if (stored) records.add(0, record);
+            if (!isCurrentWork(link, token)) return;
+            if (!stored) {
+                showTopNotice(record.items.isEmpty() ? "作品素材下载失败，请检查网络后重试" : "无法保存作品记录，请检查存储空间");
+                return;
+            }
+            showRecord(record);
+            showBottomNotice("已提取 " + record.items.size() + " 个作品素材" + (failed > 0 ? "，" + failed + " 项下载失败" : ""));
+        });
+    }
+
     private void openLink() {
         String link = extractLink(input.getText().toString(), xhsMode);
         if (link == null) {
@@ -3699,6 +3855,7 @@ public class MainActivity extends Activity {
         input.clearFocus();
         InputMethodManager keyboard = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (keyboard != null) keyboard.hideSoftInputFromWindow(input.getWindowToken(), 0);
+        finishedWorkPage = null;
         browser.loadUrl(link);
         readerScroll.post(() -> readerScroll.smoothScrollTo(0, browserPanel.getTop()));
     }
@@ -4794,8 +4951,17 @@ public class MainActivity extends Activity {
         new FavoritesScreen(false, true, record).show();
     }
 
-    private Media readKuaishouImage(java.net.URL url, File folder) throws Exception {
-        byte[] bytes = KuaishouPost.read(url, 12 * 1024 * 1024, true);
+    private void transferPostMedia(ScanRecord record, URL url, int limit, OutputStream output) throws Exception {
+        if (record.kuaishou) KuaishouPost.transfer(url, limit, true, output);
+        else WorkMedia.transfer(url, isXhsLink(record.link), limit, output);
+    }
+
+    private Media readPostImage(URL url, ScanRecord record) throws Exception {
+        File folder = record.folder;
+        String kind = record.kuaishou ? "快手正文图片" : "作品图片";
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        transferPostMedia(record, url, (record.kuaishou ? 12 : 24) * 1024 * 1024, buffer);
+        byte[] bytes = buffer.toByteArray();
         String mime = format(bytes);
         if (mime == null || !mime.startsWith("image/")) throw new java.io.IOException("图片格式无法识别");
         StringBuilder hash = new StringBuilder();
@@ -4809,17 +4975,19 @@ public class MainActivity extends Activity {
             Drawable preview = decodeThumbnail(temp);
             if (preview == null) throw new java.io.IOException("图片无法预览");
             Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            return new Media(file, hash.toString(), mime, "", "快手正文图片", preview, preview instanceof Animatable);
+            return new Media(file, hash.toString(), mime, "", kind, preview, preview instanceof Animatable);
         } finally { temp.delete(); }
     }
 
-    private Media readKuaishouVideo(java.net.URL url, File folder) throws Exception {
+    private Media readPostVideo(URL url, ScanRecord record) throws Exception {
+        File folder = record.folder;
+        String kind = record.kuaishou ? "快手正文视频" : "作品视频";
         if (!folder.isDirectory() && !folder.mkdirs()) throw new java.io.IOException("无法创建暂存目录");
         File pending = File.createTempFile("video-", ".mp4", folder);
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             try (OutputStream out = new java.security.DigestOutputStream(new FileOutputStream(pending), digest)) {
-                KuaishouPost.transfer(url, 160 * 1024 * 1024, true, out);
+                transferPostMedia(record, url, 160 * 1024 * 1024, out);
             }
             android.media.MediaExtractor extractor = new android.media.MediaExtractor();
             boolean hasVideo = false;
@@ -4835,7 +5003,7 @@ public class MainActivity extends Activity {
             for (byte b : digest.digest()) hash.append(String.format(Locale.ROOT, "%02x", b & 255));
             File file = new File(folder, hash + ".mp4");
             Files.move(pending.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            return new Media(file, hash.toString(), "video/mp4", "", "快手正文视频", decodeThumbnail(file), true);
+            return new Media(file, hash.toString(), "video/mp4", "", kind, decodeThumbnail(file), true);
         } finally { pending.delete(); }
     }
 
@@ -4963,16 +5131,18 @@ public class MainActivity extends Activity {
                         post = KuaishouPost.open(text);
                         String id = UUID.randomUUID().toString();
                         File folder = new File(recordsFolder(), id);
+                        ScanRecord record = new ScanRecord(id, post.link, System.currentTimeMillis(), folder);
+                        record.kuaishou = true;
                         for (ArrayList<java.net.URL> variants : post.images) {
                             for (java.net.URL url : variants) {
-                                try { found.add(readKuaishouImage(url, folder)); break; }
+                                try { found.add(readPostImage(url, record)); break; }
                                 catch (Exception ignored) { }
                             }
                         }
                         if (!post.videos.isEmpty()) {
                             runOnUiThread(() -> progress.setText("正在下载视频…"));
                             for (java.net.URL url : post.videos) {
-                                try { found.add(readKuaishouVideo(url, folder)); break; }
+                                try { found.add(readPostVideo(url, record)); break; }
                                 catch (Exception ignored) { }
                             }
                             message = found.isEmpty() ? "视频下载失败，请检查网络后重试" : "已读取视频，可以预览或保存";
@@ -4983,8 +5153,6 @@ public class MainActivity extends Activity {
                             message = "已读取 " + found.size() + " 张配图" + (failed > 0 ? "，" + failed + " 张读取失败" : "");
                         }
                         if (!found.isEmpty() || (post.images.isEmpty() && post.videos.isEmpty())) {
-                            ScanRecord record = new ScanRecord(id, post.link, System.currentTimeMillis(), folder);
-                            record.kuaishou = true;
                             record.caption = post.caption;
                             record.complete = post.images.size() <= found.size() && (post.videos.isEmpty() || !found.isEmpty());
                             record.items.addAll(found);
