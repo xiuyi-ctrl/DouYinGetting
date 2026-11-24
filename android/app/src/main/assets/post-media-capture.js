@@ -13,7 +13,12 @@
             const images = item.images?.length ? item.images : item.image_post_info?.images;
             const previous = window.__xiuyiWorkMedia;
             if (previous?.aweme_id === id && (previous.images?.length || 0) > (images?.length || 0)) return;
-            window.__xiuyiWorkMedia = {aweme_id: id, images, video: item.video};
+            const slides = previous?.aweme_id === id && images?.length && previous.images?.length === images.length
+                ? images.map((image, index) => {
+                    const earlier = previous.images[index];
+                    return earlier?.video && !image?.video ? {...image, video: earlier.video} : image;
+                }) : images;
+            window.__xiuyiWorkMedia = {aweme_id: id, images: slides, video: item.video};
         }
     };
 

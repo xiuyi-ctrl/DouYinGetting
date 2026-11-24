@@ -142,6 +142,7 @@ public class MainActivity extends Activity {
     private LinearLayout results;
     private Button scanButton;
     private PopupWindow noticePopup;
+    private android.app.Dialog fullscreenPreviewDialog;
     private PopupWindow recordUndoPopup;
     private Runnable refreshRecordList = () -> {};
     private final ArrayList<PendingRecordDeletion> pendingRecordDeletions = new ArrayList<>();
@@ -290,11 +291,13 @@ public class MainActivity extends Activity {
         final String source;
         final String commentId;
         final String kind;
+        final JSONArray videoUrls;
 
-        FailedMedia(String source, String commentId, String kind) {
+        FailedMedia(String source, String commentId, String kind, JSONArray videoUrls) {
             this.source = source;
             this.commentId = commentId;
             this.kind = kind;
+            this.videoUrls = videoUrls;
         }
     }
 
@@ -4101,7 +4104,7 @@ public class MainActivity extends Activity {
             int success = 0;
             try {
                 for (FailedMedia item : pending) {
-                    if (download(record, item.source, item.commentId, item.kind)) success++;
+                    if (download(record, item.source, item.commentId, item.kind, item.videoUrls)) success++;
                 }
                 persistRecord(record);
             } finally { record.processingPage = false; }
@@ -4346,7 +4349,8 @@ public class MainActivity extends Activity {
                     if (failure == null) continue;
                     String source = failure.optString("source");
                     if (!source.startsWith("https://") && !source.startsWith("http://")) continue;
-                    record.failedMedia.put(source, new FailedMedia(source, failure.optString("commentId"), failure.optString("kind")));
+                    record.failedMedia.put(source, new FailedMedia(source, failure.optString("commentId"),
+                            failure.optString("kind"), failure.optJSONArray("videoUrls")));
                 }
                 JSONObject failedReplies = data.optJSONObject("failedReplies");
                 if (failedReplies != null && !isXhsLink(record.link)) {
@@ -4461,6 +4465,7 @@ public class MainActivity extends Activity {
                     entry.put("source", item.source);
                     entry.put("commentId", item.commentId);
                     entry.put("kind", item.kind);
+                    if (item.videoUrls != null) entry.put("videoUrls", item.videoUrls);
                     failures.put(entry);
                 }
                 data.put("failedMedia", failures);
@@ -4667,11 +4672,17 @@ public class MainActivity extends Activity {
                     JSONObject data = new JSONObject(value);
                     JSONArray images = data.getJSONArray("images");
                     JSONArray videos = data.getJSONArray("videos");
+                    JSONArray liveVideos = data.getJSONArray("liveVideos");
                     if (page.equals(browser.getUrl()) && pageId.equals(data.optString("id"))
-                            && (images.length() > 0 || videos.length() > 0)) {
+                            && (images.length() > 0 || videos.length() > 0 || liveVideos.length() > 0)) {
+                        if (!xhs && images.length() > 0 && (liveVideos.length() == 0 || data.optBoolean("awaitingLive"))
+                                && deadline - android.os.SystemClock.uptimeMillis() > 36000) {
+                            waitForWorkMedia(link, xhs, token, deadline);
+                            return;
+                        }
                         extractWorkButton.setText("正在保存作品…");
                         String title = data.optString("title");
-                        worker.execute(() -> saveWorkMedia(link, token, title, images, videos));
+                        worker.execute(() -> saveWorkMedia(link, token, title, images, videos, liveVideos));
                         return;
                     }
                 } catch (org.json.JSONException ignored) { }
@@ -4801,7 +4812,8 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void saveWorkMedia(String link, int token, String title, JSONArray images, JSONArray videos) {
+    private void saveWorkMedia(String link, int token, String title, JSONArray images, JSONArray videos,
+                               JSONArray liveVideos) {
         String id = UUID.randomUUID().toString();
         ScanRecord record = new ScanRecord(id, link, System.currentTimeMillis(), new File(recordsFolder(), id));
         record.workMedia = true;
@@ -4811,6 +4823,10 @@ public class MainActivity extends Activity {
             if (urls != null) record.postFailures.add(new PostFailure(urls, false));
         }
         if (videos.length() > 0) record.postFailures.add(new PostFailure(videos, true));
+        for (int i = 0; i < liveVideos.length(); i++) {
+            JSONArray urls = liveVideos.optJSONArray(i);
+            if (urls != null && urls.length() > 0) record.postFailures.add(new PostFailure(urls, true));
+        }
         record.postTotal = record.postFailures.size();
         boolean stored = downloadPostFailures(record);
         if (!stored) deleteRecordFiles(record);
@@ -5381,7 +5397,15 @@ public class MainActivity extends Activity {
         JSONArray images = comment.optJSONArray("image_list");
         if (images != null) for (int i = 0; i < images.length(); i++) {
             JSONObject image = images.optJSONObject(i);
-            if (image != null) download(record, url(image.optJSONObject("origin_url")), id, reply ? "回复图片" : "图片");
+            if (image == null) continue;
+            download(record, url(image.optJSONObject("origin_url")), id, reply ? "回复图片" : "图片");
+            JSONArray clips = commentLiveVideoUrls(image);
+            if (clips.length() > 0) {
+                download(record, clips.optString(0), id, reply ? "回复实况" : "评论实况", clips);
+            } else if (image.optInt("live_photo_type") == 1 || image.optInt("livePhotoType") == 1
+                    || image.optInt("clip_type") == 5 || image.optInt("clipType") == 5) {
+                record.addIssue("实况图（评论 ID " + id + "）：网页未返回视频地址");
+            }
         }
         JSONObject sticker = comment.optJSONObject("sticker");
         if (sticker != null) {
@@ -5389,6 +5413,40 @@ public class MainActivity extends Activity {
             if (source == null) source = url(sticker.optJSONObject("static_url"));
             download(record, source, id, reply ? "回复表情" : "表情");
         }
+    }
+
+    private static JSONArray commentLiveVideoUrls(JSONObject image) {
+        java.util.LinkedHashSet<String> urls = new java.util.LinkedHashSet<>();
+        JSONObject livePhoto = image.optJSONObject("live_photo");
+        if (livePhoto == null) livePhoto = image.optJSONObject("livePhoto");
+        for (JSONObject video : new JSONObject[]{image.optJSONObject("video"), livePhoto,
+                livePhoto == null ? null : livePhoto.optJSONObject("video")}) {
+            if (video == null) continue;
+            for (String key : new String[]{"play_addr_h264", "playAddrH264", "play_addr", "playAddr", "play_url",
+                    "download_addr", "downloadAddr"}) {
+                addCommentVideoUrls(urls, video.opt(key));
+            }
+        }
+        addCommentVideoUrls(urls, image.opt("video_play_addr"));
+        addCommentVideoUrls(urls, image.opt("videoPlayAddr"));
+        return new JSONArray(urls);
+    }
+
+    private static void addCommentVideoUrls(java.util.Set<String> urls, Object address) {
+        if (address instanceof JSONObject) {
+            JSONObject object = (JSONObject) address;
+            JSONArray alternatives = object.optJSONArray("url_list");
+            if (alternatives == null) alternatives = object.optJSONArray("urlList");
+            if (alternatives != null) {
+                for (int i = 0; i < alternatives.length(); i++) addCommentVideoUrls(urls, alternatives.opt(i));
+            }
+            address = object.opt("url");
+        }
+        if (!(address instanceof String)) return;
+        String link = (String) address;
+        if (link.startsWith("//")) link = "https:" + link;
+        if (link.startsWith("http://")) link = "https://" + link.substring(7);
+        if (link.startsWith("https://")) urls.add(link);
     }
 
     private void finishDouyinScan(ScanRecord record) {
@@ -5412,8 +5470,21 @@ public class MainActivity extends Activity {
     }
 
     private boolean download(ScanRecord record, String source, String commentId, String kind) {
+        return download(record, source, commentId, kind, null);
+    }
+
+    private boolean download(ScanRecord record, String source, String commentId, String kind, JSONArray videoUrls) {
         if (source == null || source.isEmpty()) return false;
         try {
+            if (videoUrls != null) {
+                for (int i = 0; i < videoUrls.length(); i++) {
+                    try {
+                        Media video = readPostVideo(new URL(videoUrls.getString(i)), record, commentId, kind);
+                        return publishCommentMedia(record, source, video);
+                    } catch (Exception ignored) { }
+                }
+                throw new java.io.IOException("实况视频未能下载或识别");
+            }
             boolean xhs = isXhsLink(record.link);
             String original = xhs && !"视频".equals(kind) ? originalXhsUrl(source) : source;
             byte[] bytes = null;
@@ -5442,31 +5513,35 @@ public class MainActivity extends Activity {
             try (OutputStream out = new FileOutputStream(file)) { out.write(bytes); }
             Drawable thumbnail = decodeThumbnail(file);
             Media item = new Media(file, hash, mime, commentId, kind, thumbnail, thumbnail instanceof Animatable);
-            synchronized (record) {
-                record.hashes.add(hash);
-                record.items.add(item);
-                record.failedMedia.remove(source);
-            }
-            persistRecord(record);
-            runOnUiThread(() -> {
-                if (currentRecord != record || !showingReader) return;
-                if (media.contains(item)) return;
-                media.add(item);
-                updateResultLabels();
-                if (matchesFilter(item)) addTile(item);
-                if (media.size() == 1) readerScroll.postDelayed(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()), 200);
-            });
-            return true;
+            return publishCommentMedia(record, source, item);
         } catch (Exception error) {
-            String reason = "媒体格式无法识别".equals(error.getMessage()) ? "媒体格式无法识别" : "下载或写入暂存失败";
+            String reason = videoUrls != null ? "实况视频未能下载或识别"
+                    : "媒体格式无法识别".equals(error.getMessage()) ? "媒体格式无法识别" : "下载或写入暂存失败";
             synchronized (record) {
                 if (!record.failedMedia.containsKey(source)) {
-                    record.failedMedia.put(source, new FailedMedia(source, commentId, kind));
+                    record.failedMedia.put(source, new FailedMedia(source, commentId, kind, videoUrls));
                     record.addIssue(kind + (commentId == null || commentId.isEmpty() ? "" : "（评论 ID " + commentId + "）") + "： " + reason);
                 }
             }
             return false;
         }
+    }
+
+    private boolean publishCommentMedia(ScanRecord record, String source, Media item) {
+        synchronized (record) {
+            record.failedMedia.remove(source);
+            if (!record.hashes.add(item.hash)) return true;
+            record.items.add(item);
+        }
+        persistRecord(record);
+        runOnUiThread(() -> {
+            if (currentRecord != record || !showingReader || media.contains(item)) return;
+            media.add(item);
+            updateResultLabels();
+            if (matchesFilter(item)) addTile(item);
+            if (media.size() == 1) readerScroll.postDelayed(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()), 200);
+        });
+        return true;
     }
 
     private static String originalXhsUrl(String source) {
@@ -5836,30 +5911,25 @@ public class MainActivity extends Activity {
             Animatable animation = null;
             if (isVideo) {
                 info.setText(formatName + " · " + size);
-                VideoView video = new VideoView(this);
+                PreviewVideoView video = new PreviewVideoView(this);
                 video.setVideoPath(item.file.getAbsolutePath());
                 video.setOnPreparedListener(player -> {
                     int width = player.getVideoWidth(), height = player.getVideoHeight();
                     info.setText(formatName + (width > 0 && height > 0 ? " · " + width + " × " + height : "") + " · " + size);
-                    video.start();
+                    video.onVideoPrepared(player);
                 });
                 video.setOnErrorListener((player, what, extra) -> {
                     dismissCardDialog(dialog, () -> showMessage(R.drawable.extract_play, "暂时无法播放",
                             "当前设备未能播放这段视频。可以先保存文件，再用其他播放器打开。"));
                     return true;
                 });
-                video.setMediaController(new MediaController(this));
                 frame.addView(video, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+                addFullscreenTarget(frame, "放大视频", () -> showFullscreenPreview(item, dialog, video, null));
                 dialog.setOnDismissListener(ignored -> video.stopPlayback());
+                video.start();
             } else {
                 int[] dimensions = new int[2];
-                Drawable drawable = ImageDecoder.decodeDrawable(ImageDecoder.createSource(item.file), (decoder, imageInfo, source) -> {
-                    dimensions[0] = imageInfo.getSize().getWidth();
-                    dimensions[1] = imageInfo.getSize().getHeight();
-                    int longest = Math.max(dimensions[0], dimensions[1]);
-                    if (longest > 1600) decoder.setTargetSize(Math.max(1, dimensions[0] * 1600 / longest),
-                            Math.max(1, dimensions[1] * 1600 / longest));
-                });
+                Drawable drawable = decodePreviewImage(item.file, 1600, dimensions);
                 info.setText(formatName + " · " + dimensions[0] + " × " + dimensions[1] + " · " + size);
                 ImageView image = new ImageView(this);
                 image.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -5870,6 +5940,8 @@ public class MainActivity extends Activity {
                     animation = animated;
                     dialog.setOnDismissListener(ignored -> animated.stop());
                 }
+                Animatable inlineAnimation = animation;
+                addFullscreenTarget(frame, "放大图片", () -> showFullscreenPreview(item, dialog, null, inlineAnimation));
             }
             if (showingFavorites) {
                 JSONObject source = favoriteSource(item);
@@ -5934,6 +6006,268 @@ public class MainActivity extends Activity {
             dialog.dismiss();
             showMessage(R.drawable.extract_info, "暂时无法预览", "未能读取这项素材，请确认文件仍在本机。");
         }
+    }
+
+    private Drawable decodePreviewImage(File file, int maximumSize, int[] dimensions) throws java.io.IOException {
+        return ImageDecoder.decodeDrawable(ImageDecoder.createSource(file), (decoder, info, source) -> {
+            int width = info.getSize().getWidth();
+            int height = info.getSize().getHeight();
+            if (dimensions != null) {
+                dimensions[0] = width;
+                dimensions[1] = height;
+            }
+            int longest = Math.max(width, height);
+            if (longest > maximumSize) decoder.setTargetSize(Math.max(1, width * maximumSize / longest),
+                    Math.max(1, height * maximumSize / longest));
+        });
+    }
+
+    private void addFullscreenTarget(FrameLayout frame, String description, Runnable open) {
+        View target = new View(this);
+        target.setContentDescription(description);
+        target.setFocusable(true);
+        target.setOnClickListener(v -> open.run());
+        frame.addView(target, new FrameLayout.LayoutParams(-1, -1));
+
+        ImageView badge = icon(R.drawable.preview_expand, Color.WHITE);
+        badge.setPadding(dp(8), dp(8), dp(8), dp(8));
+        badge.setBackground(shape(0xB31B2537, 10));
+        FrameLayout.LayoutParams corner = new FrameLayout.LayoutParams(dp(36), dp(36), Gravity.TOP | Gravity.END);
+        corner.setMargins(dp(8), dp(8), dp(8), dp(8));
+        frame.addView(badge, corner);
+    }
+
+    private void showFullscreenPreview(Media item, android.app.Dialog owner, PreviewVideoView inlineVideo,
+                                       Animatable inlineAnimation) {
+        if (!owner.isShowing() || fullscreenPreviewDialog != null) return;
+        boolean video = inlineVideo != null;
+        FullscreenPreviewDialog dialog = new FullscreenPreviewDialog(this);
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setBackgroundColor(Color.BLACK);
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(16), 0, dp(8), 0);
+        page.addView(bar, new LinearLayout.LayoutParams(-1, dp(52)));
+        bar.addView(homeLabel(video ? "视频预览" : "图片预览", 16, Color.WHITE, 650),
+                new LinearLayout.LayoutParams(0, -2, 1));
+        ImageView close = icon(R.drawable.dialog_close, Color.WHITE);
+        close.setPadding(dp(12), dp(12), dp(12), dp(12));
+        close.setContentDescription("退出全屏");
+        close.setOnClickListener(v -> dialog.dismiss());
+        FrameLayout content = new FrameLayout(this);
+        page.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        if (video) {
+            PreviewVideoView enlarged = configureFullscreenVideo(dialog, owner, content, item, inlineVideo);
+            page.addView(playbackSpeedControls(enlarged), 1, new LinearLayout.LayoutParams(-1, dp(44)));
+        } else {
+            try {
+                Drawable drawable = decodePreviewImage(item.file, 2160, null);
+                ImageView image = new ImageView(this);
+                image.setContentDescription("全屏图片");
+                image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                image.setImageDrawable(drawable);
+                content.addView(image, new FrameLayout.LayoutParams(-1, -1));
+                if (inlineAnimation != null) inlineAnimation.stop();
+                if (drawable instanceof Animatable) {
+                    Animatable enlarged = (Animatable) drawable;
+                    dialog.setOnShowListener(ignored -> enlarged.start());
+                    dialog.setOnDismissListener(ignored -> {
+                        enlarged.stop();
+                        finishFullscreenPreview(owner, inlineAnimation);
+                    });
+                } else dialog.setOnDismissListener(ignored -> finishFullscreenPreview(owner, inlineAnimation));
+            } catch (java.io.IOException error) {
+                showTopNotice("暂时无法放大图片");
+                return;
+            }
+        }
+        bar.addView(close, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        fullscreenPreviewDialog = dialog;
+        dialog.setContentView(page);
+        android.view.Window window = dialog.getWindow();
+        window.setStatusBarColor(Color.BLACK);
+        window.setNavigationBarColor(Color.BLACK);
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+            page.setOnApplyWindowInsetsListener((view, insets) -> {
+                android.graphics.Insets safe = insets.getInsets(android.view.WindowInsets.Type.systemBars()
+                        | android.view.WindowInsets.Type.displayCutout());
+                view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
+                return insets;
+            });
+        }
+        dialog.show();
+        window.setLayout(-1, -1);
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            android.view.WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) controller.setSystemBarsAppearance(0,
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+            page.requestApplyInsets();
+        }
+    }
+
+    private static final class FullscreenPreviewDialog extends android.app.Dialog {
+        Runnable beforeDismiss;
+
+        FullscreenPreviewDialog(Context context) {
+            super(context, android.R.style.Theme_Material_NoActionBar);
+        }
+
+        @Override public void dismiss() {
+            if (beforeDismiss != null) {
+                Runnable capture = beforeDismiss;
+                beforeDismiss = null;
+                capture.run();
+            }
+            super.dismiss();
+        }
+    }
+
+    private static final class PreviewVideoView extends VideoView {
+        private android.media.MediaPlayer player;
+        private int pendingPosition = -1;
+        private boolean shouldPlay;
+        private int speedIndex = NORMAL_SPEED;
+        private Runnable speedChanged;
+
+        PreviewVideoView(Context context) {
+            super(context);
+        }
+
+        void onVideoPrepared(android.media.MediaPlayer prepared) {
+            player = prepared;
+            if (pendingPosition >= 0) seekTo(pendingPosition);
+            if (shouldPlay) start();
+        }
+
+        @Override public void seekTo(int position) {
+            pendingPosition = position;
+            if (player != null) {
+                try {
+                    player.seekTo(position, android.media.MediaPlayer.SEEK_CLOSEST);
+                    pendingPosition = -1;
+                } catch (IllegalStateException ignored) {
+                    player = null;
+                }
+            }
+        }
+
+        @Override public void start() {
+            shouldPlay = true;
+            super.start();
+            applyPlaybackSpeed();
+        }
+
+        void setSpeedIndex(int index) {
+            speedIndex = index;
+            applyPlaybackSpeed();
+            if (speedChanged != null) speedChanged.run();
+        }
+
+        private void applyPlaybackSpeed() {
+            // Setting playback parameters can resume a paused MediaPlayer.
+            if (player == null || !shouldPlay || !isPlaying()) return;
+            try {
+                float speed = PREVIEW_SPEEDS[speedIndex];
+                android.media.PlaybackParams params = player.getPlaybackParams();
+                if (params.getSpeed() != speed) player.setPlaybackParams(params.setSpeed(speed));
+            } catch (IllegalStateException ignored) {
+                // The surface can be released before VideoView prepares a replacement player.
+            } catch (IllegalArgumentException | UnsupportedOperationException error) {
+                speedIndex = NORMAL_SPEED;
+                if (speedChanged != null) speedChanged.run();
+                android.widget.Toast.makeText(getContext(), "当前视频不支持此倍速", android.widget.Toast.LENGTH_SHORT).show();
+            }
+        }
+
+        @Override public void pause() {
+            shouldPlay = false;
+            super.pause();
+        }
+
+        @Override public void stopPlayback() {
+            player = null;
+            shouldPlay = false;
+            super.stopPlayback();
+        }
+    }
+
+    private static final String[] PREVIEW_SPEED_NAMES = {"0.5×", "0.75×", "1×", "1.25×", "1.5×", "2×"};
+    private static final float[] PREVIEW_SPEEDS = {0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f};
+    private static final int NORMAL_SPEED = 2;
+
+    private LinearLayout playbackSpeedControls(PreviewVideoView video) {
+        LinearLayout row = new LinearLayout(this);
+        row.setPadding(dp(10), 0, dp(10), 0);
+        for (int i = 0; i < PREVIEW_SPEED_NAMES.length; i++) {
+            int index = i;
+            TextView button = homeLabel(PREVIEW_SPEED_NAMES[i], 12, Color.WHITE, 650);
+            button.setContentDescription("播放倍速 " + PREVIEW_SPEED_NAMES[i]);
+            button.setGravity(Gravity.CENTER);
+            button.setOnClickListener(v -> video.setSpeedIndex(index));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -1, 1);
+            params.setMargins(dp(2), dp(3), dp(2), dp(3));
+            row.addView(button, params);
+        }
+        video.speedChanged = () -> {
+            for (int i = 0; i < row.getChildCount(); i++) {
+                View button = row.getChildAt(i);
+                boolean selected = i == video.speedIndex;
+                button.setSelected(selected);
+                button.setBackground(shape(selected ? 0xFF3458E8 : 0xFF252525, 10));
+            }
+        };
+        video.speedChanged.run();
+        return row;
+    }
+
+    private PreviewVideoView configureFullscreenVideo(FullscreenPreviewDialog dialog, android.app.Dialog owner,
+                                                       FrameLayout content, Media item, PreviewVideoView inline) {
+        int resumeAt = inline.getCurrentPosition();
+        inline.pause();
+        PreviewVideoView enlarged = new PreviewVideoView(this);
+        enlarged.setSpeedIndex(inline.speedIndex);
+        enlarged.setContentDescription("全屏视频");
+        MediaController controls = new MediaController(this);
+        enlarged.setMediaController(controls);
+        content.addView(enlarged, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        enlarged.setOnPreparedListener(player -> {
+            enlarged.onVideoPrepared(player);
+            controls.show(2500);
+        });
+        enlarged.setOnErrorListener((player, what, extra) -> {
+            dialog.dismiss();
+            showTopNotice("暂时无法全屏播放这段视频");
+            return true;
+        });
+        enlarged.setVideoPath(item.file.getAbsolutePath());
+        if (resumeAt > 0) enlarged.seekTo(resumeAt);
+        enlarged.start();
+        int[] position = {resumeAt};
+        boolean[] playing = {false};
+        dialog.beforeDismiss = () -> {
+            if (enlarged.getDuration() > 0) position[0] = enlarged.getCurrentPosition();
+            playing[0] = enlarged.isPlaying();
+            controls.hide();
+            enlarged.stopPlayback();
+        };
+        dialog.setOnDismissListener(ignored -> {
+            finishFullscreenPreview(owner, null);
+            if (owner.isShowing() && !isFinishing() && !isDestroyed()) {
+                inline.setSpeedIndex(enlarged.speedIndex);
+                inline.seekTo(position[0]);
+                if (playing[0]) inline.start();
+            }
+        });
+        return enlarged;
+    }
+
+    private void finishFullscreenPreview(android.app.Dialog owner, Animatable inlineAnimation) {
+        fullscreenPreviewDialog = null;
+        if (inlineAnimation != null && owner.isShowing() && !isFinishing() && !isDestroyed()) inlineAnimation.start();
     }
 
     private File favoriteFile(Media item) {
@@ -6509,8 +6843,11 @@ public class MainActivity extends Activity {
     }
 
     private Media readPostVideo(URL url, ScanRecord record) throws Exception {
+        return readPostVideo(url, record, "", record.kuaishou ? "快手正文视频" : "作品视频");
+    }
+
+    private Media readPostVideo(URL url, ScanRecord record, String commentId, String kind) throws Exception {
         File folder = record.folder;
-        String kind = record.kuaishou ? "快手正文视频" : "作品视频";
         if (!folder.isDirectory() && !folder.mkdirs()) throw new java.io.IOException("无法创建暂存目录");
         File pending = File.createTempFile("video-", ".mp4", folder);
         try {
@@ -6530,9 +6867,9 @@ public class MainActivity extends Activity {
             if (!hasVideo) throw new java.io.IOException("视频文件无效");
             StringBuilder hash = new StringBuilder();
             for (byte b : digest.digest()) hash.append(String.format(Locale.ROOT, "%02x", b & 255));
-            File file = new File(folder, hash + ".mp4");
+            File file = new File(folder, (commentId.isEmpty() ? hash.toString() : hash.substring(0, 20)) + ".mp4");
             Files.move(pending.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            return new Media(file, hash.toString(), "video/mp4", "", kind, decodeThumbnail(file), true);
+            return new Media(file, hash.toString(), "video/mp4", commentId, kind, decodeThumbnail(file), true);
         } finally { pending.delete(); }
     }
 
@@ -7671,6 +8008,7 @@ public class MainActivity extends Activity {
         if (themeAnimation != null) themeAnimation.cancel();
         if (noticePopup != null) noticePopup.dismiss();
         if (recordUndoPopup != null) recordUndoPopup.dismiss();
+        if (fullscreenPreviewDialog != null) fullscreenPreviewDialog.dismiss();
         for (Animatable animation : animations) animation.stop();
         worker.shutdownNow();
         browser.destroy();

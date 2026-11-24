@@ -8,6 +8,8 @@
     const id = match[1];
     const images = [];
     const videos = [];
+    const liveVideos = [];
+    let awaitingLive = false;
     const secureUrls = values => [...new Set(values.filter(value => typeof value === 'string')
         .map(value => value.startsWith('//') ? 'https:' + value : value.replace(/^http:/, 'https:'))
         .filter(value => value.startsWith('https://')))];
@@ -52,7 +54,16 @@
         }
         let item;
         let bestGallery = [];
-        const addresses = value => typeof value === 'string' ? [value] : value?.urlList || value?.url_list || [];
+        const addresses = value => {
+            if (typeof value === 'string') return [value];
+            if (Array.isArray(value)) return value.flatMap(addresses);
+            return value?.urlList || value?.url_list || [value?.src, value?.url];
+        };
+        const videoAddresses = video => secureUrls([
+            ...addresses(video?.playAddrH264 || video?.play_addr_h264),
+            ...addresses(video?.playAddr || video?.play_addr),
+            ...addresses(video?.downloadAddr || video?.download_addr)
+        ]);
         const seen = new WeakSet();
         for (let i = 0; i < roots.length && i < 15000; i++) {
             const value = roots[i];
@@ -61,38 +72,49 @@
             if (String(value.awemeId ?? value.aweme_id) === id) {
                 if (value.video && !item) item = value;
                 const gallery = value.images?.length ? value.images : value.imagePostInfo?.images || value.image_post_info?.images;
-                const urls = Array.isArray(gallery) ? gallery.map(image => secureUrls([
-                    ...addresses(image), ...addresses(image?.displayImage || image?.display_image)
-                ])).filter(variants => variants.length) : [];
-                if (urls.length > bestGallery.length) bestGallery = urls;
+                const slides = Array.isArray(gallery) ? gallery.map(image => ({
+                    covers: secureUrls([...addresses(image), ...addresses(image?.displayImage || image?.display_image)]),
+                    clips: videoAddresses(image?.video),
+                    live: Number(image?.live_photo_type ?? image?.livePhotoType) === 1
+                        || Number(image?.clip_type ?? image?.clipType) === 5 || Boolean(image?.video)
+                })) : [];
+                if (slides.length > bestGallery.length) bestGallery = slides;
+                else if (slides.length && slides.length === bestGallery.length) {
+                    for (let index = 0; index < slides.length; index++) {
+                        const current = bestGallery[index];
+                        const slide = slides[index];
+                        current.covers = secureUrls([...current.covers, ...slide.covers]);
+                        current.clips = secureUrls([...current.clips, ...slide.clips]);
+                        current.live ||= slide.live;
+                    }
+                }
             }
             for (const child of Object.values(value)) {
                 if (child && typeof child === 'object') roots.push(child);
             }
         }
-        images.push(...bestGallery);
-        if (!images.length) {
-            const video = item?.video;
-            addVideo([...addresses(video?.playAddrH264 || video?.play_addr_h264),
-                ...addresses(video?.playAddr || video?.play_addr),
-                ...addresses(video?.downloadAddr || video?.download_addr)]);
+        for (const slide of bestGallery) {
+            if (slide.covers.length) images.push(slide.covers);
+            if (slide.clips.length) liveVideos.push(slide.clips);
+            else if (slide.live) awaitingLive = true;
         }
-        if (!images.length && !videos.length && location.pathname.startsWith('/note/')) {
+        if (!images.length && !liveVideos.length) addVideo(videoAddresses(item?.video));
+        if (!images.length && !videos.length && !liveVideos.length && location.pathname.startsWith('/note/')) {
             for (const image of player?.querySelectorAll('.swiper-slide img') || []) {
                 addImage([image.currentSrc, image.src]);
             }
         }
-        if (!images.length && !videos.length && location.pathname.startsWith('/video/')) {
+        if (!images.length && !videos.length && !liveVideos.length && location.pathname.startsWith('/video/')) {
             const video = document.querySelector('[data-e2e="feed-active-video"] video, [data-e2e="player-container"] video');
             addVideo([video?.currentSrc, video?.src]);
         }
     }
 
     // An explicit video metadata URL belongs to the document, unlike arbitrary videos in the feed.
-    if (!images.length && !videos.length) {
+    if (!images.length && !videos.length && !liveVideos.length) {
         addVideo(['og:video:secure_url', 'og:video:url', 'og:video'].map(property =>
             document.querySelector('meta[property="' + property + '"]')?.content));
     }
     return { id, title: (document.title || '').replace(/\s*-\s*(?:抖音|小红书)\s*$/, ''),
-        images, videos: secureUrls(videos) };
+        images, videos: secureUrls(videos), liveVideos, awaitingLive };
 })();
