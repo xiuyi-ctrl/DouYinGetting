@@ -110,7 +110,12 @@ public class MainActivity extends Activity {
     private String finishedWorkPage;
     private boolean viewingSavedRecord;
     private boolean resumedFromHome;
-    private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102, IMPORT_WECHAT = 7103;
+    private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102, IMPORT_WECHAT = 7103, IMPORT_PHONE_MEDIA = 7104;
+    private static final String PHONE_MEDIA_KIND = "手机导入";
+    private String phoneImportLink;
+    private String phoneImportRecordId;
+    private boolean importingPhoneMedia;
+    private Button phoneImportButton;
     private boolean showingWechat;
     private boolean showingKuaishou;
     private boolean kuaishouRecords;
@@ -381,6 +386,10 @@ public class MainActivity extends Activity {
         buildReader();
         buildStage();
         loadRecords();
+        if (state != null) {
+            phoneImportLink = state.getString("phoneImportLink");
+            phoneImportRecordId = state.getString("phoneImportRecordId");
+        }
         loadFavoriteGroups();
         try {
             favoriteSources = new JSONObject(getPreferences(MODE_PRIVATE).getString("favorite_sources", "{}"));
@@ -396,6 +405,12 @@ public class MainActivity extends Activity {
             stage.post(this::refreshRecordUndoNotice);
         }
         if (state == null) handleSharedPost(getIntent());
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        state.putString("phoneImportLink", phoneImportLink);
+        state.putString("phoneImportRecordId", phoneImportRecordId);
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -1876,6 +1891,14 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == IMPORT_PHONE_MEDIA) {
+            String link = phoneImportLink;
+            String recordId = phoneImportRecordId;
+            phoneImportLink = null;
+            phoneImportRecordId = null;
+            if (result == RESULT_OK && data != null && link != null) importPhoneMedia(link, recordId, data);
+            return;
+        }
         if (request == IMPORT_WECHAT) {
             if (result == RESULT_OK && data != null && data.getData() != null) importWechat(data.getData());
             return;
@@ -3483,6 +3506,7 @@ public class MainActivity extends Activity {
         scanButton.setVisibility(!batchReader || batchTask.comments ? View.VISIBLE : View.GONE);
         ((View) scanButton.getParent()).setVisibility(!batchReader || batchTask.comments ? View.VISIBLE : View.GONE);
         extractWorkButton.setVisibility(batchReader && batchTask.comments ? View.GONE : View.VISIBLE);
+        phoneImportButton.setVisibility(batchReader ? View.GONE : View.VISIBLE);
         presentSecondary(readerRoot);
         updateScanCard();
         for (Animatable animation : animations) animation.start();
@@ -3835,6 +3859,10 @@ public class MainActivity extends Activity {
             updateResultLabels();
         });
         resultHeader.addView(selectionAction, new LinearLayout.LayoutParams(dp(70), dp(36)));
+        phoneImportButton = shareButton("导入手机素材", v -> pickPhoneMedia());
+        LinearLayout.LayoutParams phoneImportParams = new LinearLayout.LayoutParams(-1, dp(40));
+        phoneImportParams.topMargin = dp(8);
+        content.addView(phoneImportButton, phoneImportParams);
         readerPostStatus = new PostStatusStrip();
         content.addView(readerPostStatus, postStatusParams());
         readerPostStatus.retry.setOnClickListener(v -> {
@@ -4846,6 +4874,194 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void pickPhoneMedia() {
+        if (importingPhoneMedia) return;
+        boolean kuaishou = showingKuaishou;
+        ScanRecord target = kuaishou ? favoriteScreen.kuaishouPostRecord : currentRecord;
+        if (target != null && target.processingPage
+                || (kuaishou ? favoriteScreen.busy : scanning || !extractWorkButton.isEnabled())) {
+            showTopNotice("请暂停扫描并等待当前操作完成");
+            return;
+        }
+        String link = displayedPhoneWorkLink();
+        if (link == null) {
+            showTopNotice("请先粘贴" + (kuaishou ? "快手作品" : xhsMode ? "小红书笔记" : "抖音作品") + "链接");
+            return;
+        }
+        if (target == null || target.kuaishou != kuaishou || !samePhoneWork(link, target.link)) {
+            target = null;
+            for (ScanRecord record : records) {
+                if (record.kuaishou == kuaishou && samePhoneWork(link, record.link)) {
+                    target = record;
+                    break;
+                }
+            }
+        }
+        phoneImportLink = link;
+        phoneImportRecordId = target == null ? null : target.id;
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        picker.setType("video/mp4");
+        picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try { startActivityForResult(picker, IMPORT_PHONE_MEDIA); }
+        catch (android.content.ActivityNotFoundException error) {
+            phoneImportLink = null;
+            phoneImportRecordId = null;
+            showTopNotice("无法打开系统文件选择器");
+        }
+    }
+
+    private String displayedPhoneWorkLink() {
+        if (showingKuaishou) return KuaishouPost.extractLink(favoriteScreen.kuaishouLink.getText().toString());
+        if (!showingReader) return null;
+        String link = extractLink(input.getText().toString(), xhsMode);
+        return WorkMedia.isShareLink(link, xhsMode) ? link : null;
+    }
+
+    private static boolean samePhoneWork(String first, String second) {
+        if (first.equals(second)) return true;
+        boolean xhs = isXhsLink(first);
+        String id = WorkMedia.pageId(first, xhs);
+        return id != null && id.equals(WorkMedia.pageId(second, xhs));
+    }
+
+    private void importPhoneMedia(String link, String recordId, Intent data) {
+        ArrayList<Uri> files = new ArrayList<>();
+        ClipData clips = data.getClipData();
+        if (clips != null) for (int i = 0; i < clips.getItemCount(); i++) {
+            Uri uri = clips.getItemAt(i).getUri();
+            if (uri != null) files.add(uri);
+        }
+        if (files.isEmpty() && data.getData() != null) files.add(data.getData());
+        if (files.isEmpty()) return;
+        ScanRecord existing = null;
+        if (recordId != null) {
+            for (ScanRecord record : records) {
+                if (record.id.equals(recordId)) {
+                    existing = record;
+                    break;
+                }
+            }
+            if (existing == null) {
+                showTopNotice("这条作品记录已不存在，请重新选择");
+                return;
+            }
+        }
+        String id = UUID.randomUUID().toString();
+        boolean newRecord = existing == null;
+        ScanRecord record = newRecord
+                ? new ScanRecord(id, link, System.currentTimeMillis(), new File(recordsFolder(), id)) : existing;
+        if (newRecord && link.equals(KuaishouPost.extractLink(link))) {
+            record.kuaishou = true;
+            record.complete = true;
+        }
+        boolean restorePage = !showingReader && !showingKuaishou;
+        importingPhoneMedia = true;
+        phoneImportButton.setEnabled(false);
+        showBottomNotice("正在导入手机素材…");
+        worker.execute(() -> {
+            ArrayList<Media> added = new ArrayList<>();
+            int duplicates = 0;
+            int failed = 0;
+            boolean stored = true;
+            synchronized (record) {
+                for (Uri uri : files) {
+                    try {
+                        Media item = readPhoneVideo(uri, record);
+                        if (item == null) duplicates++;
+                        else {
+                            record.hashes.add(item.hash);
+                            record.items.add(item);
+                            added.add(item);
+                        }
+                    } catch (Exception error) { failed++; }
+                }
+                if (!added.isEmpty() && !persistRecord(record)) {
+                    stored = false;
+                    for (Media item : added) {
+                        record.items.remove(item);
+                        record.hashes.remove(item.hash);
+                        item.file.delete();
+                    }
+                }
+            }
+            if (newRecord && (!stored || added.isEmpty())) deleteRecordFiles(record);
+            if (stored && record.kuaishou && !added.isEmpty()) {
+                synchronized (record) {
+                    for (Media item : record.items) if (item.thumbnail == null) item.thumbnail = decodeThumbnail(item.file);
+                }
+            }
+            boolean saved = stored;
+            int duplicateCount = duplicates;
+            int failureCount = failed;
+            runOnUiThread(() -> {
+                importingPhoneMedia = false;
+                phoneImportButton.setEnabled(true);
+                if (isFinishing() || isDestroyed()) return;
+                if (!saved) {
+                    showTopNotice("无法保存导入结果，请检查存储空间");
+                    return;
+                }
+                if (!added.isEmpty()) {
+                    if (newRecord) records.add(0, record);
+                    String displayedLink = displayedPhoneWorkLink();
+                    boolean sameWork = displayedLink != null && samePhoneWork(displayedLink, link);
+                    boolean openRecord = restorePage && currentPage == 1 || showingReader && sameWork;
+                    boolean anotherScanActive = currentRecord != null && currentRecord != record
+                            && (scanning || currentRecord.processingPage);
+                    if (showingKuaishou && sameWork && !favoriteScreen.busy) {
+                        favoriteScreen.showPhoneImport(record);
+                    } else if (openRecord && !anotherScanActive) {
+                        if (currentRecord == record && isLiveRecord(record)) {
+                            media.addAll(added);
+                            renderResults();
+                            updateResultLabels();
+                        } else {
+                            if (record.kuaishou) kuaishouRecords = true;
+                            showRecord(record);
+                        }
+                    }
+                }
+                String message = added.isEmpty() && failureCount == 0 ? "已在此作品记录中"
+                        : "已导入 " + added.size() + " 个素材";
+                if (duplicateCount > 0 && !added.isEmpty()) message += "，跳过 " + duplicateCount + " 个重复文件";
+                if (failureCount > 0) message += "，" + failureCount + " 个文件无法读取为 MP4";
+                showBottomNotice(message);
+            });
+        });
+    }
+
+    private Media readPhoneVideo(Uri uri, ScanRecord record) throws Exception {
+        File folder = record.folder;
+        Files.createDirectories(folder.toPath());
+        File pending = File.createTempFile("phone-", ".tmp", folder);
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                 OutputStream out = new java.security.DigestOutputStream(new FileOutputStream(pending), digest)) {
+                if (in == null) throw new java.io.IOException("无法打开所选文件");
+                byte[] header = new byte[12];
+                new java.io.DataInputStream(in).readFully(header);
+                if (!"video/mp4".equals(format(header))
+                        || "qt  ".equals(new String(header, 8, 4, StandardCharsets.US_ASCII))) {
+                    throw new java.io.IOException("文件不是 MP4");
+                }
+                out.write(header);
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            }
+            StringBuilder hash = new StringBuilder();
+            for (byte b : digest.digest()) hash.append(String.format(Locale.ROOT, "%02x", b & 255));
+            String key = hash.toString();
+            if (record.hashes.contains(key)) return null;
+            requireVideoTrack(pending);
+            File file = new File(folder, key + ".mp4");
+            Files.move(pending.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            return new Media(file, key, "video/mp4", "", PHONE_MEDIA_KIND, null, true);
+        } finally { pending.delete(); }
+    }
+
     private void openLink() {
         String link = extractLink(input.getText().toString(), xhsMode);
         if (link == null) {
@@ -5748,11 +5964,13 @@ public class MainActivity extends Activity {
             badgeParams.setMargins(0, dp(6), dp(6), 0);
             art.addView(badge, badgeParams);
         }
-        if (item.kind.startsWith("回复")) {
-            TextView replyBadge = label("回复", 9, Color.WHITE, true);
+        boolean phoneMedia = PHONE_MEDIA_KIND.equals(item.kind);
+        if (item.kind.startsWith("回复") || phoneMedia) {
+            TextView replyBadge = label(phoneMedia ? PHONE_MEDIA_KIND : "回复", 9, Color.WHITE, true);
             replyBadge.setGravity(Gravity.CENTER);
+            if (phoneMedia) replyBadge.setPadding(dp(6), 0, dp(6), 0);
             replyBadge.setBackground(shape(ACCENT, 5));
-            art.addView(replyBadge, new FrameLayout.LayoutParams(dp(32), dp(18), Gravity.LEFT | Gravity.BOTTOM));
+            art.addView(replyBadge, new FrameLayout.LayoutParams(phoneMedia ? -2 : dp(32), dp(18), Gravity.LEFT | Gravity.BOTTOM));
         }
         TextView check = label(selectedMedia.contains(item) ? "✓" : "", 15, selectedMedia.contains(item) ? Color.WHITE : ACCENT, true);
         check.setGravity(Gravity.CENTER);
@@ -6855,22 +7073,25 @@ public class MainActivity extends Activity {
             try (OutputStream out = new java.security.DigestOutputStream(new FileOutputStream(pending), digest)) {
                 transferPostMedia(record, url, 160 * 1024 * 1024, out);
             }
-            android.media.MediaExtractor extractor = new android.media.MediaExtractor();
-            boolean hasVideo = false;
-            try {
-                extractor.setDataSource(pending.getAbsolutePath());
-                for (int i = 0; i < extractor.getTrackCount(); i++) {
-                    String mime = extractor.getTrackFormat(i).getString(android.media.MediaFormat.KEY_MIME);
-                    if (mime != null && mime.startsWith("video/")) hasVideo = true;
-                }
-            } finally { extractor.release(); }
-            if (!hasVideo) throw new java.io.IOException("视频文件无效");
+            requireVideoTrack(pending);
             StringBuilder hash = new StringBuilder();
             for (byte b : digest.digest()) hash.append(String.format(Locale.ROOT, "%02x", b & 255));
             File file = new File(folder, (commentId.isEmpty() ? hash.toString() : hash.substring(0, 20)) + ".mp4");
             Files.move(pending.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
             return new Media(file, hash.toString(), "video/mp4", commentId, kind, decodeThumbnail(file), true);
         } finally { pending.delete(); }
+    }
+
+    private static void requireVideoTrack(File file) throws java.io.IOException {
+        android.media.MediaExtractor extractor = new android.media.MediaExtractor();
+        try {
+            extractor.setDataSource(file.getAbsolutePath());
+            for (int i = 0; i < extractor.getTrackCount(); i++) {
+                String mime = extractor.getTrackFormat(i).getString(android.media.MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith("video/")) return;
+            }
+            throw new java.io.IOException("视频文件无效");
+        } finally { extractor.release(); }
     }
 
     private class FavoritesScreen {
@@ -6882,6 +7103,8 @@ public class MainActivity extends Activity {
         private ScanRecord kuaishouPostRecord;
         private EditText kuaishouLink;
         private Button kuaishouFetch;
+        private TextView kuaishouCaption;
+        private TextView kuaishouProgress;
         FavoritesScreen() { this(false); }
         FavoritesScreen(boolean wechat) { this(wechat, false, null); }
         FavoritesScreen(boolean wechat, boolean kuaishou, ScanRecord savedKuaishou) {
@@ -6930,6 +7153,21 @@ public class MainActivity extends Activity {
             presentSecondary(root);
         }
 
+        private void showPhoneImport(ScanRecord record) {
+            kuaishouPostRecord = record;
+            kuaishouCaption.setText(record.caption);
+            kuaishouCaption.setVisibility(record.caption.isEmpty() ? View.GONE : View.VISIBLE);
+            kuaishouProgress.setText("已打开本机提取记录");
+            synchronized (record) {
+                items.clear();
+                items.addAll(record.items);
+            }
+            loaded = true;
+            category = 0;
+            positionFilter(false);
+            setSelecting(false);
+        }
+
         private void addKuaishouInput(LinearLayout content) {
             EditText link = new EditText(MainActivity.this);
             kuaishouLink = link;
@@ -6964,6 +7202,7 @@ public class MainActivity extends Activity {
             spinner.setVisibility(View.GONE);
             statusCard.addView(spinner, new LinearLayout.LayoutParams(dp(20), dp(20)));
             TextView progress = homeLabel("粘贴作品链接，读取文案、图片和视频", 12, INK2, 450);
+            kuaishouProgress = progress;
             LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(0, -2, 1);
             progressParams.leftMargin = dp(12);
             statusCard.addView(progress, progressParams);
@@ -6987,6 +7226,7 @@ public class MainActivity extends Activity {
             });
 
             TextView caption = homeLabel("", 13, INK, 450);
+            kuaishouCaption = caption;
             caption.setBackground(card(14));
             caption.setPadding(dp(12), dp(10), dp(12), dp(10));
             caption.setMaxLines(3);
@@ -7160,6 +7400,12 @@ public class MainActivity extends Activity {
                 resultHeader.addView(selectAll, selectAllParams);
                 resultHeader.addView(select, new LinearLayout.LayoutParams(dp(70), dp(36)));
                 readerIcon(select, R.drawable.extract_select, 16);
+                if (batchTask == null) {
+                    Button phoneImport = shareButton("导入手机素材", v -> pickPhoneMedia());
+                    LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(-1, dp(40));
+                    importParams.topMargin = dp(8);
+                    content.addView(phoneImport, importParams);
+                }
                 content.addView(kuaishouPostStatus, postStatusParams());
             }
             if (wechat) {
@@ -7666,7 +7912,8 @@ public class MainActivity extends Activity {
                 image.setImageDrawable(item.thumbnail);
                 tile.addView(image, new FrameLayout.LayoutParams(-1, -1));
                 if (type(item) != 1) {
-                    TextView badge = label(categories[type(item)], 10, Color.WHITE, true);
+                    TextView badge = label(kuaishou && PHONE_MEDIA_KIND.equals(item.kind) ? PHONE_MEDIA_KIND
+                            : categories[type(item)], 10, Color.WHITE, true);
                     badge.setBackground(shape(type(item) == 2 ? ACCENT : DARK, 6));
                     badge.setPadding(dp(6), dp(2), dp(6), dp(2));
                     FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
