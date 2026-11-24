@@ -132,6 +132,9 @@ public class MainActivity extends Activity {
     private String wechatPairing = "";
     private boolean recordTransferBusy;
     private int backupScope = 2; // 0 records, 1 favorites, 2 both
+    private String backupGroup;
+    private boolean backupMaterialsOnly;
+    private RecordArchive.Prepared pendingRestore;
     private boolean savedRecordPageOpened;
     private boolean loadingSavedRecordPage;
     private boolean xhsMode;
@@ -389,6 +392,9 @@ public class MainActivity extends Activity {
         if (state != null) {
             phoneImportLink = state.getString("phoneImportLink");
             phoneImportRecordId = state.getString("phoneImportRecordId");
+            backupScope = state.getInt("backupScope", 2);
+            backupGroup = state.getString("backupGroup");
+            backupMaterialsOnly = state.getBoolean("backupMaterialsOnly");
         }
         loadFavoriteGroups();
         try {
@@ -411,6 +417,9 @@ public class MainActivity extends Activity {
         super.onSaveInstanceState(state);
         state.putString("phoneImportLink", phoneImportLink);
         state.putString("phoneImportRecordId", phoneImportRecordId);
+        state.putInt("backupScope", backupScope);
+        state.putString("backupGroup", backupGroup);
+        state.putBoolean("backupMaterialsOnly", backupMaterialsOnly);
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -1820,7 +1829,12 @@ public class MainActivity extends Activity {
         for (int i = 0; i < names.length; i++) {
             int scope = i;
             addMenuCard(panel, scope == 1 ? R.drawable.dialog_heart : R.drawable.dialog_file, names[i], details[i], v ->
-                    dismissCardDialog(dialog, () -> { backupScope = scope; pickRecordArchive(true); }));
+                    dismissCardDialog(dialog, () -> {
+                        backupScope = scope;
+                        backupGroup = null;
+                        backupMaterialsOnly = false;
+                        pickRecordArchive(true);
+                    }));
         }
         dialogActions(dialog, panel, "取消", null, false, null, null);
         showCardDialog(dialog, panel);
@@ -1830,8 +1844,35 @@ public class MainActivity extends Activity {
         ArrayList<File> files = new ArrayList<>();
         File[] saved = new File(getFilesDir(), "favorites").listFiles();
         if (saved != null) for (File file : saved)
-            if (file.isFile() && !file.getName().endsWith(".tmp")) files.add(file);
+            if (file.isFile() && !file.getName().endsWith(".tmp")
+                    && (backupGroup == null || backupGroup.equals(favoriteAssignments.get(favoriteFileHash(file)))))
+                files.add(file);
         return files;
+    }
+
+    private static String favoriteFileHash(File file) {
+        String name = file.getName();
+        int extension = name.lastIndexOf('.');
+        return extension < 0 ? name : name.substring(0, extension);
+    }
+
+    private void chooseGroupExport(String group) {
+        if (recordTransferBusy) return;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.extract_download, false, "导出收藏夹", group);
+        addMenuCard(panel, R.drawable.extract_download, "素材 ZIP", "打包此收藏夹中的原文件", v ->
+                dismissCardDialog(dialog, () -> exportFavoriteGroup(group, true)));
+        addMenuCard(panel, R.drawable.dialog_file, "咻咿备份", "保留收藏夹、原文件和作品来源", v ->
+                dismissCardDialog(dialog, () -> exportFavoriteGroup(group, false)));
+        dialogActions(dialog, panel, "取消", null, false, null, null);
+        showCardDialog(dialog, panel);
+    }
+
+    private void exportFavoriteGroup(String group, boolean materialsOnly) {
+        backupScope = 1;
+        backupGroup = group;
+        backupMaterialsOnly = materialsOnly;
+        pickRecordArchive(true);
     }
 
     private String favoriteArchiveExtension(File file) throws Exception {
@@ -1859,7 +1900,8 @@ public class MainActivity extends Activity {
         Intent intent = new Intent(exporting ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType(exporting ? "application/zip" : "*/*");
-        if (exporting) intent.putExtra(Intent.EXTRA_TITLE, "咻咿备份-"
+        if (exporting) intent.putExtra(Intent.EXTRA_TITLE, (backupGroup == null ? "咻咿备份" :
+                (backupMaterialsOnly ? "收藏素材-" : "咻咿备份-") + backupGroup.replaceAll("[^\\p{L}\\p{M}\\p{N} ._-]", "_")) + "-"
                 + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".zip");
         try { startActivityForResult(intent, exporting ? EXPORT_RECORDS : IMPORT_RECORDS); }
         catch (android.content.ActivityNotFoundException error) {
@@ -1906,20 +1948,55 @@ public class MainActivity extends Activity {
         if (request != EXPORT_RECORDS && request != IMPORT_RECORDS) return;
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         if (recordTransferBusy) return;
-        boolean exporting = request == EXPORT_RECORDS;
-        if (exporting && backupScope != 1 && (scanning || (currentRecord != null && currentRecord.processingPage))) {
+        Uri uri = data.getData();
+        if (request == IMPORT_RECORDS) {
+            prepareBackupRestore(uri);
+            return;
+        }
+        if (backupScope != 1 && (scanning || (currentRecord != null && currentRecord.processingPage))) {
             showTopNotice("扫描仍在进行，请暂停后重新导出");
             return;
         }
-        Uri uri = data.getData();
         ArrayList<ScanRecord> snapshot = new ArrayList<>(records);
-        final int scope = backupScope;
-        if (exporting && scope == 1) snapshot.clear();
-        List<File> favorites = exporting && scope != 0 ? backupFavorites() : Collections.emptyList();
-        byte[] favoriteMetadata = favorites.isEmpty() ? null : favoriteBackupMetadata(favorites);
-        HashSet<String> known = new HashSet<>();
-        for (ScanRecord record : snapshot) known.add(record.id);
+        if (backupScope == 1) snapshot.clear();
+        List<File> favorites = backupScope != 0 ? backupFavorites() : Collections.emptyList();
+        boolean materialsOnly = backupMaterialsOnly;
+        byte[] favoriteMetadata = materialsOnly || favorites.isEmpty() ? null : favoriteBackupMetadata(favorites, backupGroup);
         recordTransferBusy = true;
+        android.app.Dialog progress = backupProgress("正在导出…", "正在打包所选文件。");
+        worker.execute(() -> {
+            try {
+                java.util.LinkedHashMap<String, File> folders = new java.util.LinkedHashMap<>();
+                for (ScanRecord record : snapshot) {
+                    if (!persistRecord(record)) throw new java.io.IOException("记录暂存失败，请重试");
+                    folders.put(record.id, record.folder);
+                }
+                int favoriteCount;
+                try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
+                    if (output == null) throw new java.io.IOException("无法写入所选位置");
+                    if (materialsOnly) {
+                        if (favorites.isEmpty()) throw new java.io.IOException("收藏夹为空");
+                        WorkExport.writeZip(output, favorites);
+                        favoriteCount = favorites.size();
+                    } else favoriteCount = RecordArchive.write(output, folders, favorites, favoriteMetadata,
+                            this::recordArchiveFiles, this::favoriteArchiveExtension);
+                }
+                String report = materialsOnly ? "已导出 " + favoriteCount + " 个收藏素材"
+                        : "导出成功：记录 " + snapshot.size() + " 条，收藏 " + favoriteCount + " 个";
+                runOnUiThread(() -> {
+                    if (finishBackupProgress(progress)) showBottomNotice(report);
+                });
+            } catch (Exception error) {
+                try { android.provider.DocumentsContract.deleteDocument(getContentResolver(), uri); }
+                catch (Exception ignored) { }
+                runOnUiThread(() -> {
+                    if (finishBackupProgress(progress)) showMessage(R.drawable.dialog_file, "未能导出", archiveFailureReason(error, true));
+                });
+            }
+        });
+    }
+
+    private android.app.Dialog backupProgress(String title, String detail) {
         android.app.Dialog progress = new android.app.Dialog(this);
         progress.setCancelable(false);
         LinearLayout panel = new LinearLayout(this);
@@ -1930,80 +2007,140 @@ public class MainActivity extends Activity {
         ProgressBar spinner = new ProgressBar(this);
         spinner.setIndeterminateTintList(ColorStateList.valueOf(ACCENT));
         panel.addView(spinner, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        TextView progressTitle = homeLabel(exporting ? "正在导出备份…" : "正在导入备份…", 18, INK, 750);
+        TextView progressTitle = homeLabel(title, 18, INK, 750);
         progressTitle.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(-1, -2);
         progressParams.topMargin = dp(16);
         panel.addView(progressTitle, progressParams);
-        TextView progressDetail = homeLabel(exporting ? "正在打包所选记录、收藏及原文件。\n文件较多时，请稍候。" : "正在检查备份并恢复记录与收藏。", 13, INK2, 400);
+        TextView progressDetail = homeLabel(detail, 13, INK2, 400);
         progressDetail.setGravity(Gravity.CENTER);
         progressDetail.setPadding(0, dp(8), 0, 0);
         panel.addView(progressDetail);
         showCardDialog(progress, panel);
+        return progress;
+    }
+
+    private boolean finishBackupProgress(android.app.Dialog progress) {
+        recordTransferBusy = false;
+        if (isFinishing() || isDestroyed()) return false;
+        progress.dismiss();
+        return true;
+    }
+
+    private HashSet<String> knownRecordIds() {
+        HashSet<String> known = new HashSet<>();
+        for (ScanRecord record : records) known.add(record.id);
+        return known;
+    }
+
+    private void prepareBackupRestore(Uri uri) {
+        recordTransferBusy = true;
+        android.app.Dialog progress = backupProgress("正在读取备份…", "正在检查备份内容和本机重复项。");
+        HashSet<String> known = knownRecordIds();
         worker.execute(() -> {
-            String message;
-            boolean succeeded = false;
-            ArrayList<ScanRecord> imported = new ArrayList<>();
-            int favoriteCount = 0;
-            boolean favoritesInBackup = false;
-            RecordArchive.Result restored = null;
+            RecordArchive.Prepared staged = null;
             try {
-                if (exporting) {
-                    java.util.LinkedHashMap<String, File> folders = new java.util.LinkedHashMap<>();
-                    for (ScanRecord record : snapshot) {
-                        if (!persistRecord(record)) throw new java.io.IOException("记录暂存失败，请重试");
-                        recordArchiveFiles(record.folder);
-                        folders.put(record.id, record.folder);
-                    }
-                    try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
-                        if (output == null) throw new java.io.IOException("无法写入所选位置");
-                        favoriteCount = RecordArchive.write(output, folders, favorites, favoriteMetadata,
-                                this::recordArchiveFiles, this::favoriteArchiveExtension);
-                    }
-                    message = "导出成功：记录 " + snapshot.size() + " 条，收藏 " + favoriteCount + " 个";
-                } else {
-                    try (InputStream input = getContentResolver().openInputStream(uri)) {
-                        if (input == null) throw new java.io.IOException("无法读取所选备份");
-                        restored = RecordArchive.read(input, new File(getCacheDir(), "record-import-" + UUID.randomUUID()),
-                                recordsFolder(), new File(getFilesDir(), "favorites"), known,
-                                this::recordArchiveFiles, this::favoriteArchiveExtension);
-                    }
-                    imported = readRecords(restored.added);
-                    favoriteCount = restored.favoritesAdded;
-                    favoritesInBackup = restored.favoritesAdded + restored.favoritesSkipped > 0;
-                    message = "导入成功：记录 " + imported.size() + " 条，收藏 " + favoriteCount
-                            + " 个；跳过重复 " + (restored.skipped + restored.favoritesSkipped) + " 项";
+                try (InputStream input = getContentResolver().openInputStream(uri)) {
+                    if (input == null) throw new java.io.IOException("无法读取所选备份");
+                    staged = RecordArchive.prepare(input, new File(getCacheDir(), "record-import-" + UUID.randomUUID()),
+                            this::recordArchiveFiles, this::favoriteArchiveExtension);
                 }
-                succeeded = true;
+                RecordArchive.Prepared archive = staged;
+                RecordArchive.Result preview = archive.preview(recordsFolder(), new File(getFilesDir(), "favorites"), known);
+                JSONObject metadata = archive.favoriteMetadata == null ? new JSONObject()
+                        : new JSONObject(new String(archive.favoriteMetadata, StandardCharsets.UTF_8));
+                runOnUiThread(() -> {
+                    if (finishBackupProgress(progress)) showRestorePreview(archive, preview, metadata);
+                    else archive.close();
+                });
             } catch (Exception error) {
-                if (exporting) {
-                    try { android.provider.DocumentsContract.deleteDocument(getContentResolver(), uri); }
-                    catch (Exception ignored) { }
-                }
-                message = archiveFailureReason(error, exporting);
+                if (staged != null) staged.close();
+                runOnUiThread(() -> showRestoreError(progress, error));
             }
-            String report = message;
-            boolean success = succeeded;
-            RecordArchive.Result importedBackup = restored;
-            ArrayList<ScanRecord> added = imported;
-            boolean showImportedFavorites = imported.isEmpty() && favoritesInBackup;
-            runOnUiThread(() -> {
-                recordTransferBusy = false;
-                if (isFinishing() || isDestroyed()) return;
-                progress.dismiss();
-                if (success && importedBackup != null) mergeFavoriteBackup(importedBackup);
-                records.addAll(added);
-                records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
-                if (showingMy) showMy();
-                if (success) {
-                    if (exporting) showBottomNotice(report);
-                    else if (showImportedFavorites) showBottomNotice(report, "查看收藏", () -> openFavorites(this::showMy));
-                    else showBottomNotice(report, "查看记录", this::openRecordsFromMy);
-                } else showConfirmation(R.drawable.dialog_file, false, exporting ? "备份未能导出" : "无法导入这个备份",
-                        report, "取消", "重新选择", null, () -> pickRecordArchive(exporting),
-                        exporting ? "记录与收藏仍保留在本机" : "本机现有记录和收藏未被覆盖");
-            });
         });
+    }
+
+    private void showRestorePreview(RecordArchive.Prepared archive, RecordArchive.Result preview, JSONObject metadata) {
+        pendingRestore = archive;
+        recordTransferBusy = true;
+        java.util.LinkedHashSet<String> groups = backupGroupNames(metadata);
+        JSONObject assignments = metadata.optJSONObject("assignments");
+        int conflicts = 0;
+        if (assignments != null) for (String hash : preview.duplicateFavoriteHashes) {
+            String backupGroup = assignments.optString(hash);
+            if ((backupGroup.isEmpty() || groups.contains(backupGroup))
+                    && !backupGroup.equals(favoriteAssignments.getOrDefault(hash, ""))) conflicts++;
+        }
+        String summary = "提取记录 " + archive.recordCount() + " 条（重复 " + preview.skipped + " 条）\n"
+                + "收藏素材 " + preview.favoriteHashes.size() + " 个（本机已有 " + preview.duplicateFavoriteHashes.size() + " 个）\n"
+                + "收藏夹 " + groups.size() + " 个";
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(R.drawable.record_import, false, "备份恢复预览", summary);
+        if (!groups.isEmpty()) {
+            ScrollView groupList = new ScrollView(this);
+            TextView names = homeLabel(android.text.TextUtils.join("、", groups), 13, INK2, 450);
+            names.setPadding(dp(8), dp(8), dp(8), dp(8));
+            groupList.addView(names);
+            panel.addView(groupList, new LinearLayout.LayoutParams(-1, dp(Math.min(84, 34 + 16 * (groups.size() - 1)))));
+        }
+        android.widget.RadioButton useBackup = new android.widget.RadioButton(this);
+        if (conflicts > 0) {
+            panel.addView(homeLabel(conflicts + " 个重复素材的收藏夹归属不同", 13, INK, 700));
+            android.widget.RadioGroup choice = new android.widget.RadioGroup(this);
+            android.widget.RadioButton keepLocal = new android.widget.RadioButton(this);
+            for (android.widget.RadioButton button : new android.widget.RadioButton[]{keepLocal, useBackup}) {
+                button.setId(View.generateViewId());
+                button.setTextColor(INK);
+                choice.addView(button);
+            }
+            keepLocal.setText("保留本机分组");
+            useBackup.setText("使用备份分组");
+            choice.check(keepLocal.getId());
+            panel.addView(choice);
+        }
+        Runnable cancel = () -> {
+            pendingRestore = null;
+            recordTransferBusy = false;
+            worker.execute(archive::close);
+        };
+        dialog.setOnCancelListener(ignored -> cancel.run());
+        dialogActions(dialog, panel, "取消", "确认恢复", false, cancel, () -> {
+            pendingRestore = null;
+            restoreBackup(archive, metadata, useBackup.isChecked());
+        });
+        showCardDialog(dialog, panel);
+    }
+
+    private void restoreBackup(RecordArchive.Prepared archive, JSONObject metadata, boolean useBackupGroups) {
+        android.app.Dialog progress = backupProgress("正在恢复备份…", "正在恢复所选记录与收藏。");
+        HashSet<String> known = knownRecordIds();
+        worker.execute(() -> {
+            try (RecordArchive.Prepared staged = archive) {
+                RecordArchive.Result result = staged.install(recordsFolder(), new File(getFilesDir(), "favorites"), known);
+                ArrayList<ScanRecord> imported = readRecords(result.added);
+                runOnUiThread(() -> {
+                    boolean visible = finishBackupProgress(progress);
+                    int changed = mergeFavoriteBackup(result, metadata, useBackupGroups);
+                    if (!visible) return;
+                    records.addAll(imported);
+                    records.sort((a, b) -> Long.compare(b.createdAt, a.createdAt));
+                    if (showingMy) showMy();
+                    String report = "恢复成功：记录 " + imported.size() + " 条，收藏 " + result.favoritesAdded
+                            + " 个；跳过重复 " + (result.skipped + result.favoritesSkipped) + " 项";
+                    if (changed > 0) report += "，更新 " + changed + " 个收藏分组";
+                    if (imported.isEmpty() && !result.favoriteHashes.isEmpty())
+                        showBottomNotice(report, "查看收藏", () -> openFavorites(this::showMy));
+                    else showBottomNotice(report, "查看记录", this::openRecordsFromMy);
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> showRestoreError(progress, error));
+            }
+        });
+    }
+
+    private void showRestoreError(android.app.Dialog progress, Exception error) {
+        if (finishBackupProgress(progress)) showConfirmation(R.drawable.dialog_file, false, "无法导入这个备份",
+                archiveFailureReason(error, false), "取消", "重新选择", null, () -> pickRecordArchive(false));
     }
 
     private void openRecordsFromMy() {
@@ -6545,52 +6682,59 @@ public class MainActivity extends Activity {
         getPreferences(MODE_PRIVATE).edit().putString("favorite_sources", favoriteSources.toString()).apply();
     }
 
-    private byte[] favoriteBackupMetadata(List<File> favorites) {
+    private byte[] favoriteBackupMetadata(List<File> favorites, String group) {
         JSONObject assignments = new JSONObject();
         JSONObject sources = new JSONObject();
         try {
             for (File file : favorites) {
-                String name = file.getName();
-                int extension = name.lastIndexOf('.');
-                if (extension <= 0) continue;
-                String hash = name.substring(0, extension);
+                String hash = favoriteFileHash(file);
                 assignments.put(hash, favoriteAssignments.get(hash));
                 sources.put(hash, favoriteSources.optJSONObject(hash));
             }
-            return new JSONObject().put("groups", new JSONArray(favoriteGroups))
+            return new JSONObject().put("groups", new JSONArray(group == null
+                            ? favoriteGroups : Collections.singleton(group)))
                     .put("assignments", assignments).put("sources", sources).toString().getBytes(StandardCharsets.UTF_8);
         } catch (org.json.JSONException error) {
             throw new IllegalStateException(error);
         }
     }
 
-    private void mergeFavoriteBackup(RecordArchive.Result backup) {
-        if (backup.favoriteMetadata == null) return;
-        try {
-            JSONObject data = new JSONObject(new String(backup.favoriteMetadata, StandardCharsets.UTF_8));
-            JSONArray names = data.optJSONArray("groups");
-            if (names != null) {
-                for (int i = 0; i < names.length(); i++) {
-                    String name = names.optString(i).trim();
-                    if (!name.isEmpty() && name.length() <= 24 && !"全部收藏".equals(name) && !"未分组".equals(name))
-                        favoriteGroups.add(name);
+    private java.util.LinkedHashSet<String> backupGroupNames(JSONObject data) {
+        java.util.LinkedHashSet<String> groups = new java.util.LinkedHashSet<>();
+        JSONArray names = data.optJSONArray("groups");
+        for (int i = 0; names != null && i < names.length(); i++) {
+            String name = names.optString(i).trim();
+            if (!name.isEmpty() && name.length() <= 24 && !"全部收藏".equals(name) && !"未分组".equals(name))
+                groups.add(name);
+        }
+        return groups;
+    }
+
+    private int mergeFavoriteBackup(RecordArchive.Result backup, JSONObject data, boolean useBackupGroups) {
+        if (backup.favoriteMetadata == null) return 0;
+        java.util.Set<String> groups = backupGroupNames(data);
+        favoriteGroups.addAll(groups);
+        JSONObject assignments = data.optJSONObject("assignments");
+        JSONObject sources = data.optJSONObject("sources");
+        int changed = 0;
+        for (String hash : backup.favoriteHashes) {
+            boolean duplicate = backup.duplicateFavoriteHashes.contains(hash);
+            if (assignments != null && (!duplicate || useBackupGroups)) {
+                String group = assignments.optString(hash);
+                if (group.isEmpty() || groups.contains(group)) {
+                    String previous = group.isEmpty() ? favoriteAssignments.remove(hash) : favoriteAssignments.put(hash, group);
+                    if (duplicate && !group.equals(previous == null ? "" : previous)) changed++;
                 }
             }
-            JSONObject assignments = data.optJSONObject("assignments");
-            JSONObject sources = data.optJSONObject("sources");
-            for (String hash : backup.favoriteHashes) {
-                if (assignments != null) {
-                    String group = assignments.optString(hash);
-                    if (favoriteGroups.contains(group)) favoriteAssignments.putIfAbsent(hash, group);
-                }
-                JSONObject source = sources == null ? null : sources.optJSONObject(hash);
-                if (!favoriteSources.has(hash) && source != null && isFavoriteSourceLink(source.optString("link"))) {
-                    favoriteSources.put(hash, source);
-                }
+            JSONObject source = sources == null ? null : sources.optJSONObject(hash);
+            if (!favoriteSources.has(hash) && source != null && isFavoriteSourceLink(source.optString("link"))) {
+                try { favoriteSources.put(hash, source); }
+                catch (org.json.JSONException ignored) { }
             }
-            saveFavoriteGroups();
-            saveFavoriteSources();
-        } catch (org.json.JSONException ignored) { }
+        }
+        saveFavoriteGroups();
+        saveFavoriteSources();
+        return changed;
     }
 
     private String favoriteSourcePlatform(String link) {
@@ -7809,6 +7953,10 @@ public class MainActivity extends Activity {
                 popup.dismiss();
                 editGroupName(group, name -> renderManagedGroups(groups));
             });
+            if (count > 0) addRecordAction(options, "导出收藏夹", R.drawable.extract_download, INK, () -> {
+                popup.dismiss();
+                chooseGroupExport(group);
+            });
             addRecordAction(options, "删除分组", R.drawable.dialog_trash, DANGER, () -> {
                 popup.dismiss();
                 android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
@@ -8256,6 +8404,10 @@ public class MainActivity extends Activity {
         if (noticePopup != null) noticePopup.dismiss();
         if (recordUndoPopup != null) recordUndoPopup.dismiss();
         if (fullscreenPreviewDialog != null) fullscreenPreviewDialog.dismiss();
+        if (pendingRestore != null) {
+            pendingRestore.close();
+            pendingRestore = null;
+        }
         for (Animatable animation : animations) animation.stop();
         worker.shutdownNow();
         browser.destroy();

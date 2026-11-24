@@ -18,9 +18,86 @@ final class RecordArchive {
     static final class Result {
         final HashSet<String> added = new HashSet<>();
         final HashSet<String> favoriteHashes = new HashSet<>();
+        final HashSet<String> duplicateFavoriteHashes = new HashSet<>();
         int skipped;
         int favoritesAdded, favoritesSkipped;
         byte[] favoriteMetadata;
+    }
+    static final class Prepared implements AutoCloseable {
+        private final File staging;
+        private final File[] records;
+        private final Map<File, String> favorites;
+        final byte[] favoriteMetadata;
+
+        private Prepared(File staging, File[] records, Map<File, String> favorites, byte[] favoriteMetadata) {
+            this.staging = staging;
+            this.records = records;
+            this.favorites = favorites;
+            this.favoriteMetadata = favoriteMetadata;
+        }
+
+        int recordCount() { return records.length; }
+
+        Result preview(File destination, File favoritesDestination, Set<String> known) throws Exception {
+            Result result = new Result();
+            result.favoriteMetadata = favoriteMetadata;
+            for (File folder : records) {
+                String id = folder.getName();
+                if (known.contains(id) || new File(destination, id).exists()) result.skipped++;
+            }
+            assessFavorites(favoritesDestination, result);
+            return result;
+        }
+
+        private HashSet<String> assessFavorites(File destination, Result result) throws Exception {
+            HashSet<String> existingHashes = new HashSet<>();
+            File[] existing = destination.listFiles();
+            if (!favorites.isEmpty() && existing != null) for (File file : existing)
+                if (file.isFile() && !file.getName().endsWith(".tmp")) existingHashes.add(hash(file));
+            HashSet<String> seen = new HashSet<>();
+            for (String name : favorites.values()) {
+                String hash = name.substring(0, 64);
+                result.favoriteHashes.add(hash);
+                if (existingHashes.contains(hash)) result.duplicateFavoriteHashes.add(hash);
+                if (!seen.add(hash) || existingHashes.contains(hash)) result.favoritesSkipped++;
+            }
+            return existingHashes;
+        }
+
+        Result install(File destination, File favoritesDestination, Set<String> known) throws Exception {
+            Result result = new Result();
+            result.favoriteMetadata = favoriteMetadata;
+            ArrayList<File> installedFavorites = new ArrayList<>();
+            try {
+                HashSet<String> favoriteHashes = assessFavorites(favoritesDestination, result);
+                if (records.length > 0 && !destination.isDirectory() && !destination.mkdirs())
+                    throw new IOException("无法创建记录目录");
+                for (File folder : records) {
+                    String id = folder.getName();
+                    File target = new File(destination, id);
+                    if (known.contains(id) || target.exists()) { result.skipped++; continue; }
+                    Files.move(folder.toPath(), target.toPath());
+                    result.added.add(id);
+                }
+                if (!favorites.isEmpty() && !favoritesDestination.isDirectory() && !favoritesDestination.mkdirs())
+                    throw new IOException("无法创建收藏目录");
+                for (Map.Entry<File, String> favorite : favorites.entrySet()) {
+                    if (!favoriteHashes.add(favorite.getValue().substring(0, 64))) continue;
+                    File target = new File(favoritesDestination, favorite.getValue());
+                    if (target.exists()) throw new IOException("收藏文件冲突，请检查本机文件后重试");
+                    Files.move(favorite.getKey().toPath(), target.toPath());
+                    installedFavorites.add(target);
+                    result.favoritesAdded++;
+                }
+                return result;
+            } catch (Exception error) {
+                for (File file : installedFavorites) file.delete();
+                for (String id : result.added) delete(new File(destination, id));
+                throw error;
+            }
+        }
+
+        @Override public void close() { delete(staging); }
     }
     static boolean leaf(String name) {
         return !name.isEmpty() && !name.equals(".") && !name.equals("..")
@@ -77,10 +154,15 @@ final class RecordArchive {
     }
     static Result read(InputStream input, File staging, File destination, File favoritesDestination,
                        Set<String> known, Validator validator, FavoriteValidator favoriteValidator) throws Exception {
-        Result result = new Result();
-        ArrayList<File> installedFavorites = new ArrayList<>();
+        try (Prepared prepared = prepare(input, staging, validator, favoriteValidator)) {
+            return prepared.install(destination, favoritesDestination, known);
+        }
+    }
+
+    static Prepared prepare(InputStream input, File staging, Validator validator,
+                            FavoriteValidator favoriteValidator) throws Exception {
+        if (!staging.mkdirs()) throw new IOException("无法创建导入暂存目录");
         try {
-            if (!staging.mkdirs()) throw new IOException("无法创建导入暂存目录");
             HashSet<String> entries = new HashSet<>();
             long total = 0;
             try (ZipInputStream zip = new ZipInputStream(new BufferedInputStream(input))) {
@@ -130,9 +212,10 @@ final class RecordArchive {
             if ((version.equals("1") && favorites.length > 0) || (folders.length == 0 && favorites.length == 0))
                 throw new IOException("备份内容无效或为空");
             File metadata = new File(staging, FAVORITE_METADATA);
+            byte[] favoriteMetadata = null;
             if (version.equals("3")) {
                 if (favorites.length == 0 || !metadata.isFile()) throw new IOException("收藏备份元数据缺失");
-                result.favoriteMetadata = Files.readAllBytes(metadata.toPath());
+                favoriteMetadata = Files.readAllBytes(metadata.toPath());
             } else if (metadata.exists()) throw new IOException("备份版本与收藏元数据不匹配");
             for (File folder : folders) {
                 List<String> expected = validator.files(folder);
@@ -143,37 +226,12 @@ final class RecordArchive {
             for (File favorite : favorites) {
                 String hash = hash(favorite);
                 favoriteNames.put(favorite, hash + favoriteValidator.extension(favorite));
-                result.favoriteHashes.add(hash);
             }
-            HashSet<String> favoriteHashes = new HashSet<>();
-            File[] existing = favoritesDestination.listFiles();
-            if (favorites.length > 0 && existing != null) for (File file : existing)
-                if (file.isFile() && !file.getName().endsWith(".tmp")) favoriteHashes.add(hash(file));
-            if (!destination.isDirectory() && !destination.mkdirs()) throw new IOException("无法创建记录目录");
-            for (File folder : folders) {
-                String id = folder.getName();
-                File target = new File(destination, id);
-                if (known.contains(id) || target.exists()) { result.skipped++; continue; }
-                Files.move(folder.toPath(), target.toPath());
-                result.added.add(id);
-            }
-            if (!favoriteNames.isEmpty() && !favoritesDestination.isDirectory() && !favoritesDestination.mkdirs())
-                throw new IOException("无法创建收藏目录");
-            for (Map.Entry<File, String> favorite : favoriteNames.entrySet()) {
-                String hash = favorite.getValue().substring(0, 64);
-                if (!favoriteHashes.add(hash)) { result.favoritesSkipped++; continue; }
-                File target = new File(favoritesDestination, favorite.getValue());
-                if (target.exists()) throw new IOException("收藏文件冲突，请检查本机文件后重试");
-                Files.move(favorite.getKey().toPath(), target.toPath());
-                installedFavorites.add(target);
-                result.favoritesAdded++;
-            }
-            return result;
+            return new Prepared(staging, folders, favoriteNames, favoriteMetadata);
         } catch (Exception error) {
-            for (File file : installedFavorites) file.delete();
-            for (String id : result.added) delete(new File(destination, id));
+            delete(staging);
             throw error;
-        } finally { delete(staging); }
+        }
     }
     private static String hash(File file) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");

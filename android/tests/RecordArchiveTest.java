@@ -47,6 +47,16 @@ public class RecordArchiveTest {
         Map<String, File> records = Collections.singletonMap("record-1", record);
         byte[] complete = write(records, Arrays.asList(favorite, favorite));
         File all = new File(root, "all"); check(all.mkdirs());
+        File stage = new File(all, "stage");
+        File recordsDestination = new File(all, "records");
+        File favoritesDestination = new File(all, "favorites");
+        try (RecordArchive.Prepared prepared = RecordArchive.prepare(new ByteArrayInputStream(complete), stage,
+                RecordArchiveTest::validateRecord, RecordArchiveTest::validateFavorite)) {
+            RecordArchive.Result preview = prepared.preview(recordsDestination, favoritesDestination, Collections.emptySet());
+            check(prepared.recordCount() == 1 && preview.skipped == 0 && preview.favoriteHashes.size() == 1);
+            check(preview.duplicateFavoriteHashes.isEmpty() && !recordsDestination.exists() && !favoritesDestination.exists());
+        }
+        check(!stage.exists() && !recordsDestination.exists() && !favoritesDestination.exists());
         RecordArchive.Result imported = read(complete, all);
         check(imported.added.size() == 1 && imported.favoritesAdded == 1);
         File[] saved = new File(all, "favorites").listFiles(); check(saved.length == 1);
@@ -54,6 +64,13 @@ public class RecordArchiveTest {
         check(Math.abs(saved[0].lastModified() - favorite.lastModified()) < 2000);
         RecordArchive.Result again = read(complete, all);
         check(again.added.isEmpty() && again.skipped == 1 && again.favoritesAdded == 0 && again.favoritesSkipped == 1);
+        try (RecordArchive.Prepared prepared = RecordArchive.prepare(new ByteArrayInputStream(complete), stage,
+                RecordArchiveTest::validateRecord, RecordArchiveTest::validateFavorite)) {
+            RecordArchive.Result preview = prepared.preview(recordsDestination, favoritesDestination, Collections.emptySet());
+            check(preview.skipped == 1 && preview.duplicateFavoriteHashes.equals(imported.favoriteHashes));
+            RecordArchive.Result restored = prepared.install(recordsDestination, favoritesDestination, Collections.emptySet());
+            check(restored.skipped == preview.skipped && restored.duplicateFavoriteHashes.equals(preview.duplicateFavoriteHashes));
+        }
         File favoriteOnly = new File(root, "favorite-only"); check(favoriteOnly.mkdirs());
         check(read(write(Collections.emptyMap(), Collections.singletonList(favorite)), favoriteOnly).favoritesAdded == 1);
         byte[] metadata = "{\"groups\":[\"表情\"],\"sources\":{}}".getBytes(StandardCharsets.UTF_8);
