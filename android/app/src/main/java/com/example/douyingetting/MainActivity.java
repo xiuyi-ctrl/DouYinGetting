@@ -1212,13 +1212,17 @@ public class MainActivity extends Activity {
     }
 
     private void presentSecondary(LinearLayout root) {
+        presentSecondary(root, motionEnabled);
+    }
+
+    private void presentSecondary(LinearLayout root, boolean animate) {
         if (root == readerRoot) {
             readerRoot.setVisibility(View.VISIBLE);
             if (pageLayer != null) pageLayer.setVisibility(View.GONE);
         } else {
             showLayerPage(root);
         }
-        if (motionEnabled) {
+        if (animate) {
             root.setAlpha(0f);
             root.setTranslationX(dp(returningTransition ? -12 : 12));
             root.animate().alpha(1).translationX(0).setDuration(220).start();
@@ -2606,6 +2610,23 @@ public class MainActivity extends Activity {
         pressFeedback(modeRow);
         storage.addView(rowDivider());
 
+        LinearLayout importRow = new LinearLayout(this);
+        importRow.setGravity(Gravity.CENTER_VERTICAL);
+        importRow.setPadding(dp(14), dp(14), dp(14), dp(14));
+        storage.addView(importRow, new LinearLayout.LayoutParams(-1, -2));
+        importRow.addView(icon(R.drawable.record_import, ACCENT), new LinearLayout.LayoutParams(dp(22), dp(22)));
+        LinearLayout.LayoutParams importLabelParams = new LinearLayout.LayoutParams(0, -2, 1);
+        importLabelParams.leftMargin = dp(12);
+        importRow.addView(homeLabel("导入方式", 14, INK, 700), importLabelParams);
+        TextView importValue = homeLabel(importFromFiles() ? "文件" : "相册", 12, ACCENT, 650);
+        importRow.addView(importValue);
+        LinearLayout.LayoutParams importArrowParams = new LinearLayout.LayoutParams(dp(16), dp(16));
+        importArrowParams.leftMargin = dp(6);
+        importRow.addView(icon(R.drawable.home_chevron, INK2), importArrowParams);
+        importRow.setOnClickListener(v -> showMediaImportSettings(importValue));
+        pressFeedback(importRow);
+        storage.addView(rowDivider());
+
         LinearLayout location = new LinearLayout(this);
         location.setGravity(Gravity.CENTER_VERTICAL);
         location.setPadding(dp(14), dp(14), dp(14), dp(14));
@@ -2964,6 +2985,7 @@ public class MainActivity extends Activity {
     }
 
     private void showRecords() {
+        boolean fromReader = showingReader;
         resetPages();
         currentPage = -2;
         showingSettings = false;
@@ -2978,6 +3000,8 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BG);
         root.setFitsSystemWindows(true);
+        // Handle taps outside list controls so they cannot reach the reader underneath.
+        root.setClickable(true);
 
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
@@ -3076,8 +3100,14 @@ public class MainActivity extends Activity {
         });
         int position = recordScrollPositions.getOrDefault(platform, 0);
         scroll.setOnScrollChangeListener((v, x, y, oldX, oldY) -> recordScrollPositions.put(platform, y));
-        presentSecondary(root);
-        scroll.post(() -> scroll.scrollTo(0, position));
+        if (position > 0) scroll.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override public void onLayoutChange(View view, int left, int top, int right, int bottom,
+                                                 int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                scroll.removeOnLayoutChangeListener(this);
+                scroll.scrollTo(0, position);
+            }
+        });
+        presentSecondary(root, motionEnabled && !fromReader);
     }
 
     private void leaveRecords() {
@@ -3683,7 +3713,7 @@ public class MainActivity extends Activity {
         scanButton.setVisibility(!batchReader || batchTask.comments ? View.VISIBLE : View.GONE);
         ((View) scanButton.getParent()).setVisibility(!batchReader || batchTask.comments ? View.VISIBLE : View.GONE);
         extractWorkButton.setVisibility(batchReader && batchTask.comments ? View.GONE : View.VISIBLE);
-        ((View) phoneImportButton.getParent()).setVisibility(batchReader ? View.GONE : View.VISIBLE);
+        phoneImportButton.setVisibility(batchReader ? View.GONE : View.VISIBLE);
         presentSecondary(readerRoot);
         updateScanCard();
         for (Animatable animation : animations) animation.start();
@@ -4036,7 +4066,7 @@ public class MainActivity extends Activity {
             updateResultLabels();
         });
         resultHeader.addView(selectionAction, new LinearLayout.LayoutParams(dp(70), dp(36)));
-        phoneImportButton = addPhoneImportActions(content);
+        phoneImportButton = addPhoneImportButton(content);
         readerPostStatus = new PostStatusStrip();
         content.addView(readerPostStatus, postStatusParams());
         readerPostStatus.retry.setOnClickListener(v -> {
@@ -5048,20 +5078,15 @@ public class MainActivity extends Activity {
         });
     }
 
-    private Button addPhoneImportActions(LinearLayout content) {
-        LinearLayout row = new LinearLayout(this);
-        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, dp(40));
-        rowParams.topMargin = dp(8);
-        content.addView(row, rowParams);
-        Button album = shareButton("导入手机素材", v -> pickPhoneMedia(false));
-        row.addView(album, new LinearLayout.LayoutParams(0, -1, 1));
-        LinearLayout.LayoutParams browseParams = new LinearLayout.LayoutParams(-2, -1);
-        browseParams.leftMargin = dp(8);
-        row.addView(shareButton("浏览文件", v -> pickPhoneMedia(true)), browseParams);
-        return album;
+    private Button addPhoneImportButton(LinearLayout content) {
+        Button button = shareButton("导入手机素材", v -> pickPhoneMedia());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(40));
+        params.topMargin = dp(8);
+        content.addView(button, params);
+        return button;
     }
 
-    private void pickPhoneMedia(boolean browseFiles) {
+    private void pickPhoneMedia() {
         if (importingPhoneMedia) return;
         boolean kuaishou = showingKuaishou;
         ScanRecord target = kuaishou ? favoriteScreen.kuaishouPostRecord : currentRecord;
@@ -5086,7 +5111,7 @@ public class MainActivity extends Activity {
         }
         phoneImportLink = link;
         phoneImportRecordId = target == null ? null : target.id;
-        try { openLocalMediaPicker(false, browseFiles, IMPORT_PHONE_MEDIA); }
+        try { openLocalMediaPicker(false, IMPORT_PHONE_MEDIA); }
         catch (android.content.ActivityNotFoundException error) {
             phoneImportLink = null;
             phoneImportRecordId = null;
@@ -5094,8 +5119,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void openLocalMediaPicker(boolean includeImages, boolean browseFiles, int requestCode) {
-        if (!browseFiles && (android.os.Build.VERSION.SDK_INT >= 33 || android.os.Build.VERSION.SDK_INT >= 30
+    private void openLocalMediaPicker(boolean includeImages, int requestCode) {
+        if (!importFromFiles() && (android.os.Build.VERSION.SDK_INT >= 33 || android.os.Build.VERSION.SDK_INT >= 30
                 && android.os.ext.SdkExtensions.getExtensionVersion(30) >= 2)) {
             Intent album = new Intent(MediaStore.ACTION_PICK_IMAGES);
             if (!includeImages) album.setType("video/mp4");
@@ -5114,13 +5139,15 @@ public class MainActivity extends Activity {
         picker.setType(includeImages ? "*/*" : "video/mp4");
         if (includeImages) picker.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/mp4"});
         picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        picker.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:"));
         return picker;
     }
 
-    private void pickFavoriteMedia(String group, boolean browseFiles) {
+    private void pickFavoriteMedia(String group) {
         if (importingFavoriteMedia || recordTransferBusy) return;
         favoriteImportGroup = group == null ? "" : group;
-        try { openLocalMediaPicker(true, browseFiles, IMPORT_FAVORITE_MEDIA); }
+        try { openLocalMediaPicker(true, IMPORT_FAVORITE_MEDIA); }
         catch (android.content.ActivityNotFoundException error) {
             favoriteImportGroup = null;
             showTopNotice("无法打开系统文件选择器");
@@ -6387,12 +6414,19 @@ public class MainActivity extends Activity {
         ArrayList<Media> sequence = new ArrayList<>();
         for (Media candidate : items) if (visible.test(candidate)) sequence.add(candidate);
         int index = sequence.indexOf(item);
-        if (index >= 0) preview(sequence, index, motionEnabled);
+        if (index >= 0) preview(sequence, index);
     }
 
-    private void preview(List<Media> sequence, int index, boolean animate) {
-        Media item = sequence.get(index);
+    private void preview(List<Media> sequence, int index) {
         android.app.Dialog dialog = new android.app.Dialog(this);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        renderPreview(dialog, scroll, sequence, index, null);
+    }
+
+    private void renderPreview(android.app.Dialog dialog, ScrollView scroll, List<Media> sequence,
+                               int index, Runnable stopPrevious) {
+        Media item = sequence.get(index);
         try {
             boolean isVideo = item.mime.startsWith("video/");
             LinearLayout panel = dialogPanel(0, false, "素材预览", null);
@@ -6411,7 +6445,8 @@ public class MainActivity extends Activity {
             fp.topMargin = dp(16);
             panel.addView(frame, fp);
             String size = android.text.format.Formatter.formatShortFileSize(this, item.file.length());
-            Animatable animation = null;
+            Runnable start;
+            Runnable stop;
             if (isVideo) {
                 info.setText(formatName + " · " + size);
                 PreviewVideoView video = new PreviewVideoView(this);
@@ -6422,14 +6457,14 @@ public class MainActivity extends Activity {
                     video.onVideoPrepared(player);
                 });
                 video.setOnErrorListener((player, what, extra) -> {
-                    if (dialog.isShowing()) dismissCardDialog(dialog, () -> showMessage(R.drawable.extract_play, "暂时无法播放",
+                    if (video.isAttachedToWindow() && dialog.isShowing()) dismissCardDialog(dialog, () -> showMessage(R.drawable.extract_play, "暂时无法播放",
                             "当前设备未能播放这段视频。可以先保存文件，再用其他播放器打开。"));
                     return true;
                 });
                 frame.addView(video, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
                 addFullscreenTarget(frame, "放大视频", () -> showFullscreenPreview(item, dialog, video, null));
-                dialog.setOnDismissListener(ignored -> video.stopPlayback());
-                video.start();
+                start = video::start;
+                stop = video::stopPlayback;
             } else {
                 int[] dimensions = new int[2];
                 Drawable drawable = decodePreviewImage(item.file, 1600, dimensions);
@@ -6438,15 +6473,16 @@ public class MainActivity extends Activity {
                 image.setScaleType(ImageView.ScaleType.FIT_CENTER);
                 image.setImageDrawable(drawable);
                 frame.addView(image, new FrameLayout.LayoutParams(-1, -1));
-                if (drawable instanceof Animatable) {
-                    Animatable animated = (Animatable) drawable;
-                    animation = animated;
-                    dialog.setOnDismissListener(ignored -> animated.stop());
-                }
-                Animatable inlineAnimation = animation;
+                Animatable inlineAnimation = drawable instanceof Animatable ? (Animatable) drawable : null;
+                start = inlineAnimation == null ? null : inlineAnimation::start;
+                stop = inlineAnimation == null ? null : inlineAnimation::stop;
                 addFullscreenTarget(frame, "放大图片", () -> showFullscreenPreview(item, dialog, null, inlineAnimation));
             }
-            if (sequence.size() > 1) addPreviewNavigation(panel, dialog, sequence, index);
+            if (sequence.size() > 1) {
+                addPreviewNavigation(panel, index, sequence.size(), next -> {
+                    if (dialog.isShowing()) renderPreview(dialog, scroll, sequence, next, stop);
+                });
+            }
             if (work != null && PHONE_MEDIA_KIND.equals(item.kind) && work.folder.equals(item.file.getParentFile())) {
                 addPreviewLinkRow(panel, "删除导入素材", "", R.drawable.dialog_trash,
                         () -> dismissCardDialog(dialog, () -> confirmDeleteImportedMedia(work, item)));
@@ -6466,7 +6502,7 @@ public class MainActivity extends Activity {
                     String current = favoriteAssignments.getOrDefault(item.hash, "");
                     addPreviewLinkRow(panel, "移到分组", groupName(current), R.drawable.blue_folder,
                             () -> dismissCardDialog(dialog, () -> showFavoriteDestination(current, current, 1,
-                                    group -> movePreviewFavorite(item, group), () -> preview(sequence, index, motionEnabled))));
+                                    group -> movePreviewFavorite(item, group), () -> preview(sequence, index))));
                 }
             }
             View divider = new View(this);
@@ -6483,7 +6519,7 @@ public class MainActivity extends Activity {
                     v -> dismissCardDialog(dialog, () -> {
                         if (favorite) setFavorite(item, false, "", work);
                         else showFavoriteDestination(null, "", 1, group -> setFavorite(item, true, group, work),
-                                () -> preview(sequence, index, motionEnabled));
+                                () -> preview(sequence, index));
                     }));
             addPreviewAction(actions, "分享", R.drawable.dialog_share, false, v -> shareMedia(Collections.singletonList(item)));
             addPreviewAction(actions, "关闭", R.drawable.dialog_close, false, v -> dismissCardDialog(dialog, null));
@@ -6505,18 +6541,19 @@ public class MainActivity extends Activity {
                     }
                 });
             }));
-            ScrollView scroll = new ScrollView(this);
-            scroll.setVerticalScrollBarEnabled(false);
+            if (stopPrevious != null) stopPrevious.run();
+            scroll.removeAllViews();
             scroll.addView(panel, new ScrollView.LayoutParams(-1, -2));
-            showCardDialog(dialog, scroll, 360, 32, animate);
-            if (animation != null) animation.start();
+            scroll.scrollTo(0, 0);
+            dialog.setOnDismissListener(stop == null ? null : ignored -> stop.run());
+            if (!dialog.isShowing()) showCardDialog(dialog, scroll, 360, 32);
+            if (start != null) start.run();
         } catch (Exception error) {
-            dialog.dismiss();
             showMessage(R.drawable.extract_info, "暂时无法预览", "未能读取这项素材，请确认文件仍在本机。");
         }
     }
 
-    private void addPreviewNavigation(LinearLayout panel, android.app.Dialog dialog, List<Media> sequence, int index) {
+    private void addPreviewNavigation(LinearLayout panel, int index, int count, java.util.function.IntConsumer navigate) {
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(44));
@@ -6524,7 +6561,7 @@ public class MainActivity extends Activity {
         panel.addView(row, params);
         for (int direction : new int[]{-1, 1}) {
             if (direction == 1) {
-                TextView position = homeLabel((index + 1) + " / " + sequence.size(), 12, INK2, 650);
+                TextView position = homeLabel((index + 1) + " / " + count, 12, INK2, 650);
                 position.setGravity(Gravity.CENTER);
                 row.addView(position, new LinearLayout.LayoutParams(0, -1, 1));
             }
@@ -6535,12 +6572,8 @@ public class MainActivity extends Activity {
             arrow.setContentDescription(direction < 0 ? "上一项素材" : "下一项素材");
             row.addView(arrow, new LinearLayout.LayoutParams(dp(44), -1));
             int next = index + direction;
-            arrow.setOnClickListener(v -> {
-                if (!dialog.isShowing()) return;
-                dialog.dismiss();
-                preview(sequence, next, false);
-            });
-            boolean available = next >= 0 && next < sequence.size();
+            arrow.setOnClickListener(v -> navigate.accept(next));
+            boolean available = next >= 0 && next < count;
             arrow.setEnabled(available);
             arrow.setAlpha(available ? 1f : 0.35f);
         }
@@ -7338,6 +7371,26 @@ public class MainActivity extends Activity {
         showBottomSheet(dialog, panel);
     }
 
+    private boolean importFromFiles() {
+        return getPreferences(MODE_PRIVATE).getBoolean("media_import_files", false);
+    }
+
+    private void showMediaImportSettings(TextView currentValue) {
+        boolean filesSelected = importFromFiles();
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("导入方式", "应用于收藏和作品记录中的导入");
+        addCheckedSheetChoice(panel, "相册", "在系统相册中选择素材", R.drawable.record_import,
+                !filesSelected, () -> dismissCardDialog(dialog, () -> setMediaImportMode(false, currentValue)));
+        addCheckedSheetChoice(panel, "文件", "从内部存储根目录开始浏览", R.drawable.blue_folder,
+                filesSelected, () -> dismissCardDialog(dialog, () -> setMediaImportMode(true, currentValue)));
+        showBottomSheet(dialog, panel);
+    }
+
+    private void setMediaImportMode(boolean files, TextView currentValue) {
+        getPreferences(MODE_PRIVATE).edit().putBoolean("media_import_files", files).apply();
+        currentValue.setText(files ? "文件" : "相册");
+    }
+
     private boolean canOrganizeSave(ScanRecord record) {
         return record != null && (record.kuaishou || WorkMedia.isShareLink(record.link, isXhsLink(record.link)));
     }
@@ -7504,7 +7557,6 @@ public class MainActivity extends Activity {
         private Button select;
         private Button selectAll;
         private Button importFiles;
-        private ImageView browseImportFiles;
         private Button share;
         private Button save;
         private Button remove;
@@ -7736,13 +7788,12 @@ public class MainActivity extends Activity {
             if (!kuaishou) header.addView(select, new LinearLayout.LayoutParams(dp(68), dp(44)));
             select.setEnabled(false);
             if (!imported) {
-                importFiles = shareButton("相册导入", v -> pickFavoriteMedia(activeGroup, false));
-                header.addView(importFiles, new LinearLayout.LayoutParams(dp(80), dp(40)));
-                browseImportFiles = icon(R.drawable.blue_folder, ACCENT);
-                browseImportFiles.setPadding(dp(10), dp(10), dp(10), dp(10));
-                browseImportFiles.setContentDescription("浏览文件");
-                browseImportFiles.setOnClickListener(v -> pickFavoriteMedia(activeGroup, true));
-                header.addView(browseImportFiles, new LinearLayout.LayoutParams(dp(40), dp(40)));
+                importFiles = shareButton("导入", v -> pickFavoriteMedia(activeGroup));
+                importFiles.setTypeface(homeTypeface(700));
+                importFiles.setBackground(shape(ACCENT_SOFT, 12));
+                LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(dp(68), dp(44));
+                importParams.setMarginStart(dp(8));
+                header.addView(importFiles, importParams);
                 header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
             }
             if (kuaishou && savedKuaishou == null) {
@@ -7785,7 +7836,7 @@ public class MainActivity extends Activity {
                 resultHeader.addView(selectAll, selectAllParams);
                 resultHeader.addView(select, new LinearLayout.LayoutParams(dp(70), dp(36)));
                 readerIcon(select, R.drawable.extract_select, 16);
-                if (batchTask == null) addPhoneImportActions(content);
+                if (batchTask == null) addPhoneImportButton(content);
                 content.addView(kuaishouPostStatus, postStatusParams());
             }
             if (wechat) {
@@ -8357,8 +8408,6 @@ public class MainActivity extends Activity {
             if (importFiles != null) {
                 importFiles.setVisibility(selecting ? View.GONE : View.VISIBLE);
                 importFiles.setEnabled(!busy && !importingFavoriteMedia);
-                browseImportFiles.setVisibility(importFiles.getVisibility());
-                browseImportFiles.setEnabled(importFiles.isEnabled());
             }
             title.setText(selecting && !kuaishou ? "已选 " + selected.size() + " 项" : screenTitle());
             if (extractedCount != null) extractedCount.setText(selecting
