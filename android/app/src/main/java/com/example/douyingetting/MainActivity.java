@@ -112,6 +112,9 @@ public class MainActivity extends Activity {
     private boolean resumedFromHome;
     private static final int EXPORT_RECORDS = 7101, IMPORT_RECORDS = 7102, IMPORT_WECHAT = 7103, IMPORT_PHONE_MEDIA = 7104;
     private static final String PHONE_MEDIA_KIND = "手机导入";
+    private static final int IMPORT_FAVORITE_MEDIA = 7105;
+    private String favoriteImportGroup;
+    private boolean importingFavoriteMedia;
     private String phoneImportLink;
     private String phoneImportRecordId;
     private boolean importingPhoneMedia;
@@ -121,6 +124,7 @@ public class MainActivity extends Activity {
     private boolean kuaishouRecords;
     private final java.util.HashMap<String, String> recordSearches = new java.util.HashMap<>();
     private final java.util.HashMap<String, Integer> recordTypes = new java.util.HashMap<>();
+    private final java.util.HashMap<String, Integer> recordScrollPositions = new java.util.HashMap<>();
     private FavoritesScreen kuaishouRecordsOrigin;
     private WechatImportRecord currentWechatImport;
     private static class WechatImportRecord {
@@ -154,7 +158,7 @@ public class MainActivity extends Activity {
     private PopupWindow recordUndoPopup;
     private Runnable refreshRecordList = () -> {};
     private final ArrayList<PendingRecordDeletion> pendingRecordDeletions = new ArrayList<>();
-    private static final long RECORD_UNDO_MS = 8000;
+    private static final long RECORD_UNDO_MS = 3000;
     private LinearLayout readerRoot;
     private FrameLayout stage;
     private FrameLayout pageLayer;
@@ -392,6 +396,7 @@ public class MainActivity extends Activity {
         if (state != null) {
             phoneImportLink = state.getString("phoneImportLink");
             phoneImportRecordId = state.getString("phoneImportRecordId");
+            favoriteImportGroup = state.getString("favoriteImportGroup");
             backupScope = state.getInt("backupScope", 2);
             backupGroup = state.getString("backupGroup");
             backupMaterialsOnly = state.getBoolean("backupMaterialsOnly");
@@ -417,6 +422,7 @@ public class MainActivity extends Activity {
         super.onSaveInstanceState(state);
         state.putString("phoneImportLink", phoneImportLink);
         state.putString("phoneImportRecordId", phoneImportRecordId);
+        state.putString("favoriteImportGroup", favoriteImportGroup);
         state.putInt("backupScope", backupScope);
         state.putString("backupGroup", backupGroup);
         state.putBoolean("backupMaterialsOnly", backupMaterialsOnly);
@@ -1933,12 +1939,18 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == IMPORT_FAVORITE_MEDIA) {
+            String group = favoriteImportGroup;
+            favoriteImportGroup = null;
+            if (result == RESULT_OK && data != null && group != null) importFavoriteMedia(group, selectedFiles(data));
+            return;
+        }
         if (request == IMPORT_PHONE_MEDIA) {
             String link = phoneImportLink;
             String recordId = phoneImportRecordId;
             phoneImportLink = null;
             phoneImportRecordId = null;
-            if (result == RESULT_OK && data != null && link != null) importPhoneMedia(link, recordId, data);
+            if (result == RESULT_OK && data != null && link != null) importPhoneMedia(link, recordId, selectedFiles(data));
             return;
         }
         if (request == IMPORT_WECHAT) {
@@ -3028,8 +3040,11 @@ public class MainActivity extends Activity {
         page.setPadding(dp(16), dp(6), dp(16), dp(28));
         scroll.addView(page);
         refreshRecordList = () -> {
-            if (showingRecords && page.isAttachedToWindow())
+            if (showingRecords && page.isAttachedToWindow()) {
+                int position = scroll.getScrollY();
                 addRecordCards(page, total, search, recordTypes.getOrDefault(platform, 0));
+                scroll.post(() -> scroll.scrollTo(0, position));
+            }
         };
         Runnable renderRecords = () -> {
             int type = recordTypes.getOrDefault(platform, 0);
@@ -3039,13 +3054,14 @@ public class MainActivity extends Activity {
                 filters[i].setSelected(i == type);
             }
             addRecordCards(page, total, search, type);
-            scroll.scrollTo(0, 0);
         };
         for (int i = 0; i < filters.length; i++) {
             int target = i;
             filters[i].setOnClickListener(v -> {
+                if (recordTypes.getOrDefault(platform, 0) == target) return;
                 recordTypes.put(platform, target);
                 renderRecords.run();
+                scroll.scrollTo(0, 0);
             });
         }
         renderRecords.run();
@@ -3055,9 +3071,13 @@ public class MainActivity extends Activity {
             @Override public void afterTextChanged(Editable text) {
                 recordSearches.put(platform, text.toString());
                 renderRecords.run();
+                scroll.scrollTo(0, 0);
             }
         });
+        int position = recordScrollPositions.getOrDefault(platform, 0);
+        scroll.setOnScrollChangeListener((v, x, y, oldX, oldY) -> recordScrollPositions.put(platform, y));
         presentSecondary(root);
+        scroll.post(() -> scroll.scrollTo(0, position));
     }
 
     private void leaveRecords() {
@@ -3239,7 +3259,22 @@ public class MainActivity extends Activity {
     }
 
     private void showRecordPopup(PopupWindow popup, View anchor) {
-        popup.showAsDropDown(anchor, (anchor.getWidth() - popup.getWidth()) / 2, dp(6), Gravity.LEFT);
+        View menu = popup.getContentView();
+        menu.measure(View.MeasureSpec.makeMeasureSpec(popup.getWidth(), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int height = menu.getMeasuredHeight();
+        popup.setHeight(height);
+        Rect visible = new Rect();
+        anchor.getWindowVisibleDisplayFrame(visible);
+        int[] location = new int[2];
+        anchor.getLocationOnScreen(location);
+        int gap = dp(6);
+        int below = visible.bottom - location[1] - anchor.getHeight();
+        int above = location[1] - visible.top;
+        int y = below < height + gap && above > below ? -anchor.getHeight() - height - gap : gap;
+        int left = location[0] + (anchor.getWidth() - popup.getWidth()) / 2;
+        left = Math.max(visible.left, Math.min(left, visible.right - popup.getWidth()));
+        popup.showAsDropDown(anchor, left - location[0], y, Gravity.LEFT);
     }
 
     private ImageView recordCover(Media item) {
@@ -3457,6 +3492,10 @@ public class MainActivity extends Activity {
     }
 
     private void showCardDialog(android.app.Dialog dialog, View panel, int maxWidth, int horizontalMargin) {
+        showCardDialog(dialog, panel, maxWidth, horizontalMargin, motionEnabled);
+    }
+
+    private void showCardDialog(android.app.Dialog dialog, View panel, int maxWidth, int horizontalMargin, boolean animate) {
         if (isFinishing() || isDestroyed()) return;
         dialog.setContentView(panel);
         android.view.Window window = dialog.getWindow();
@@ -3467,7 +3506,7 @@ public class MainActivity extends Activity {
         window.setWindowAnimations(0);
         dialog.show();
         window.setLayout(Math.min(dp(maxWidth), getResources().getDisplayMetrics().widthPixels - dp(horizontalMargin)), -2);
-        if (motionEnabled) {
+        if (animate) {
             panel.setAlpha(0f);
             panel.setScaleX(0.97f);
             panel.setScaleY(0.97f);
@@ -3527,7 +3566,8 @@ public class MainActivity extends Activity {
     }
 
     private void confirmDelete(ScanRecord record) {
-        showConfirmation(0, true, "删除这条记录？", "记录和暂存素材将被移除，8 秒内可撤销。已保存的文件仍在下载目录。",
+        showConfirmation(0, true, "删除这条记录？", "记录和暂存素材将被移除，"
+                        + RECORD_UNDO_MS / 1000 + " 秒内可撤销。已保存的文件仍在下载目录。",
                 "保留记录", "删除记录", null, () -> deleteWithUndo(record),
                 record.caption.isEmpty() ? null : record.caption);
     }
@@ -3643,7 +3683,7 @@ public class MainActivity extends Activity {
         scanButton.setVisibility(!batchReader || batchTask.comments ? View.VISIBLE : View.GONE);
         ((View) scanButton.getParent()).setVisibility(!batchReader || batchTask.comments ? View.VISIBLE : View.GONE);
         extractWorkButton.setVisibility(batchReader && batchTask.comments ? View.GONE : View.VISIBLE);
-        phoneImportButton.setVisibility(batchReader ? View.GONE : View.VISIBLE);
+        ((View) phoneImportButton.getParent()).setVisibility(batchReader ? View.GONE : View.VISIBLE);
         presentSecondary(readerRoot);
         updateScanCard();
         for (Animatable animation : animations) animation.start();
@@ -3996,10 +4036,7 @@ public class MainActivity extends Activity {
             updateResultLabels();
         });
         resultHeader.addView(selectionAction, new LinearLayout.LayoutParams(dp(70), dp(36)));
-        phoneImportButton = shareButton("导入手机素材", v -> pickPhoneMedia());
-        LinearLayout.LayoutParams phoneImportParams = new LinearLayout.LayoutParams(-1, dp(40));
-        phoneImportParams.topMargin = dp(8);
-        content.addView(phoneImportButton, phoneImportParams);
+        phoneImportButton = addPhoneImportActions(content);
         readerPostStatus = new PostStatusStrip();
         content.addView(readerPostStatus, postStatusParams());
         readerPostStatus.retry.setOnClickListener(v -> {
@@ -5011,7 +5048,20 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void pickPhoneMedia() {
+    private Button addPhoneImportActions(LinearLayout content) {
+        LinearLayout row = new LinearLayout(this);
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, dp(40));
+        rowParams.topMargin = dp(8);
+        content.addView(row, rowParams);
+        Button album = shareButton("导入手机素材", v -> pickPhoneMedia(false));
+        row.addView(album, new LinearLayout.LayoutParams(0, -1, 1));
+        LinearLayout.LayoutParams browseParams = new LinearLayout.LayoutParams(-2, -1);
+        browseParams.leftMargin = dp(8);
+        row.addView(shareButton("浏览文件", v -> pickPhoneMedia(true)), browseParams);
+        return album;
+    }
+
+    private void pickPhoneMedia(boolean browseFiles) {
         if (importingPhoneMedia) return;
         boolean kuaishou = showingKuaishou;
         ScanRecord target = kuaishou ? favoriteScreen.kuaishouPostRecord : currentRecord;
@@ -5036,14 +5086,43 @@ public class MainActivity extends Activity {
         }
         phoneImportLink = link;
         phoneImportRecordId = target == null ? null : target.id;
-        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        picker.addCategory(Intent.CATEGORY_OPENABLE);
-        picker.setType("video/mp4");
-        picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        try { startActivityForResult(picker, IMPORT_PHONE_MEDIA); }
+        try { openLocalMediaPicker(false, browseFiles, IMPORT_PHONE_MEDIA); }
         catch (android.content.ActivityNotFoundException error) {
             phoneImportLink = null;
             phoneImportRecordId = null;
+            showTopNotice("无法打开系统文件选择器");
+        }
+    }
+
+    private void openLocalMediaPicker(boolean includeImages, boolean browseFiles, int requestCode) {
+        if (!browseFiles && (android.os.Build.VERSION.SDK_INT >= 33 || android.os.Build.VERSION.SDK_INT >= 30
+                && android.os.ext.SdkExtensions.getExtensionVersion(30) >= 2)) {
+            Intent album = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            if (!includeImages) album.setType("video/mp4");
+            album.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
+            try {
+                startActivityForResult(album, requestCode);
+                return;
+            } catch (android.content.ActivityNotFoundException ignored) { }
+        }
+        startActivityForResult(localMediaPicker(includeImages), requestCode);
+    }
+
+    private Intent localMediaPicker(boolean includeImages) {
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        picker.setType(includeImages ? "*/*" : "video/mp4");
+        if (includeImages) picker.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/mp4"});
+        picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        return picker;
+    }
+
+    private void pickFavoriteMedia(String group, boolean browseFiles) {
+        if (importingFavoriteMedia || recordTransferBusy) return;
+        favoriteImportGroup = group == null ? "" : group;
+        try { openLocalMediaPicker(true, browseFiles, IMPORT_FAVORITE_MEDIA); }
+        catch (android.content.ActivityNotFoundException error) {
+            favoriteImportGroup = null;
             showTopNotice("无法打开系统文件选择器");
         }
     }
@@ -5062,7 +5141,7 @@ public class MainActivity extends Activity {
         return id != null && id.equals(WorkMedia.pageId(second, xhs));
     }
 
-    private void importPhoneMedia(String link, String recordId, Intent data) {
+    private static ArrayList<Uri> selectedFiles(Intent data) {
         ArrayList<Uri> files = new ArrayList<>();
         ClipData clips = data.getClipData();
         if (clips != null) for (int i = 0; i < clips.getItemCount(); i++) {
@@ -5070,6 +5149,10 @@ public class MainActivity extends Activity {
             if (uri != null) files.add(uri);
         }
         if (files.isEmpty() && data.getData() != null) files.add(data.getData());
+        return files;
+    }
+
+    private void importPhoneMedia(String link, String recordId, ArrayList<Uri> files) {
         if (files.isEmpty()) return;
         ScanRecord existing = null;
         if (recordId != null) {
@@ -5104,7 +5187,7 @@ public class MainActivity extends Activity {
             synchronized (record) {
                 for (Uri uri : files) {
                     try {
-                        Media item = readPhoneVideo(uri, record);
+                        Media item = importLocalMedia(uri, record.folder, record.hashes, false);
                         if (item == null) duplicates++;
                         else {
                             record.hashes.add(item.hash);
@@ -5168,20 +5251,69 @@ public class MainActivity extends Activity {
         });
     }
 
-    private Media readPhoneVideo(Uri uri, ScanRecord record) throws Exception {
-        File folder = record.folder;
+    private void importFavoriteMedia(String group, ArrayList<Uri> files) {
+        if (files.isEmpty() || importingFavoriteMedia) return;
+        importingFavoriteMedia = true;
+        if (showingFavorites) favoriteScreen.updateActions();
+        showBottomNotice("正在导入收藏素材…");
+        worker.execute(() -> {
+            File folder = new File(getFilesDir(), "favorites");
+            HashSet<String> hashes = new HashSet<>();
+            File[] existing = folder.listFiles();
+            if (existing != null) for (File file : existing) {
+                if (file.isFile() && !file.getName().endsWith(".tmp")) hashes.add(favoriteFileHash(file));
+            }
+            ArrayList<Media> added = new ArrayList<>();
+            int failed = 0;
+            for (Uri uri : files) {
+                try {
+                    Media item = importLocalMedia(uri, folder, hashes, true);
+                    if (item != null) {
+                        hashes.add(item.hash);
+                        added.add(item);
+                    }
+                } catch (Exception error) { failed++; }
+            }
+            int failures = failed;
+            runOnUiThread(() -> {
+                importingFavoriteMedia = false;
+                boolean changed = false;
+                for (Media item : added) changed |= assignFavoriteGroup(item, group);
+                if (changed) saveFavoriteGroups();
+                if (isFinishing() || isDestroyed()) return;
+                if (showingFavorites) {
+                    FavoritesScreen screen = favoriteScreen;
+                    if (screen.loaded && !added.isEmpty()) screen.items.addAll(0, added);
+                    if (!added.isEmpty() && (screen.activeGroup == null || screen.activeGroup.equals(group))) {
+                        screen.category = 0;
+                        screen.positionFilter(false);
+                    }
+                    screen.render();
+                }
+                int duplicates = files.size() - added.size() - failures;
+                String result = "已导入 " + added.size() + " 个收藏素材";
+                if (duplicates > 0) result += "，跳过 " + duplicates + " 个重复文件";
+                if (failures > 0) result += "，" + failures + " 个文件无法导入";
+                showBottomNotice(result);
+            });
+        });
+    }
+
+    private Media importLocalMedia(Uri uri, File folder, HashSet<String> hashes, boolean includeImages) throws Exception {
         Files.createDirectories(folder.toPath());
         File pending = File.createTempFile("phone-", ".tmp", folder);
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            String mime;
             try (InputStream in = getContentResolver().openInputStream(uri);
                  OutputStream out = new java.security.DigestOutputStream(new FileOutputStream(pending), digest)) {
                 if (in == null) throw new java.io.IOException("无法打开所选文件");
                 byte[] header = new byte[12];
                 new java.io.DataInputStream(in).readFully(header);
-                if (!"video/mp4".equals(format(header))
+                mime = format(header);
+                if (mime == null || !includeImages && !"video/mp4".equals(mime)
                         || "qt  ".equals(new String(header, 8, 4, StandardCharsets.US_ASCII))) {
-                    throw new java.io.IOException("文件不是 MP4");
+                    throw new java.io.IOException("文件格式不受支持");
                 }
                 out.write(header);
                 byte[] buffer = new byte[64 * 1024];
@@ -5191,11 +5323,19 @@ public class MainActivity extends Activity {
             StringBuilder hash = new StringBuilder();
             for (byte b : digest.digest()) hash.append(String.format(Locale.ROOT, "%02x", b & 255));
             String key = hash.toString();
-            if (record.hashes.contains(key)) return null;
-            requireVideoTrack(pending);
-            File file = new File(folder, key + ".mp4");
+            if (hashes.contains(key)) return null;
+            boolean video = "video/mp4".equals(mime);
+            Drawable thumbnail = null;
+            if (video) requireVideoTrack(pending);
+            else {
+                thumbnail = decodeThumbnail(pending);
+                if (thumbnail == null) throw new java.io.IOException("无法读取图片");
+            }
+            String extension = "image/jpeg".equals(mime) ? ".jpg" : "." + mime.substring(mime.indexOf('/') + 1);
+            File file = new File(folder, key + extension);
             Files.move(pending.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            return new Media(file, key, "video/mp4", "", PHONE_MEDIA_KIND, null, true);
+            if (video && includeImages) thumbnail = decodeThumbnail(file);
+            return new Media(file, key, mime, "", PHONE_MEDIA_KIND, thumbnail, video);
         } finally { pending.delete(); }
     }
 
@@ -6124,7 +6264,7 @@ public class MainActivity extends Activity {
         art.setContentDescription("素材 " + item.file.getName());
         art.setOnClickListener(v -> {
             if (!selectingMedia) {
-                preview(item);
+                preview(item, media, this::matchesFilter);
                 return;
             }
             if (!selectedMedia.add(item)) selectedMedia.remove(item);
@@ -6243,7 +6383,15 @@ public class MainActivity extends Activity {
         pressFeedback(row);
     }
 
-    private void preview(Media item) {
+    private void preview(Media item, List<Media> items, java.util.function.Predicate<Media> visible) {
+        ArrayList<Media> sequence = new ArrayList<>();
+        for (Media candidate : items) if (visible.test(candidate)) sequence.add(candidate);
+        int index = sequence.indexOf(item);
+        if (index >= 0) preview(sequence, index, motionEnabled);
+    }
+
+    private void preview(List<Media> sequence, int index, boolean animate) {
+        Media item = sequence.get(index);
         android.app.Dialog dialog = new android.app.Dialog(this);
         try {
             boolean isVideo = item.mime.startsWith("video/");
@@ -6274,7 +6422,7 @@ public class MainActivity extends Activity {
                     video.onVideoPrepared(player);
                 });
                 video.setOnErrorListener((player, what, extra) -> {
-                    dismissCardDialog(dialog, () -> showMessage(R.drawable.extract_play, "暂时无法播放",
+                    if (dialog.isShowing()) dismissCardDialog(dialog, () -> showMessage(R.drawable.extract_play, "暂时无法播放",
                             "当前设备未能播放这段视频。可以先保存文件，再用其他播放器打开。"));
                     return true;
                 });
@@ -6298,6 +6446,11 @@ public class MainActivity extends Activity {
                 Animatable inlineAnimation = animation;
                 addFullscreenTarget(frame, "放大图片", () -> showFullscreenPreview(item, dialog, null, inlineAnimation));
             }
+            if (sequence.size() > 1) addPreviewNavigation(panel, dialog, sequence, index);
+            if (work != null && PHONE_MEDIA_KIND.equals(item.kind) && work.folder.equals(item.file.getParentFile())) {
+                addPreviewLinkRow(panel, "删除导入素材", "", R.drawable.dialog_trash,
+                        () -> dismissCardDialog(dialog, () -> confirmDeleteImportedMedia(work, item)));
+            }
             if (showingFavorites) {
                 JSONObject source = favoriteSource(item);
                 if (source != null) {
@@ -6313,7 +6466,7 @@ public class MainActivity extends Activity {
                     String current = favoriteAssignments.getOrDefault(item.hash, "");
                     addPreviewLinkRow(panel, "移到分组", groupName(current), R.drawable.blue_folder,
                             () -> dismissCardDialog(dialog, () -> showFavoriteDestination(current, current, 1,
-                                    group -> movePreviewFavorite(item, group), () -> preview(item))));
+                                    group -> movePreviewFavorite(item, group), () -> preview(sequence, index, motionEnabled))));
                 }
             }
             View divider = new View(this);
@@ -6330,7 +6483,7 @@ public class MainActivity extends Activity {
                     v -> dismissCardDialog(dialog, () -> {
                         if (favorite) setFavorite(item, false, "", work);
                         else showFavoriteDestination(null, "", 1, group -> setFavorite(item, true, group, work),
-                                () -> preview(item));
+                                () -> preview(sequence, index, motionEnabled));
                     }));
             addPreviewAction(actions, "分享", R.drawable.dialog_share, false, v -> shareMedia(Collections.singletonList(item)));
             addPreviewAction(actions, "关闭", R.drawable.dialog_close, false, v -> dismissCardDialog(dialog, null));
@@ -6355,12 +6508,89 @@ public class MainActivity extends Activity {
             ScrollView scroll = new ScrollView(this);
             scroll.setVerticalScrollBarEnabled(false);
             scroll.addView(panel, new ScrollView.LayoutParams(-1, -2));
-            showCardDialog(dialog, scroll, 360, 32);
+            showCardDialog(dialog, scroll, 360, 32, animate);
             if (animation != null) animation.start();
         } catch (Exception error) {
             dialog.dismiss();
             showMessage(R.drawable.extract_info, "暂时无法预览", "未能读取这项素材，请确认文件仍在本机。");
         }
+    }
+
+    private void addPreviewNavigation(LinearLayout panel, android.app.Dialog dialog, List<Media> sequence, int index) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(44));
+        params.topMargin = dp(8);
+        panel.addView(row, params);
+        for (int direction : new int[]{-1, 1}) {
+            if (direction == 1) {
+                TextView position = homeLabel((index + 1) + " / " + sequence.size(), 12, INK2, 650);
+                position.setGravity(Gravity.CENTER);
+                row.addView(position, new LinearLayout.LayoutParams(0, -1, 1));
+            }
+            ImageView arrow = icon(R.drawable.extract_chevron, ACCENT);
+            arrow.setRotation(direction * -90);
+            arrow.setPadding(dp(10), dp(10), dp(10), dp(10));
+            arrow.setBackground(shape(ACCENT_SOFT, 12));
+            arrow.setContentDescription(direction < 0 ? "上一项素材" : "下一项素材");
+            row.addView(arrow, new LinearLayout.LayoutParams(dp(44), -1));
+            int next = index + direction;
+            arrow.setOnClickListener(v -> {
+                if (!dialog.isShowing()) return;
+                dialog.dismiss();
+                preview(sequence, next, false);
+            });
+            boolean available = next >= 0 && next < sequence.size();
+            arrow.setEnabled(available);
+            arrow.setAlpha(available ? 1f : 0.35f);
+        }
+    }
+
+    private void confirmDeleteImportedMedia(ScanRecord record, Media item) {
+        showConfirmation(R.drawable.dialog_trash, true, "删除导入素材？",
+                "素材将从这条记录移除。手机原文件和已收藏的副本仍会保留。",
+                "取消", "删除素材", null, () -> deleteImportedMedia(record, item));
+    }
+
+    private void deleteImportedMedia(ScanRecord record, Media item) {
+        if (recordTransferBusy || !records.contains(record)) {
+            showTopNotice("当前无法修改这条记录");
+            return;
+        }
+        worker.execute(() -> {
+            boolean saved;
+            synchronized (record) {
+                int index = record.items.indexOf(item);
+                if (index < 0) return;
+                record.items.remove(index);
+                record.hashes.remove(item.hash);
+                saved = persistRecord(record);
+                if (saved) item.file.delete();
+                else {
+                    record.items.add(index, item);
+                    record.hashes.add(item.hash);
+                }
+            }
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (!saved) {
+                    showTopNotice("无法删除导入素材，请稍后重试");
+                    return;
+                }
+                if (currentRecord == record && showingReader) {
+                    media.remove(item);
+                    selectedMedia.remove(item);
+                    renderResults();
+                    updateResultLabels();
+                } else if (showingKuaishou && favoriteScreen.kuaishouPostRecord == record) {
+                    favoriteScreen.items.remove(item);
+                    favoriteScreen.selected.remove(item);
+                    favoriteScreen.render();
+                }
+                refreshRecordList.run();
+                showBottomNotice("已从记录删除导入素材");
+            });
+        });
     }
 
     private Drawable decodePreviewImage(File file, int maximumSize, int[] dimensions) throws java.io.IOException {
@@ -7273,6 +7503,8 @@ public class MainActivity extends Activity {
         private TextView extractedCount;
         private Button select;
         private Button selectAll;
+        private Button importFiles;
+        private ImageView browseImportFiles;
         private Button share;
         private Button save;
         private Button remove;
@@ -7503,7 +7735,16 @@ public class MainActivity extends Activity {
             select.setTypeface(homeTypeface(700));
             if (!kuaishou) header.addView(select, new LinearLayout.LayoutParams(dp(68), dp(44)));
             select.setEnabled(false);
-            if (!imported) header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
+            if (!imported) {
+                importFiles = shareButton("相册导入", v -> pickFavoriteMedia(activeGroup, false));
+                header.addView(importFiles, new LinearLayout.LayoutParams(dp(80), dp(40)));
+                browseImportFiles = icon(R.drawable.blue_folder, ACCENT);
+                browseImportFiles.setPadding(dp(10), dp(10), dp(10), dp(10));
+                browseImportFiles.setContentDescription("浏览文件");
+                browseImportFiles.setOnClickListener(v -> pickFavoriteMedia(activeGroup, true));
+                header.addView(browseImportFiles, new LinearLayout.LayoutParams(dp(40), dp(40)));
+                header.addView(settingsButton(), new LinearLayout.LayoutParams(dp(44), dp(44)));
+            }
             if (kuaishou && savedKuaishou == null) {
                 TextView history = homeLabel(batchTask != null ? "队列" : "记录", 12, INK2, 650);
                 history.setGravity(Gravity.CENTER);
@@ -7544,12 +7785,7 @@ public class MainActivity extends Activity {
                 resultHeader.addView(selectAll, selectAllParams);
                 resultHeader.addView(select, new LinearLayout.LayoutParams(dp(70), dp(36)));
                 readerIcon(select, R.drawable.extract_select, 16);
-                if (batchTask == null) {
-                    Button phoneImport = shareButton("导入手机素材", v -> pickPhoneMedia());
-                    LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(-1, dp(40));
-                    importParams.topMargin = dp(8);
-                    content.addView(phoneImport, importParams);
-                }
+                if (batchTask == null) addPhoneImportActions(content);
                 content.addView(kuaishouPostStatus, postStatusParams());
             }
             if (wechat) {
@@ -8078,7 +8314,7 @@ public class MainActivity extends Activity {
                 updateTile(tile, check, item);
                 tile.setOnClickListener(v -> {
                     if (!selecting) {
-                        preview(item);
+                        preview(item, items, this::matchesCategory);
                         return;
                     }
                     if (!selected.add(item)) selected.remove(item);
@@ -8118,6 +8354,12 @@ public class MainActivity extends Activity {
 
         private void updateActions() {
             updateSelectAll(selectAll, selecting, busy, items, selected, this::matchesCategory);
+            if (importFiles != null) {
+                importFiles.setVisibility(selecting ? View.GONE : View.VISIBLE);
+                importFiles.setEnabled(!busy && !importingFavoriteMedia);
+                browseImportFiles.setVisibility(importFiles.getVisibility());
+                browseImportFiles.setEnabled(importFiles.isEnabled());
+            }
             title.setText(selecting && !kuaishou ? "已选 " + selected.size() + " 项" : screenTitle());
             if (extractedCount != null) extractedCount.setText(selecting
                     ? "已选 " + selected.size() + " 项" : "已提取 " + items.size() + " 个");
