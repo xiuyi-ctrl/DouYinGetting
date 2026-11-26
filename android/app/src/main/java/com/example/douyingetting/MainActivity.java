@@ -8385,11 +8385,7 @@ public class MainActivity extends Activity {
                 groups.addView(empty, new LinearLayout.LayoutParams(-1, -2));
                 return;
             }
-            java.util.HashMap<String, Integer> counts = new java.util.HashMap<>();
-            for (Media item : items) {
-                String name = favoriteAssignments.get(item.hash);
-                if (name != null) counts.merge(name, 1, Integer::sum);
-            }
+            java.util.HashMap<String, Integer> counts = favoriteGroupCounts();
             for (String group : favoriteGroups) {
                 int count = counts.getOrDefault(group, 0);
                 LinearLayout row = new LinearLayout(MainActivity.this);
@@ -8470,15 +8466,23 @@ public class MainActivity extends Activity {
             popup.showAsDropDown(anchor, 0, dp(4), Gravity.END);
         }
 
+        private java.util.HashMap<String, Integer> favoriteGroupCounts() {
+            java.util.HashMap<String, Integer> counts = new java.util.HashMap<>();
+            for (Media item : items) counts.merge(favoriteAssignments.get(item.hash), 1, Integer::sum);
+            return counts;
+        }
+
         private void renderGroupChips() {
             groupChips.removeAllViews();
+            java.util.HashMap<String, Integer> counts = favoriteGroupCounts();
             ArrayList<String> names = new ArrayList<>();
             names.add(null);
             names.addAll(favoriteGroups);
             names.add("");
             for (String name : names) {
                 boolean active = java.util.Objects.equals(activeGroup, name);
-                Button chip = shareButton(groupName(name), v -> {
+                int count = name == null ? items.size() : counts.getOrDefault(name.isEmpty() ? null : name, 0);
+                Button chip = shareButton(groupName(name) + (loaded ? " " + count : ""), v -> {
                     if (busy || java.util.Objects.equals(activeGroup, name)) return;
                     activeGroup = name;
                     category = 0;
@@ -8489,7 +8493,7 @@ public class MainActivity extends Activity {
                 chip.setMinimumWidth(0);
                 chip.setMinWidth(0);
                 chip.setMaxWidth(dp(156));
-                chip.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                chip.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
                 chip.setPadding(dp(13), 0, dp(13), 0);
                 chip.setTextColor(active ? Color.WHITE : INK2);
                 chip.setBackground(shape(active ? ACCENT : TRACK, 18));
