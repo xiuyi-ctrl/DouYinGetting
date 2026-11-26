@@ -231,6 +231,7 @@ public class MainActivity extends Activity {
     private FavoritesScreen favoriteScreen;
     private final java.util.LinkedHashSet<String> favoriteGroups = new java.util.LinkedHashSet<>();
     private final java.util.HashMap<String, String> favoriteAssignments = new java.util.HashMap<>();
+    private final java.util.HashMap<String, String> privateFavoritePins = new java.util.HashMap<>();
     private JSONObject favoriteSources = new JSONObject();
     private Runnable returnFromFavorites;
     private boolean recordsFromSettings;
@@ -297,6 +298,54 @@ public class MainActivity extends Activity {
             this.thumbnail = thumbnail;
             this.animated = animated || (inferAnimation && ("video/mp4".equals(mime)
                     || "image/gif".equals(mime) || thumbnail instanceof Animatable));
+        }
+    }
+
+    private static class ImageFingerprint {
+        final int[] pixels = new int[72];
+        final boolean animated;
+        final float aspect;
+        final long edges;
+
+        ImageFingerprint(Media item) throws java.io.IOException {
+            animated = item.animated;
+            float[] ratio = {0f};
+            Bitmap sample = ImageDecoder.decodeBitmap(ImageDecoder.createSource(item.file), (decoder, info, source) -> {
+                ratio[0] = info.getSize().getWidth() / (float) info.getSize().getHeight();
+                decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                decoder.setTargetSize(9, 8);
+            });
+            sample.getPixels(pixels, 0, 9, 0, 0, 9, 8);
+            sample.recycle();
+            aspect = ratio[0];
+            int[] light = new int[pixels.length];
+            for (int i = 0; i < pixels.length; i++) {
+                int alpha = Color.alpha(pixels[i]);
+                int red = 255 - alpha + Color.red(pixels[i]) * alpha / 255;
+                int green = 255 - alpha + Color.green(pixels[i]) * alpha / 255;
+                int blue = 255 - alpha + Color.blue(pixels[i]) * alpha / 255;
+                pixels[i] = Color.rgb(red, green, blue);
+                light[i] = 3 * red + 6 * green + blue;
+            }
+            long hash = 0;
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+                int pixel = y * 9 + x;
+                if (light[pixel] > light[pixel + 1]) hash |= 1L << (y * 8 + x);
+            }
+            edges = hash;
+        }
+
+        boolean resembles(ImageFingerprint other) {
+            if (animated != other.animated || Math.min(aspect, other.aspect) < Math.max(aspect, other.aspect) * 0.9f
+                    || Long.bitCount(edges ^ other.edges) > 8) return false;
+            int difference = 0;
+            for (int i = 0; i < pixels.length; i++) {
+                int first = pixels[i], second = other.pixels[i];
+                difference += Math.abs(Color.red(first) - Color.red(second))
+                        + Math.abs(Color.green(first) - Color.green(second))
+                        + Math.abs(Color.blue(first) - Color.blue(second));
+            }
+            return difference <= pixels.length * 3 * 20;
         }
     }
 
@@ -1886,10 +1935,15 @@ public class MainActivity extends Activity {
         TextView recordCount = label("扫描记录\n" + records.size(), 15, ACCENT, true);
         recordCount.setGravity(Gravity.CENTER);
         stats.addView(recordCount, new LinearLayout.LayoutParams(0, -1, 1));
+        HashSet<String> hiddenFavorites = new HashSet<>();
+        favoriteAssignments.forEach((hash, group) -> {
+            if (privateFavoritePins.containsKey(group)) hiddenFavorites.add(hash);
+        });
         worker.execute(() -> {
             File[] files = new File(getFilesDir(), "favorites").listFiles();
             int count = 0;
-            if (files != null) for (File file : files) if (file.isFile() && !file.getName().endsWith(".tmp")) count++;
+            if (files != null) for (File file : files) if (file.isFile() && !file.getName().endsWith(".tmp")
+                    && !hiddenFavorites.contains(favoriteFileHash(file))) count++;
             int total = count;
             runOnUiThread(() -> favoriteCount.setText("收藏素材\n" + total));
         });
@@ -1945,10 +1999,12 @@ public class MainActivity extends Activity {
     private ArrayList<File> backupFavorites() {
         ArrayList<File> files = new ArrayList<>();
         File[] saved = new File(getFilesDir(), "favorites").listFiles();
-        if (saved != null) for (File file : saved)
+        if (saved != null) for (File file : saved) {
+            String group = favoriteAssignments.get(favoriteFileHash(file));
             if (file.isFile() && !file.getName().endsWith(".tmp")
-                    && (backupGroup == null || backupGroup.equals(favoriteAssignments.get(favoriteFileHash(file)))))
+                    && (backupGroup == null ? !privateFavoritePins.containsKey(group) : backupGroup.equals(group)))
                 files.add(file);
+        }
         return files;
     }
 
@@ -2173,12 +2229,14 @@ public class MainActivity extends Activity {
         recordTransferBusy = true;
         java.util.LinkedHashSet<String> groups = backupGroupNames(metadata);
         JSONObject assignments = metadata.optJSONObject("assignments");
-        int conflicts = 0;
+        ArrayList<String> conflicts = new ArrayList<>();
         if (assignments != null) for (String hash : preview.duplicateFavoriteHashes) {
+            if (privateFavoritePins.containsKey(favoriteAssignments.get(hash))) continue;
             String backupGroup = assignments.optString(hash);
             if ((backupGroup.isEmpty() || groups.contains(backupGroup))
-                    && !backupGroup.equals(favoriteAssignments.getOrDefault(hash, ""))) conflicts++;
+                    && !backupGroup.equals(favoriteAssignments.getOrDefault(hash, ""))) conflicts.add(hash);
         }
+        Collections.sort(conflicts);
         String summary = "提取记录 " + archive.recordCount() + " 条（重复 " + preview.skipped + " 条）\n"
                 + "收藏素材 " + preview.favoriteHashes.size() + " 个（本机已有 " + preview.duplicateFavoriteHashes.size() + " 个）\n"
                 + "收藏夹 " + groups.size() + " 个";
@@ -2191,20 +2249,18 @@ public class MainActivity extends Activity {
             groupList.addView(names);
             panel.addView(groupList, new LinearLayout.LayoutParams(-1, dp(Math.min(84, 34 + 16 * (groups.size() - 1)))));
         }
-        android.widget.RadioButton useBackup = new android.widget.RadioButton(this);
-        if (conflicts > 0) {
-            panel.addView(homeLabel(conflicts + " 个重复素材的收藏夹归属不同", 13, INK, 700));
-            android.widget.RadioGroup choice = new android.widget.RadioGroup(this);
-            android.widget.RadioButton keepLocal = new android.widget.RadioButton(this);
-            for (android.widget.RadioButton button : new android.widget.RadioButton[]{keepLocal, useBackup}) {
-                button.setId(View.generateViewId());
-                button.setTextColor(INK);
-                choice.addView(button);
-            }
-            keepLocal.setText("保留本机分组");
-            useBackup.setText("使用备份分组");
-            choice.check(keepLocal.getId());
-            panel.addView(choice);
+        HashSet<String> useBackup = new HashSet<>();
+        if (!conflicts.isEmpty()) {
+            TextView status = homeLabel("", 13, INK, 700);
+            status.setPadding(0, dp(10), 0, dp(8));
+            panel.addView(status);
+            Runnable update = () -> status.setText(conflicts.size() + " 项分组冲突 · " + useBackup.size() + " 项使用备份");
+            update.run();
+            panel.addView(restoreBulkActions(conflicts, useBackup, update));
+            LinearLayout.LayoutParams review = new LinearLayout.LayoutParams(-1, -2);
+            review.topMargin = dp(8);
+            panel.addView(dialogButton("逐项处理冲突", false, false, v ->
+                    reviewRestoreConflicts(conflicts, preview, assignments, useBackup, update)), review);
         }
         Runnable cancel = () -> {
             pendingRestore = null;
@@ -2214,12 +2270,97 @@ public class MainActivity extends Activity {
         dialog.setOnCancelListener(ignored -> cancel.run());
         dialogActions(dialog, panel, "取消", "确认恢复", false, cancel, () -> {
             pendingRestore = null;
-            restoreBackup(archive, metadata, useBackup.isChecked());
+            restoreBackup(archive, metadata, new HashSet<>(useBackup));
         });
         showCardDialog(dialog, panel);
     }
 
-    private void restoreBackup(RecordArchive.Prepared archive, JSONObject metadata, boolean useBackupGroups) {
+    private LinearLayout restoreBulkActions(List<String> conflicts, HashSet<String> useBackup, Runnable update) {
+        LinearLayout bulk = new LinearLayout(this);
+        bulk.addView(dialogButton("全部保留本机", false, false, v -> {
+            useBackup.clear();
+            update.run();
+        }), new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams allBackup = new LinearLayout.LayoutParams(0, -2, 1);
+        allBackup.leftMargin = dp(8);
+        bulk.addView(dialogButton("全部使用备份", false, false, v -> {
+            useBackup.addAll(conflicts);
+            update.run();
+        }), allBackup);
+        return bulk;
+    }
+
+    private void reviewRestoreConflicts(ArrayList<String> conflicts, RecordArchive.Result preview,
+                                        JSONObject assignments, HashSet<String> useBackup, Runnable updateSummary) {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(0, false, "逐项处理冲突", "选定分组后，在恢复预览中确认恢复。");
+        TextView position = homeLabel("", 12, INK2, 650);
+        position.setPadding(0, dp(12), 0, dp(6));
+        panel.addView(position);
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setBackground(shape(TRACK, 12));
+        image.setContentDescription("冲突素材缩略图");
+        panel.addView(image, new LinearLayout.LayoutParams(-1, dp(120)));
+        android.widget.RadioGroup choice = new android.widget.RadioGroup(this);
+        android.widget.RadioButton local = new android.widget.RadioButton(this);
+        android.widget.RadioButton backup = new android.widget.RadioButton(this);
+        for (android.widget.RadioButton button : new android.widget.RadioButton[]{local, backup}) {
+            button.setId(View.generateViewId());
+            button.setTextColor(INK);
+            choice.addView(button);
+        }
+        panel.addView(choice);
+
+        int[] index = {0};
+        LinearLayout.LayoutParams bulkParams = new LinearLayout.LayoutParams(-1, -2);
+        bulkParams.topMargin = dp(8);
+        bulkParams.bottomMargin = dp(8);
+        panel.addView(restoreBulkActions(conflicts, useBackup, () -> {
+            choice.check(useBackup.contains(conflicts.get(index[0])) ? backup.getId() : local.getId());
+            updateSummary.run();
+        }), bulkParams);
+        LinearLayout navigation = new LinearLayout(this);
+        panel.addView(navigation);
+        Button previous = dialogButton("上一项", false, false, null);
+        Button next = dialogButton("下一项", false, false, null);
+        navigation.addView(previous, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams nextParams = new LinearLayout.LayoutParams(0, -2, 1);
+        nextParams.leftMargin = dp(8);
+        navigation.addView(next, nextParams);
+        Runnable render = () -> {
+            String hash = conflicts.get(index[0]);
+            position.setText("第 " + (index[0] + 1) + " / " + conflicts.size() + " 项");
+            local.setText("保留本机 · " + groupName(favoriteAssignments.getOrDefault(hash, "")));
+            backup.setText("使用备份 · " + groupName(assignments.optString(hash)));
+            choice.setOnCheckedChangeListener(null);
+            choice.check(useBackup.contains(hash) ? backup.getId() : local.getId());
+            choice.setOnCheckedChangeListener((group, checked) -> {
+                if (checked == backup.getId()) useBackup.add(hash);
+                else useBackup.remove(hash);
+                updateSummary.run();
+            });
+            previous.setEnabled(index[0] > 0);
+            next.setEnabled(index[0] + 1 < conflicts.size());
+            previous.setAlpha(previous.isEnabled() ? 1f : 0.45f);
+            next.setAlpha(next.isEnabled() ? 1f : 0.45f);
+            image.setImageDrawable(null);
+            image.setTag(hash);
+            worker.execute(() -> {
+                Drawable thumbnail = decodeThumbnail(preview.duplicateFavoriteFiles.get(hash));
+                runOnUiThread(() -> {
+                    if (dialog.isShowing() && hash.equals(image.getTag())) image.setImageDrawable(thumbnail);
+                });
+            });
+        };
+        previous.setOnClickListener(v -> { index[0]--; render.run(); });
+        next.setOnClickListener(v -> { index[0]++; render.run(); });
+        dialogActions(dialog, panel, null, "返回恢复预览", false, null, null);
+        showCardDialog(dialog, panel);
+        render.run();
+    }
+
+    private void restoreBackup(RecordArchive.Prepared archive, JSONObject metadata, HashSet<String> useBackupGroups) {
         android.app.Dialog progress = backupProgress("正在恢复备份…", "正在恢复所选记录与收藏。");
         HashSet<String> known = knownRecordIds();
         worker.execute(() -> {
@@ -2262,45 +2403,13 @@ public class MainActivity extends Activity {
     }
 
     private void unlockWechat() {
-        android.app.Dialog dialog = new android.app.Dialog(this);
-        LinearLayout panel = dialogPanel(R.drawable.wechat_import, false, "输入访问密码", "验证通过后可使用微信表情导入。");
-        EditText password = new EditText(this);
-        password.setTextColor(INK);
-        password.setHintTextColor(INK3);
-        password.setTextSize(16);
-        password.setHint("请输入六位密码");
-        password.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        password.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(6)});
-        password.setSingleLine(true);
-        password.setSaveEnabled(false);
-        password.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
-        password.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
-        panel.addView(password, new LinearLayout.LayoutParams(-1, dp(52)));
-        Runnable verify = () -> {
-            if (!"299852".equals(password.getText().toString())) {
-                password.setError("密码错误，请重新输入");
-                password.selectAll();
-                return;
-            }
-            password.setText("");
-            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(password.getWindowToken(), 0);
-            dismissCardDialog(dialog, this::showWechat);
-        };
-        LinearLayout actions = new LinearLayout(this);
-        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(-1, -2);
-        ap.topMargin = dp(18);
-        panel.addView(actions, ap);
-        actions.addView(dialogButton("取消", false, false, v -> dismissCardDialog(dialog, null)),
-                new LinearLayout.LayoutParams(0, -2, 1));
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -2, 1);
-        cp.leftMargin = dp(10);
-        actions.addView(dialogButton("验证并进入", true, false, v -> verify.run()), cp);
-        password.setOnEditorActionListener((v, action, event) -> {
-            if (action != android.view.inputmethod.EditorInfo.IME_ACTION_DONE) return false;
-            verify.run();
-            return true;
-        });
-        showCardDialog(dialog, panel);
+        showPin("微信表情导入", "输入 6 位数字密码", "验证并进入", "密码不正确",
+                this::matchesWechatPin, this::showWechat);
+    }
+
+    private boolean matchesWechatPin(String pin) {
+        String stored = getPreferences(MODE_PRIVATE).getString("wechat_pin", "");
+        return stored.isEmpty() ? "299852".equals(pin) : matchesPin(pin, stored);
     }
 
     private void showWechat() {
@@ -2662,6 +2771,8 @@ public class MainActivity extends Activity {
             motionEnabled = enabled;
             getPreferences(MODE_PRIVATE).edit().putBoolean("page_motion", enabled).apply();
         });
+        page.addView(settingsGroupTitle("隐私", 22));
+        addMenuCard(page, R.drawable.blue_gear, "密码设置", "微信表情导入与私密收藏夹", v -> showPasswordSettings());
         page.addView(settingsGroupTitle("存储", 22));
         LinearLayout storage = new LinearLayout(this);
         storage.setOrientation(LinearLayout.VERTICAL);
@@ -2747,6 +2858,47 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> storageValue.setText(size));
         });
         presentSecondary(root);
+    }
+
+    private void showPasswordSettings() {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("密码设置", null);
+        ScrollView scroll = dialogScroll();
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout choices = new LinearLayout(this);
+        choices.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(choices);
+        addSheetChoice(choices, "微信表情导入", "修改访问密码", R.drawable.wechat_import, false,
+                () -> dismissCardDialog(dialog, () -> changePin("微信表情导入", this::matchesWechatPin, verifier ->
+                        getPreferences(MODE_PRIVATE).edit().putString("wechat_pin", verifier).apply())));
+        if (!privateFavoritePins.isEmpty()) {
+            choices.addView(settingsGroupTitle("私密收藏夹", 14));
+            for (String group : favoriteGroups) {
+                String stored = privateFavoritePins.get(group);
+                if (stored == null) continue;
+                addSheetChoice(choices, group, "修改收藏夹密码", R.drawable.blue_folder, false,
+                        () -> dismissCardDialog(dialog, () -> changePin(group, pin -> matchesPin(pin, stored), verifier -> {
+                            privateFavoritePins.put(group, verifier);
+                            saveFavoriteGroups();
+                        })));
+            }
+        }
+        showBottomSheet(dialog, panel);
+    }
+
+    private void changePin(String target, java.util.function.Predicate<String> matchesCurrent,
+                           java.util.function.Consumer<String> saveVerifier) {
+        showPin("验证当前密码", target, "下一步", "密码不正确", matchesCurrent, () -> {
+            String[] verifier = {null};
+            showPin("设置新密码", target, "下一步", "", pin -> {
+                verifier[0] = newPinVerifier(pin);
+                return true;
+            }, () -> showPin("确认新密码", target, "保存密码", "两次输入的密码不一致",
+                    pin -> matchesPin(pin, verifier[0]), () -> {
+                        saveVerifier.accept(verifier[0]);
+                        showBottomNotice("密码已更新");
+                    }));
+        });
     }
 
     private void openSavedFolder() {
@@ -7070,8 +7222,9 @@ public class MainActivity extends Activity {
                 assignments.put(hash, favoriteAssignments.get(hash));
                 sources.put(hash, favoriteSources.optJSONObject(hash));
             }
-            return new JSONObject().put("groups", new JSONArray(group == null
-                            ? favoriteGroups : Collections.singleton(group)))
+            ArrayList<String> groups = new ArrayList<>(favoriteGroups);
+            groups.removeIf(privateFavoritePins::containsKey);
+            return new JSONObject().put("groups", new JSONArray(group == null ? groups : Collections.singleton(group)))
                     .put("assignments", assignments).put("sources", sources).toString().getBytes(StandardCharsets.UTF_8);
         } catch (org.json.JSONException error) {
             throw new IllegalStateException(error);
@@ -7089,7 +7242,7 @@ public class MainActivity extends Activity {
         return groups;
     }
 
-    private int mergeFavoriteBackup(RecordArchive.Result backup, JSONObject data, boolean useBackupGroups) {
+    private int mergeFavoriteBackup(RecordArchive.Result backup, JSONObject data, HashSet<String> useBackupGroups) {
         if (backup.favoriteMetadata == null) return 0;
         java.util.Set<String> groups = backupGroupNames(data);
         favoriteGroups.addAll(groups);
@@ -7098,7 +7251,7 @@ public class MainActivity extends Activity {
         int changed = 0;
         for (String hash : backup.favoriteHashes) {
             boolean duplicate = backup.duplicateFavoriteHashes.contains(hash);
-            if (assignments != null && (!duplicate || useBackupGroups)) {
+            if (assignments != null && (!duplicate || useBackupGroups.contains(hash))) {
                 String group = assignments.optString(hash);
                 if (group.isEmpty() || groups.contains(group)) {
                     String previous = group.isEmpty() ? favoriteAssignments.remove(hash) : favoriteAssignments.put(hash, group);
@@ -7185,6 +7338,11 @@ public class MainActivity extends Activity {
             JSONObject data = new JSONObject(getPreferences(MODE_PRIVATE).getString("favorite_groups", "{}"));
             JSONArray names = data.optJSONArray("names");
             for (int i = 0; names != null && i < names.length(); i++) favoriteGroups.add(names.getString(i));
+            JSONObject pins = data.optJSONObject("privatePins");
+            if (pins != null) for (String name : favoriteGroups) {
+                String value = pins.optString(name);
+                if (value.matches("[0-9a-f]{32}:[0-9a-f]{64}")) privateFavoritePins.put(name, value);
+            }
             JSONObject assignments = data.optJSONObject("assignments");
             if (assignments != null) assignments.keys().forEachRemaining(hash -> {
                 String name = assignments.optString(hash);
@@ -7196,13 +7354,136 @@ public class MainActivity extends Activity {
     private void saveFavoriteGroups() {
         try {
             JSONObject data = new JSONObject().put("names", new JSONArray(favoriteGroups))
-                    .put("assignments", new JSONObject(favoriteAssignments));
+                    .put("assignments", new JSONObject(favoriteAssignments))
+                    .put("privatePins", new JSONObject(privateFavoritePins));
             getPreferences(MODE_PRIVATE).edit().putString("favorite_groups", data.toString()).apply();
         } catch (org.json.JSONException ignored) { }
     }
 
     private String groupName(String name) {
         return name == null ? "全部收藏" : name.isEmpty() ? "未分组" : name;
+    }
+
+    private String newPinVerifier(String pin) {
+        byte[] salt = new byte[16];
+        new java.security.SecureRandom().nextBytes(salt);
+        return pinHash(pin, salt);
+    }
+
+    private String pinHash(String pin, byte[] salt) {
+        javax.crypto.spec.PBEKeySpec spec = new javax.crypto.spec.PBEKeySpec(pin.toCharArray(), salt, 120000, 256);
+        try {
+            byte[] digest = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
+            return String.format(Locale.ROOT, "%032x:%064x", new java.math.BigInteger(1, salt), new java.math.BigInteger(1, digest));
+        } catch (java.security.GeneralSecurityException error) {
+            throw new IllegalStateException(error);
+        } finally {
+            spec.clearPassword();
+        }
+    }
+
+    private void verifyFavoriteGroup(String group, Runnable allowed) {
+        String saved = privateFavoritePins.get(group);
+        if (saved == null) {
+            allowed.run();
+            return;
+        }
+        showPin("解锁私密收藏夹", group, "解锁", "密码不正确", pin -> matchesPin(pin, saved), allowed);
+    }
+
+    private boolean matchesPin(String pin, String saved) {
+        byte[] salt = new byte[16];
+        for (int i = 0; i < salt.length; i++) salt[i] = (byte) Integer.parseInt(saved.substring(i * 2, i * 2 + 2), 16);
+        return MessageDigest.isEqual(saved.getBytes(StandardCharsets.US_ASCII), pinHash(pin, salt).getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private void showPin(String title, String detail, String confirmLabel, String rejectedMessage,
+                         java.util.function.Predicate<String> accept, Runnable accepted) {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = dialogPanel(0, false, title, detail);
+        FrameLayout field = new FrameLayout(this);
+        LinearLayout.LayoutParams fieldParams = new LinearLayout.LayoutParams(-1, dp(46));
+        fieldParams.topMargin = dp(16);
+        panel.addView(field, fieldParams);
+        LinearLayout boxes = new LinearLayout(this);
+        boxes.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        field.addView(boxes, new FrameLayout.LayoutParams(-1, -1));
+        TextView[] digits = new TextView[6];
+        for (int i = 0; i < digits.length; i++) {
+            TextView digit = homeLabel("", 20, INK, 700);
+            digit.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams box = new LinearLayout.LayoutParams(0, -1, 1);
+            if (i > 0) box.leftMargin = dp(6);
+            boxes.addView(digit, box);
+            digits[i] = digit;
+        }
+        EditText inputPin = new EditText(this);
+        inputPin.setSingleLine(true);
+        inputPin.setKeyListener(android.text.method.DigitsKeyListener.getInstance("0123456789"));
+        inputPin.setRawInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        inputPin.setTransformationMethod(android.text.method.PasswordTransformationMethod.getInstance());
+        inputPin.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(digits.length)});
+        inputPin.setContentDescription("6 位数字密码");
+        inputPin.setTextColor(Color.TRANSPARENT);
+        inputPin.setHighlightColor(Color.TRANSPARENT);
+        inputPin.setBackgroundColor(Color.TRANSPARENT);
+        inputPin.setCursorVisible(false);
+        inputPin.setOnClickListener(v -> inputPin.setSelection(inputPin.length()));
+        inputPin.setSaveEnabled(false);
+        inputPin.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+        inputPin.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        field.addView(inputPin, new FrameLayout.LayoutParams(-1, -1));
+        TextView error = homeLabel("", 12, DANGER, 550);
+        error.setPadding(0, dp(6), 0, 0);
+        panel.addView(error);
+        Runnable update = () -> {
+            int length = inputPin.length();
+            error.setText("");
+            for (int i = 0; i < digits.length; i++) {
+                digits[i].setText(i < length ? "●" : "");
+                GradientDrawable border = shape(TRACK, 6);
+                border.setStroke(dp(1), i == Math.min(length, digits.length - 1) ? ACCENT : INK3);
+                digits[i].setBackground(border);
+            }
+        };
+        onMediaSearchChanged(inputPin, update);
+        update.run();
+        Runnable submit = () -> {
+            if (inputPin.length() != digits.length) {
+                error.setText("请输入完整的 6 位数字密码");
+                return;
+            }
+            if (!accept.test(inputPin.getText().toString())) {
+                inputPin.setText("");
+                error.setText(rejectedMessage);
+                return;
+            }
+            inputPin.setText("");
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(inputPin.getWindowToken(), 0);
+            dismissCardDialog(dialog, accepted);
+        };
+        LinearLayout actions = new LinearLayout(this);
+        panel.addView(actions);
+        actions.addView(dialogButton("取消", false, false, v -> dismissCardDialog(dialog, null)),
+                new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams confirm = new LinearLayout.LayoutParams(0, -2, 1);
+        confirm.leftMargin = dp(8);
+        actions.addView(dialogButton(confirmLabel, true, false, v -> submit.run()), confirm);
+        inputPin.setOnEditorActionListener((v, action, event) -> {
+            if (action != android.view.inputmethod.EditorInfo.IME_ACTION_DONE) return false;
+            submit.run();
+            return true;
+        });
+        inputPin.requestFocus();
+        dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        showCardDialog(dialog, panel);
+    }
+
+    private boolean canChangeFavorite(String hash) {
+        String group = favoriteAssignments.get(hash);
+        return !privateFavoritePins.containsKey(group) || (showingFavorites && favoriteScreen != null
+                && group.equals(favoriteScreen.activeGroup));
     }
 
     private void showFavoriteDestination(String current, String selection, int count,
@@ -7302,6 +7583,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean assignFavoriteGroup(Media item, String group) {
+        if (!canChangeFavorite(item.hash)) return false;
         if (group.isEmpty() || !favoriteGroups.contains(group)) return favoriteAssignments.remove(item.hash) != null;
         return !group.equals(favoriteAssignments.put(item.hash, group));
     }
@@ -7368,6 +7650,8 @@ public class MainActivity extends Activity {
                     favoriteGroups.clear();
                     favoriteGroups.addAll(order);
                     favoriteAssignments.replaceAll((hash, group) -> oldName.equals(group) ? value : group);
+                    String pin = privateFavoritePins.remove(oldName);
+                    if (pin != null) privateFavoritePins.put(value, pin);
                     if (favoriteScreen != null && oldName.equals(favoriteScreen.activeGroup)) favoriteScreen.activeGroup = value;
                 }
                 saveFavoriteGroups();
@@ -7399,6 +7683,10 @@ public class MainActivity extends Activity {
     }
 
     private void setFavorite(Media item, boolean adding, String group, ScanRecord source) {
+        if (!canChangeFavorite(item.hash)) {
+            showTopNotice("请先从收藏页解锁此素材所在的私密收藏夹");
+            return;
+        }
         worker.execute(() -> {
             String message;
             try {
@@ -8293,9 +8581,19 @@ public class MainActivity extends Activity {
         }
 
         private boolean inFavoriteGroup(Media item) {
-            if (activeGroup == null) return true;
             String group = favoriteAssignments.get(item.hash);
+            if (activeGroup == null) return imported || !privateFavoritePins.containsKey(group);
             return activeGroup.isEmpty() ? group == null : activeGroup.equals(group);
+        }
+
+        private void selectFavoriteGroup(String name) {
+            if (busy || java.util.Objects.equals(activeGroup, name)) return;
+            verifyFavoriteGroup(name, () -> {
+                activeGroup = name;
+                category = 0;
+                positionFilter(false);
+                setSelecting(false);
+            });
         }
 
         private void showGroupPicker(ArrayList<Media> moving) {
@@ -8316,10 +8614,7 @@ public class MainActivity extends Activity {
                 addRetryChoice(choices, groupName(name), "", R.drawable.dialog_heart,
                         () -> dismissCardDialog(dialog, () -> {
                             if (moving == null) {
-                                activeGroup = name;
-                                category = 0;
-                                positionFilter(false);
-                                setSelecting(false);
+                                selectFavoriteGroup(name);
                             } else moveToGroup(moving, name);
                         }));
             }
@@ -8340,6 +8635,11 @@ public class MainActivity extends Activity {
 
         private void manageGroups() {
             if (busy || !loaded) return;
+            if (privateFavoritePins.containsKey(activeGroup)) {
+                activeGroup = null;
+                category = 0;
+                setSelecting(false);
+            }
             resetPages();
             showingGroupManager = true;
             currentPage = -7;
@@ -8354,6 +8654,11 @@ public class MainActivity extends Activity {
             scroll.addView(groups);
             renderManagedGroups(groups);
 
+            Button similar = dialogButton("相似素材整理", false, false,
+                    v -> findSimilarFavorites(() -> renderManagedGroups(groups)));
+            LinearLayout.LayoutParams similarParams = new LinearLayout.LayoutParams(-1, dp(48));
+            similarParams.setMargins(dp(16), dp(8), dp(16), 0);
+            page.addView(similar, similarParams);
             Button create = dialogButton("新建分组", true, false, v -> editGroupName(null, name -> {
                 activeGroup = name;
                 category = 0;
@@ -8366,6 +8671,125 @@ public class MainActivity extends Activity {
             createParams.setMargins(dp(16), dp(8), dp(16), dp(16));
             page.addView(create, createParams);
             presentSecondary(page);
+        }
+
+        private void findSimilarFavorites(Runnable refreshGroups) {
+            if (busy || recordTransferBusy || importingFavoriteMedia) return;
+            ArrayList<Media> snapshot = new ArrayList<>();
+            for (Media item : items) {
+                if (!privateFavoritePins.containsKey(favoriteAssignments.get(item.hash))) snapshot.add(item);
+            }
+            android.app.Dialog progress = new android.app.Dialog(MainActivity.this);
+            progress.setCancelable(false);
+            showCardDialog(progress, dialogPanel(R.drawable.record_search, false, "正在查找相似素材…",
+                    "比较图片与动图封面。"));
+            worker.execute(() -> {
+                java.util.LinkedHashMap<ImageFingerprint, ArrayList<Media>> groups = new java.util.LinkedHashMap<>();
+                for (Media item : snapshot) {
+                    if (!item.mime.startsWith("image/")) continue;
+                    try {
+                        ImageFingerprint fingerprint = new ImageFingerprint(item);
+                        ImageFingerprint anchor = fingerprint;
+                        for (ImageFingerprint candidate : groups.keySet()) {
+                            if (!candidate.resembles(fingerprint)) continue;
+                            anchor = candidate;
+                            break;
+                        }
+                        groups.computeIfAbsent(anchor, key -> new ArrayList<>()).add(item);
+                    } catch (Exception ignored) { }
+                }
+                ArrayList<ArrayList<Media>> matches = new ArrayList<>(groups.values());
+                matches.removeIf(group -> group.size() < 2);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    progress.dismiss();
+                    if (matches.isEmpty()) showMessage(R.drawable.record_search, "未找到相似素材", "已检查收藏中的图片和动图封面。");
+                    else reviewSimilarFavorites(matches, refreshGroups);
+                });
+            });
+        }
+
+        private void reviewSimilarFavorites(ArrayList<ArrayList<Media>> groups, Runnable refreshGroups) {
+            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
+            LinearLayout panel = dialogPanel(0, false, "相似素材整理", "比较图片和动图封面。勾选要取消收藏的素材。");
+            TextView position = homeLabel("", 13, INK, 700);
+            position.setPadding(0, dp(12), 0, dp(6));
+            panel.addView(position);
+            ScrollView scroll = dialogScroll();
+            panel.addView(scroll);
+            LinearLayout candidates = new LinearLayout(MainActivity.this);
+            candidates.setOrientation(LinearLayout.VERTICAL);
+            scroll.addView(candidates);
+            LinearLayout navigation = new LinearLayout(MainActivity.this);
+            panel.addView(navigation);
+            Button previous = dialogButton("上一组", false, false, null);
+            Button next = dialogButton("下一组", false, false, null);
+            navigation.addView(previous, new LinearLayout.LayoutParams(0, -2, 1));
+            LinearLayout.LayoutParams nextParams = new LinearLayout.LayoutParams(0, -2, 1);
+            nextParams.leftMargin = dp(8);
+            navigation.addView(next, nextParams);
+            HashSet<Media> marked = new HashSet<>();
+            int[] index = {0};
+            Button removeMarked = dialogButton("取消收藏选中项", true, true, v ->
+                    confirmRemove(new ArrayList<>(marked), () -> {
+                        dismissCardDialog(dialog, null);
+                        refreshGroups.run();
+                    }));
+            LinearLayout.LayoutParams removeParams = new LinearLayout.LayoutParams(-1, -2);
+            removeParams.topMargin = dp(10);
+            panel.addView(removeMarked, removeParams);
+            Runnable updateSelection = () -> {
+                removeMarked.setText("取消收藏选中项（" + marked.size() + "）");
+                removeMarked.setEnabled(!marked.isEmpty());
+                removeMarked.setAlpha(marked.isEmpty() ? 0.45f : 1f);
+            };
+            Runnable render = () -> {
+                ArrayList<Media> group = groups.get(index[0]);
+                position.setText("第 " + (index[0] + 1) + " / " + groups.size() + " 组 · " + group.size() + " 项");
+                candidates.removeAllViews();
+                LinearLayout row = null;
+                for (int i = 0; i < group.size(); i++) {
+                    Media item = group.get(i);
+                    if (i % 2 == 0) {
+                        row = new LinearLayout(MainActivity.this);
+                        candidates.addView(row, new LinearLayout.LayoutParams(-1, -2));
+                    }
+                    LinearLayout cell = new LinearLayout(MainActivity.this);
+                    cell.setOrientation(LinearLayout.VERTICAL);
+                    cell.setPadding(dp(3), 0, dp(3), dp(8));
+                    row.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
+                    ImageView image = recordCover(item);
+                    image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                    cell.addView(image, new LinearLayout.LayoutParams(-1, dp(104)));
+                    android.widget.CheckBox check = new android.widget.CheckBox(MainActivity.this);
+                    check.setText(groupName(favoriteAssignments.getOrDefault(item.hash, "")));
+                    check.setTextColor(INK);
+                    check.setTextSize(12);
+                    check.setSingleLine(true);
+                    check.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    check.setContentDescription("选择素材 " + (i + 1) + " · " + check.getText());
+                    check.setChecked(marked.contains(item));
+                    check.setOnCheckedChangeListener((button, checked) -> {
+                        if (checked) marked.add(item);
+                        else marked.remove(item);
+                        updateSelection.run();
+                    });
+                    image.setOnClickListener(v -> check.toggle());
+                    cell.addView(check, new LinearLayout.LayoutParams(-1, dp(40)));
+                }
+                if (group.size() % 2 != 0) row.addView(new View(MainActivity.this), new LinearLayout.LayoutParams(0, 0, 1));
+                scroll.scrollTo(0, 0);
+                previous.setEnabled(index[0] > 0);
+                next.setEnabled(index[0] + 1 < groups.size());
+                previous.setAlpha(previous.isEnabled() ? 1f : 0.45f);
+                next.setAlpha(next.isEnabled() ? 1f : 0.45f);
+            };
+            previous.setOnClickListener(v -> { index[0]--; render.run(); });
+            next.setOnClickListener(v -> { index[0]++; render.run(); });
+            dialogActions(dialog, panel, "关闭", null, false, null, null);
+            render.run();
+            updateSelection.run();
+            showCardDialog(dialog, panel, 380, 24);
         }
 
         private void leaveGroupManager() {
@@ -8410,7 +8834,7 @@ public class MainActivity extends Activity {
                 title.setSingleLine(true);
                 title.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 info.addView(title);
-                info.addView(homeLabel(count + " 项", 12, INK2, 450));
+                info.addView(homeLabel(privateFavoritePins.containsKey(group) ? "私密" : "公开 · " + count + " 项", 12, INK2, 450));
 
                 TextView more = homeLabel("⋯", 22, INK, 750);
                 more.setGravity(Gravity.CENTER);
@@ -8427,43 +8851,70 @@ public class MainActivity extends Activity {
             options.setPadding(dp(5), dp(5), dp(5), dp(5));
             addRecordAction(options, "重命名", R.drawable.group_edit, INK, () -> {
                 popup.dismiss();
-                editGroupName(group, name -> renderManagedGroups(groups));
+                verifyFavoriteGroup(group, () -> editGroupName(group, name -> renderManagedGroups(groups)));
+            });
+            boolean isPrivate = privateFavoritePins.containsKey(group);
+            addRecordAction(options, isPrivate ? "设为公开" : "设为私密", R.drawable.blue_folder, INK, () -> {
+                popup.dismiss();
+                if (isPrivate) {
+                    verifyFavoriteGroup(group, () -> {
+                        privateFavoritePins.remove(group);
+                        saveFavoriteGroups();
+                        renderManagedGroups(groups);
+                    });
+                } else {
+                    showPin("设置私密收藏夹密码", "设置 6 位数字密码，打开「" + group + "」时需要验证。",
+                            "设为私密", "", pin -> {
+                                privateFavoritePins.put(group, newPinVerifier(pin));
+                                return true;
+                            }, () -> {
+                                if (group.equals(activeGroup)) activeGroup = null;
+                                saveFavoriteGroups();
+                                setSelecting(false);
+                                renderManagedGroups(groups);
+                            });
+                }
             });
             if (count > 0) addRecordAction(options, "导出收藏夹", R.drawable.extract_download, INK, () -> {
                 popup.dismiss();
-                chooseGroupExport(group);
+                verifyFavoriteGroup(group, () -> chooseGroupExport(group));
             });
             addRecordAction(options, "删除分组", R.drawable.dialog_trash, DANGER, () -> {
                 popup.dismiss();
-                android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
-                LinearLayout panel = sheetPanel("删除分组？", null);
-                TextView summary = homeLabel(group + " · " + count + " 项", 14, INK, 650);
-                summary.setGravity(Gravity.CENTER_VERTICAL);
-                summary.setPadding(dp(12), dp(10), dp(12), dp(10));
-                Drawable folder = getDrawable(R.drawable.blue_folder).mutate();
-                folder.setTint(DANGER);
-                folder.setBounds(0, 0, dp(20), dp(20));
-                summary.setCompoundDrawablesRelative(folder, null, null, null);
-                summary.setCompoundDrawablePadding(dp(10));
-                summary.setBackground(shape(ACCENT_SOFT, 10));
-                LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(-1, -2);
-                summaryParams.topMargin = dp(12);
-                panel.addView(summary, summaryParams);
-                TextView detail = homeLabel("组内素材会移到「未分组」。", 14, INK2, 450);
-                LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
-                detailParams.topMargin = dp(12);
-                panel.addView(detail, detailParams);
-                dialogActions(dialog, panel, "保留分组", "删除分组", true, null, () -> {
-                    favoriteGroups.remove(group);
-                    favoriteAssignments.values().removeIf(group::equals);
-                    if (group.equals(activeGroup)) activeGroup = null;
-                    saveFavoriteGroups();
-                    setSelecting(false);
-                    renderManagedGroups(groups);
-                });
-                presentBottomSheet(dialog, panel);
+                verifyFavoriteGroup(group, () -> confirmDeleteFavoriteGroup(group, count, groups));
             });
             popup.showAsDropDown(anchor, 0, dp(4), Gravity.END);
+        }
+
+        private void confirmDeleteFavoriteGroup(String group, int count, LinearLayout groups) {
+            android.app.Dialog dialog = new android.app.Dialog(MainActivity.this);
+            LinearLayout panel = sheetPanel("删除分组？", null);
+            TextView summary = homeLabel(group + " · " + count + " 项", 14, INK, 650);
+            summary.setGravity(Gravity.CENTER_VERTICAL);
+            summary.setPadding(dp(12), dp(10), dp(12), dp(10));
+            Drawable folder = getDrawable(R.drawable.blue_folder).mutate();
+            folder.setTint(DANGER);
+            folder.setBounds(0, 0, dp(20), dp(20));
+            summary.setCompoundDrawablesRelative(folder, null, null, null);
+            summary.setCompoundDrawablePadding(dp(10));
+            summary.setBackground(shape(ACCENT_SOFT, 10));
+            LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(-1, -2);
+            summaryParams.topMargin = dp(12);
+            panel.addView(summary, summaryParams);
+            TextView detail = homeLabel("组内素材会移到「未分组」。", 14, INK2, 450);
+            LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
+            detailParams.topMargin = dp(12);
+            panel.addView(detail, detailParams);
+            dialogActions(dialog, panel, "保留分组", "删除分组", true, null, () -> {
+                favoriteGroups.remove(group);
+                favoriteAssignments.values().removeIf(group::equals);
+                privateFavoritePins.remove(group);
+                if (group.equals(activeGroup)) activeGroup = null;
+                saveFavoriteGroups();
+                setSelecting(false);
+                renderManagedGroups(groups);
+            });
+            presentBottomSheet(dialog, panel);
         }
 
         private java.util.HashMap<String, Integer> favoriteGroupCounts() {
@@ -8479,16 +8930,14 @@ public class MainActivity extends Activity {
             names.add(null);
             names.addAll(favoriteGroups);
             names.add("");
+            int publicCount = items.size();
+            for (String group : privateFavoritePins.keySet()) publicCount -= counts.getOrDefault(group, 0);
             for (String name : names) {
                 boolean active = java.util.Objects.equals(activeGroup, name);
-                int count = name == null ? items.size() : counts.getOrDefault(name.isEmpty() ? null : name, 0);
-                Button chip = shareButton(groupName(name) + (loaded ? " " + count : ""), v -> {
-                    if (busy || java.util.Objects.equals(activeGroup, name)) return;
-                    activeGroup = name;
-                    category = 0;
-                    positionFilter(false);
-                    setSelecting(false);
-                });
+                int count = name == null ? publicCount : counts.getOrDefault(name.isEmpty() ? null : name, 0);
+                boolean locked = privateFavoritePins.containsKey(name) && !active;
+                String suffix = locked ? " · 私密" : loaded ? " " + count : "";
+                Button chip = shareButton(groupName(name) + suffix, v -> selectFavoriteGroup(name));
                 chip.setSingleLine(true);
                 chip.setMinimumWidth(0);
                 chip.setMinWidth(0);
@@ -8630,7 +9079,10 @@ public class MainActivity extends Activity {
         }
 
         private void confirmRemove() {
-            ArrayList<Media> snapshot = selection();
+            confirmRemove(selection(), null);
+        }
+
+        private void confirmRemove(ArrayList<Media> snapshot, Runnable afterRemoval) {
             showConfirmation(R.drawable.dialog_heart, true, "取消收藏这 " + snapshot.size() + " 项？",
                     "选中素材将从收藏夹移除。\n扫描记录和已保存的文件仍会保留。",
                     "保留收藏", "取消收藏", null, () -> {
@@ -8656,6 +9108,7 @@ public class MainActivity extends Activity {
                             selected.removeAll(removed);
                             if (selected.isEmpty()) selecting = false;
                             render();
+                            if (afterRemoval != null) afterRemoval.run();
                         }
                         int failed = snapshot.size() - removed.size();
                         String result = "已取消收藏 " + removed.size() + " 项";

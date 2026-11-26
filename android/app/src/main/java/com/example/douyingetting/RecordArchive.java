@@ -18,7 +18,8 @@ final class RecordArchive {
     static final class Result {
         final HashSet<String> added = new HashSet<>();
         final HashSet<String> favoriteHashes = new HashSet<>();
-        final HashSet<String> duplicateFavoriteHashes = new HashSet<>();
+        final Map<String, File> duplicateFavoriteFiles = new HashMap<>();
+        final Set<String> duplicateFavoriteHashes = duplicateFavoriteFiles.keySet();
         int skipped;
         int favoritesAdded, favoritesSkipped;
         byte[] favoriteMetadata;
@@ -50,18 +51,19 @@ final class RecordArchive {
         }
 
         private HashSet<String> assessFavorites(File destination, Result result) throws Exception {
-            HashSet<String> existingHashes = new HashSet<>();
+            Map<String, File> existingFiles = new HashMap<>();
             File[] existing = destination.listFiles();
             if (!favorites.isEmpty() && existing != null) for (File file : existing)
-                if (file.isFile() && !file.getName().endsWith(".tmp")) existingHashes.add(hash(file));
+                if (file.isFile() && !file.getName().endsWith(".tmp")) existingFiles.put(hash(file), file);
             HashSet<String> seen = new HashSet<>();
             for (String name : favorites.values()) {
                 String hash = name.substring(0, 64);
                 result.favoriteHashes.add(hash);
-                if (existingHashes.contains(hash)) result.duplicateFavoriteHashes.add(hash);
-                if (!seen.add(hash) || existingHashes.contains(hash)) result.favoritesSkipped++;
+                File existingFile = existingFiles.get(hash);
+                if (existingFile != null) result.duplicateFavoriteFiles.put(hash, existingFile);
+                if (!seen.add(hash) || existingFile != null) result.favoritesSkipped++;
             }
-            return existingHashes;
+            return new HashSet<>(existingFiles.keySet());
         }
 
         Result install(File destination, File favoritesDestination, Set<String> known) throws Exception {
