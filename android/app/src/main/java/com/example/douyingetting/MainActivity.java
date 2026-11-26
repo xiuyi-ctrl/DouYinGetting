@@ -2638,7 +2638,7 @@ public class MainActivity extends Activity {
         locationParams.leftMargin = dp(12);
         location.addView(locationWords, locationParams);
         locationWords.addView(homeLabel("保存位置", 14, INK, 700));
-        locationWords.addView(homeLabel("下载 / DouYinGetting", 12, INK2, 400));
+        locationWords.addView(homeLabel("下载 / XiuyiGetting", 12, INK2, 400));
         TextView openFolder = homeLabel("打开文件夹", 12, ACCENT, 700);
         openFolder.setGravity(Gravity.CENTER);
         openFolder.setSingleLine(true);
@@ -2659,7 +2659,7 @@ public class MainActivity extends Activity {
 
     private void openSavedFolder() {
         Uri folder = android.provider.DocumentsContract.buildDocumentUri(
-                "com.android.externalstorage.documents", "primary:Download/DouYinGetting");
+                "com.android.externalstorage.documents", "primary:Download/XiuyiGetting");
         Intent browse = new Intent(Intent.ACTION_VIEW).setDataAndType(folder,
                 android.provider.DocumentsContract.Document.MIME_TYPE_DIR);
         try {
@@ -2673,7 +2673,7 @@ public class MainActivity extends Activity {
                 startActivity(picker);
                 showBottomNotice("已打开系统文件选择器，可浏览保存文件夹");
             } catch (android.content.ActivityNotFoundException | SecurityException unavailable) {
-                showBottomNotice("无法打开文件管理器，请手动前往下载 / DouYinGetting");
+                showBottomNotice("无法打开文件管理器，请手动前往下载 / XiuyiGetting");
             }
         }
     }
@@ -4126,7 +4126,7 @@ public class MainActivity extends Activity {
         saveBar.addView(saveInfo, new LinearLayout.LayoutParams(0, -2, 1));
         countLabel = homeLabel("已提取 0 个", 14, INK, 750);
         saveInfo.addView(countLabel);
-        saveSub = homeLabel("保存到 下载 / DouYinGetting", 10, INK2, 400);
+        saveSub = homeLabel("保存到 下载 / XiuyiGetting", 10, INK2, 400);
         LinearLayout.LayoutParams saveSubParams = new LinearLayout.LayoutParams(-1, -2);
         saveSubParams.topMargin = dp(3);
         saveInfo.addView(saveSub, saveSubParams);
@@ -6194,7 +6194,7 @@ public class MainActivity extends Activity {
         shareSelectedButton.setVisibility(selectingMedia ? View.VISIBLE : View.GONE);
         shareSelectedButton.setEnabled(!selectedMedia.isEmpty());
         shareSelectedButton.setAlpha(shareSelectedButton.isEnabled() ? 1f : 0.45f);
-        saveSub.setText(media.isEmpty() ? "保存到 下载 / DouYinGetting"
+        saveSub.setText(media.isEmpty() ? "保存到 下载 / XiuyiGetting"
                 : gifCount + " 个动图 · " + (media.size() - gifCount) + " 张图片");
         emptyResults.setText(media.isEmpty() ? "等待提取素材\n打开作品并扫描评论后，素材会显示在这里" : "当前分类没有结果");
         emptyResults.setVisibility(displayedCount == 0 ? View.VISIBLE : View.GONE);
@@ -7331,7 +7331,7 @@ public class MainActivity extends Activity {
         new FavoritesScreen().show();
     }
 
-    private static final String SAVE_DIRECTORY = Environment.DIRECTORY_DOWNLOADS + "/DouYinGetting";
+    private static final String SAVE_DIRECTORY = Environment.DIRECTORY_DOWNLOADS + "/XiuyiGetting";
 
     private enum MediaSaveMode {
         DIRECT("直接保存", "素材直接保存到下载目录", R.drawable.extract_download),

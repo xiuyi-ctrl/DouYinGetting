@@ -1,4 +1,4 @@
-# DouYinGetting
+# XiuyiGetting
 
 ## 微信 ZIP 导入记录（Android 4.0.28）
 
@@ -12,7 +12,7 @@
 
 ## 微信表情导入（Android 4.0.25）
 
-首页→“微信表情导入”→输入访问密码→选择电脑导出的表情 ZIP。“我的”不显示该入口。入口密码验证不等同于素材文件加密。支持 PNG、JPG、GIF 和 WebP 原文件，导入后保留在本机，可分类预览、多选、收藏、分享和保存到 `下载/DouYinGetting`。按文件内容去重，重复导入不会产生副本；保存及分享保持原文件字节不变。
+首页→“微信表情导入”→输入访问密码→选择电脑导出的表情 ZIP。“我的”不显示该入口。入口密码验证不等同于素材文件加密。支持 PNG、JPG、GIF 和 WebP 原文件，导入后保留在本机，可分类预览、多选、收藏、分享和保存到 `下载/XiuyiGetting`。按文件内容去重，重复导入不会产生副本；保存及分享保持原文件字节不变。
 
 也可点击“连接电脑助手”：在 Windows 上运行配套助手，选择自己的表情库或已有 ZIP，启动后将配对内容粘贴到手机。使用 HTTPS、证书指纹和临时令牌配对，数据在局域网内传输。具体使用方式及非官方导出风险见 [电脑助手说明](desktop/wechat_helper/README.md)。APK 不包含微信数据库密钥读取代码。
 
@@ -55,7 +55,7 @@ java -cp android/app/build/sticker-tests com.example.douyingetting.StickerArchiv
 
 ## Android 源码
 
-`android/` 是无第三方运行库的 Android 工程。打开作品后，用户在 App 内登录抖音并进入评论区，点击“扫描主评论”；App 按游标读取主评论，把媒体原文件暂存于应用目录，支持预览和保存到 `下载/DouYinGetting`。动图以原始文件格式保存。
+`android/` 是无第三方运行库的 Android 工程。打开作品后，用户在 App 内登录抖音并进入评论区，点击“扫描主评论”；App 按游标读取主评论，把媒体原文件暂存于应用目录，支持预览和保存到 `下载/XiuyiGetting`。动图以原始文件格式保存。
 
 已使用 `E:\Android\Sdk`、JDK 17 和 Gradle 8.14.3 从**项目根目录**构建 debug APK：
 
