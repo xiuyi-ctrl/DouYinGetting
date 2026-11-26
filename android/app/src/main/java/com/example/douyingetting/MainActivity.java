@@ -115,6 +115,7 @@ public class MainActivity extends Activity {
     private static final int IMPORT_FAVORITE_MEDIA = 7105;
     private String favoriteImportGroup;
     private boolean importingFavoriteMedia;
+    private ArrayList<Uri> pendingSharedMedia;
     private String phoneImportLink;
     private String phoneImportRecordId;
     private boolean importingPhoneMedia;
@@ -416,6 +417,10 @@ public class MainActivity extends Activity {
             stage.post(this::refreshRecordUndoNotice);
         }
         if (state == null) handleSharedPost(getIntent());
+        else {
+            pendingSharedMedia = state.getParcelableArrayList("pendingSharedMedia");
+            if (pendingSharedMedia != null) stage.post(this::showSharedMediaDestination);
+        }
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
@@ -423,6 +428,7 @@ public class MainActivity extends Activity {
         state.putString("phoneImportLink", phoneImportLink);
         state.putString("phoneImportRecordId", phoneImportRecordId);
         state.putString("favoriteImportGroup", favoriteImportGroup);
+        state.putParcelableArrayList("pendingSharedMedia", pendingSharedMedia);
         state.putInt("backupScope", backupScope);
         state.putString("backupGroup", backupGroup);
         state.putBoolean("backupMaterialsOnly", backupMaterialsOnly);
@@ -435,7 +441,27 @@ public class MainActivity extends Activity {
     }
 
     private void handleSharedPost(Intent intent) {
-        if (!Intent.ACTION_SEND.equals(intent.getAction())) return;
+        boolean multiple = Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction());
+        if (!multiple && !Intent.ACTION_SEND.equals(intent.getAction())) return;
+        java.util.LinkedHashSet<Uri> streams = new java.util.LinkedHashSet<>(selectedFiles(intent));
+        if (multiple) {
+            ArrayList<?> shared = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (shared != null) for (Object item : shared) if (item instanceof Uri) streams.add((Uri) item);
+        } else {
+            android.os.Parcelable shared = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (shared instanceof Uri) streams.add((Uri) shared);
+        }
+        streams.removeIf(uri -> !"content".equals(uri.getScheme()));
+        if (!streams.isEmpty() && !"text/plain".equals(intent.getType())) {
+            if (pendingSharedMedia != null || recordTransferBusy || importingFavoriteMedia || importingPhoneMedia) {
+                showTopNotice("请先完成当前导入或备份操作");
+                return;
+            }
+            pendingSharedMedia = new ArrayList<>(streams);
+            showSharedMediaDestination();
+            return;
+        }
+        if (multiple) return;
         CharSequence sharedText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
         if (sharedText == null) return;
         String shared = sharedText.toString().replace("\\:", ":");
@@ -472,6 +498,72 @@ public class MainActivity extends Activity {
                     () -> dismissCardDialog(dialog, () -> openSharedPost(link, platform, true)));
         }
         showBottomSheet(dialog, panel);
+    }
+
+    private void showSharedMediaDestination() {
+        if (pendingSharedMedia == null || pendingSharedMedia.isEmpty()) return;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        int count = pendingSharedMedia.size();
+        LinearLayout panel = sheetPanel("导入分享素材", "已收到 " + count + " 个文件");
+        addSheetChoice(panel, "加入收藏夹", "选择收藏分组", R.drawable.dialog_heart, true,
+                () -> dismissCardDialog(dialog, () -> showFavoriteDestination(null, "", count,
+                        this::importSharedFavorites, this::showSharedMediaDestination)));
+        addSheetChoice(panel, "追加到作品记录", "选择已有作品记录", R.drawable.record_import, false,
+                () -> dismissCardDialog(dialog, this::showSharedRecordPicker));
+        Runnable cancel = () -> pendingSharedMedia = null;
+        dialogActions(dialog, panel, "取消", null, false, cancel, null);
+        dialog.setOnCancelListener(ignored -> cancel.run());
+        presentBottomSheet(dialog, panel);
+    }
+
+    private void importSharedFavorites(String group) {
+        ArrayList<Uri> files = pendingSharedMedia;
+        pendingSharedMedia = null;
+        if (files == null) return;
+        openFavorites(null);
+        importFavoriteMedia(group, files);
+    }
+
+    private void showSharedRecordPicker() {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("选择作品记录", null);
+        EditText search = mediaSourceSearch("搜索作品标题、链接或平台");
+        panel.addView(search, new LinearLayout.LayoutParams(-1, dp(44)));
+        ScrollView scroll = dialogScroll();
+        panel.addView(scroll);
+        LinearLayout choices = new LinearLayout(this);
+        choices.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(choices);
+        Runnable update = () -> {
+            choices.removeAllViews();
+            String query = search.getText().toString().trim().toLowerCase(Locale.ROOT);
+            for (ScanRecord record : records) {
+                if (!isFavoriteSourceLink(record.link) || !matchesMediaSource(record.link, record.caption, query)) continue;
+                String title = record.caption.isEmpty() ? record.link : record.caption;
+                addMenuCard(choices, R.drawable.blue_history, title, favoriteSourcePlatform(record.link), v -> {
+                    if (record.processingPage || scanning && currentRecord == record) {
+                        showTopNotice("请暂停扫描，等当前页处理完再导入");
+                        return;
+                    }
+                    dismissCardDialog(dialog, () -> {
+                        ArrayList<Uri> files = pendingSharedMedia;
+                        pendingSharedMedia = null;
+                        if (files == null) return;
+                        importPhoneMedia(record.link, record.id, files, true);
+                    });
+                });
+            }
+            if (choices.getChildCount() == 0) choices.addView(homeLabel("没有符合条件的作品记录", 13, INK2, 450));
+        };
+        onMediaSearchChanged(search, update);
+        update.run();
+        dialogActions(dialog, panel, "返回", null, false, this::showSharedMediaDestination, null);
+        dialog.setOnCancelListener(ignored -> showSharedMediaDestination());
+        panel.setFocusableInTouchMode(true);
+        panel.requestFocus();
+        dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        presentBottomSheet(dialog, panel);
     }
 
     private void openSharedPost(String link, int platform, boolean comments) {
@@ -1954,7 +2046,7 @@ public class MainActivity extends Activity {
             String recordId = phoneImportRecordId;
             phoneImportLink = null;
             phoneImportRecordId = null;
-            if (result == RESULT_OK && data != null && link != null) importPhoneMedia(link, recordId, selectedFiles(data));
+            if (result == RESULT_OK && data != null && link != null) importPhoneMedia(link, recordId, selectedFiles(data), false);
             return;
         }
         if (request == IMPORT_WECHAT) {
@@ -5111,7 +5203,7 @@ public class MainActivity extends Activity {
         }
         phoneImportLink = link;
         phoneImportRecordId = target == null ? null : target.id;
-        try { openLocalMediaPicker(false, IMPORT_PHONE_MEDIA); }
+        try { openLocalMediaPicker(IMPORT_PHONE_MEDIA); }
         catch (android.content.ActivityNotFoundException error) {
             phoneImportLink = null;
             phoneImportRecordId = null;
@@ -5119,35 +5211,30 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void openLocalMediaPicker(boolean includeImages, int requestCode) {
+    private void openLocalMediaPicker(int requestCode) {
         if (!importFromFiles() && (android.os.Build.VERSION.SDK_INT >= 33 || android.os.Build.VERSION.SDK_INT >= 30
                 && android.os.ext.SdkExtensions.getExtensionVersion(30) >= 2)) {
             Intent album = new Intent(MediaStore.ACTION_PICK_IMAGES);
-            if (!includeImages) album.setType("video/mp4");
             album.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
             try {
                 startActivityForResult(album, requestCode);
                 return;
             } catch (android.content.ActivityNotFoundException ignored) { }
         }
-        startActivityForResult(localMediaPicker(includeImages), requestCode);
-    }
-
-    private Intent localMediaPicker(boolean includeImages) {
         Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         picker.addCategory(Intent.CATEGORY_OPENABLE);
-        picker.setType(includeImages ? "*/*" : "video/mp4");
-        if (includeImages) picker.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/mp4"});
+        picker.setType("*/*");
+        picker.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/mp4"});
         picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         picker.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
                 android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:"));
-        return picker;
+        startActivityForResult(picker, requestCode);
     }
 
     private void pickFavoriteMedia(String group) {
         if (importingFavoriteMedia || recordTransferBusy) return;
         favoriteImportGroup = group == null ? "" : group;
-        try { openLocalMediaPicker(true, IMPORT_FAVORITE_MEDIA); }
+        try { openLocalMediaPicker(IMPORT_FAVORITE_MEDIA); }
         catch (android.content.ActivityNotFoundException error) {
             favoriteImportGroup = null;
             showTopNotice("无法打开系统文件选择器");
@@ -5179,8 +5266,8 @@ public class MainActivity extends Activity {
         return files;
     }
 
-    private void importPhoneMedia(String link, String recordId, ArrayList<Uri> files) {
-        if (files.isEmpty()) return;
+    private void importPhoneMedia(String link, String recordId, ArrayList<Uri> files, boolean fromShare) {
+        if (files.isEmpty() || importingPhoneMedia || recordTransferBusy) return;
         ScanRecord existing = null;
         if (recordId != null) {
             for (ScanRecord record : records) {
@@ -5214,7 +5301,7 @@ public class MainActivity extends Activity {
             synchronized (record) {
                 for (Uri uri : files) {
                     try {
-                        Media item = importLocalMedia(uri, record.folder, record.hashes, false);
+                        Media item = importLocalMedia(uri, record.folder, record.hashes);
                         if (item == null) duplicates++;
                         else {
                             record.hashes.add(item.hash);
@@ -5253,7 +5340,7 @@ public class MainActivity extends Activity {
                     if (newRecord) records.add(0, record);
                     String displayedLink = displayedPhoneWorkLink();
                     boolean sameWork = displayedLink != null && samePhoneWork(displayedLink, link);
-                    boolean openRecord = restorePage && currentPage == 1 || showingReader && sameWork;
+                    boolean openRecord = fromShare || restorePage && currentPage == 1 || showingReader && sameWork;
                     boolean anotherScanActive = currentRecord != null && currentRecord != record
                             && (scanning || currentRecord.processingPage);
                     if (showingKuaishou && sameWork && !favoriteScreen.busy) {
@@ -5272,7 +5359,7 @@ public class MainActivity extends Activity {
                 String message = added.isEmpty() && failureCount == 0 ? "已在此作品记录中"
                         : "已导入 " + added.size() + " 个素材";
                 if (duplicateCount > 0 && !added.isEmpty()) message += "，跳过 " + duplicateCount + " 个重复文件";
-                if (failureCount > 0) message += "，" + failureCount + " 个文件无法读取为 MP4";
+                if (failureCount > 0) message += "，" + failureCount + " 个文件无法导入";
                 showBottomNotice(message);
             });
         });
@@ -5294,7 +5381,7 @@ public class MainActivity extends Activity {
             int failed = 0;
             for (Uri uri : files) {
                 try {
-                    Media item = importLocalMedia(uri, folder, hashes, true);
+                    Media item = importLocalMedia(uri, folder, hashes);
                     if (item != null) {
                         hashes.add(item.hash);
                         added.add(item);
@@ -5305,8 +5392,13 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 importingFavoriteMedia = false;
                 boolean changed = false;
-                for (Media item : added) changed |= assignFavoriteGroup(item, group);
+                boolean sourcesChanged = false;
+                for (Media item : added) {
+                    changed |= assignFavoriteGroup(item, group);
+                    sourcesChanged |= rememberFavoriteSource(item, null, false);
+                }
                 if (changed) saveFavoriteGroups();
+                if (sourcesChanged) saveFavoriteSources();
                 if (isFinishing() || isDestroyed()) return;
                 if (showingFavorites) {
                     FavoritesScreen screen = favoriteScreen;
@@ -5326,7 +5418,7 @@ public class MainActivity extends Activity {
         });
     }
 
-    private Media importLocalMedia(Uri uri, File folder, HashSet<String> hashes, boolean includeImages) throws Exception {
+    private Media importLocalMedia(Uri uri, File folder, HashSet<String> hashes) throws Exception {
         Files.createDirectories(folder.toPath());
         File pending = File.createTempFile("phone-", ".tmp", folder);
         try {
@@ -5338,8 +5430,7 @@ public class MainActivity extends Activity {
                 byte[] header = new byte[12];
                 new java.io.DataInputStream(in).readFully(header);
                 mime = format(header);
-                if (mime == null || !includeImages && !"video/mp4".equals(mime)
-                        || "qt  ".equals(new String(header, 8, 4, StandardCharsets.US_ASCII))) {
+                if (mime == null || "qt  ".equals(new String(header, 8, 4, StandardCharsets.US_ASCII))) {
                     throw new java.io.IOException("文件格式不受支持");
                 }
                 out.write(header);
@@ -5361,7 +5452,7 @@ public class MainActivity extends Activity {
             String extension = "image/jpeg".equals(mime) ? ".jpg" : "." + mime.substring(mime.indexOf('/') + 1);
             File file = new File(folder, key + extension);
             Files.move(pending.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            if (video && includeImages) thumbnail = decodeThumbnail(file);
+            if (video) thumbnail = decodeThumbnail(file);
             return new Media(file, key, mime, "", PHONE_MEDIA_KIND, thumbnail, video);
         } finally { pending.delete(); }
     }
@@ -6405,9 +6496,11 @@ public class MainActivity extends Activity {
         value.setSingleLine(true);
         value.setEllipsize(android.text.TextUtils.TruncateAt.END);
         row.addView(value);
-        row.addView(icon(R.drawable.home_chevron, INK2), new LinearLayout.LayoutParams(dp(15), dp(15)));
-        row.setOnClickListener(v -> action.run());
-        pressFeedback(row);
+        if (action != null) {
+            row.addView(icon(R.drawable.home_chevron, INK2), new LinearLayout.LayoutParams(dp(15), dp(15)));
+            row.setOnClickListener(v -> action.run());
+            pressFeedback(row);
+        }
     }
 
     private void preview(Media item, List<Media> items, java.util.function.Predicate<Media> visible) {
@@ -6484,14 +6577,18 @@ public class MainActivity extends Activity {
                 });
             }
             if (work != null && PHONE_MEDIA_KIND.equals(item.kind) && work.folder.equals(item.file.getParentFile())) {
+                addPreviewLinkRow(panel, "作品来源", PHONE_MEDIA_KIND, R.drawable.extract_link, null);
                 addPreviewLinkRow(panel, "删除导入素材", "", R.drawable.dialog_trash,
                         () -> dismissCardDialog(dialog, () -> confirmDeleteImportedMedia(work, item)));
             }
             if (showingFavorites) {
                 JSONObject source = favoriteSource(item);
                 if (source != null) {
-                    addPreviewLinkRow(panel, "查看作品来源", favoriteSourcePlatform(source.optString("link")),
-                            R.drawable.extract_link, () -> dismissCardDialog(dialog, () -> showFavoriteSource(source)));
+                    String link = source.optString("link");
+                    boolean phoneImport = source.optBoolean("phoneImport");
+                    addPreviewLinkRow(panel, phoneImport ? "作品来源" : "查看作品来源",
+                            phoneImport ? PHONE_MEDIA_KIND : favoriteSourcePlatform(link), R.drawable.extract_link,
+                            isFavoriteSourceLink(link) ? () -> dismissCardDialog(dialog, () -> showFavoriteSource(source)) : null);
                 } else {
                     TextView unavailable = homeLabel("暂无作品来源", 12, INK2, 450);
                     LinearLayout.LayoutParams unavailableParams = new LinearLayout.LayoutParams(-1, -2);
@@ -6516,11 +6613,15 @@ public class MainActivity extends Activity {
             panel.addView(actions, ap);
             addPreviewAction(actions, favorite ? "取消收藏" : "收藏",
                     favorite ? R.drawable.dialog_heart_filled : R.drawable.dialog_heart, false,
-                    v -> dismissCardDialog(dialog, () -> {
-                        if (favorite) setFavorite(item, false, "", work);
-                        else showFavoriteDestination(null, "", 1, group -> setFavorite(item, true, group, work),
-                                () -> preview(sequence, index));
-                    }));
+                    v -> {
+                        if (favorite) {
+                            showConfirmation(R.drawable.dialog_heart, true, "取消收藏这项素材？",
+                                    "素材将从收藏夹移除。提取记录和已保存的文件仍会保留。",
+                                    "保留收藏", "取消收藏", null,
+                                    () -> dismissCardDialog(dialog, () -> setFavorite(item, false, "", work)));
+                        } else dismissCardDialog(dialog, () -> showFavoriteDestination(null, "", 1,
+                                group -> setFavorite(item, true, group, work), () -> preview(sequence, index)));
+                    });
             addPreviewAction(actions, "分享", R.drawable.dialog_share, false, v -> shareMedia(Collections.singletonList(item)));
             addPreviewAction(actions, "关闭", R.drawable.dialog_close, false, v -> dismissCardDialog(dialog, null));
             addPreviewAction(actions, "保存", R.drawable.extract_download, true, v -> dismissCardDialog(dialog, () -> {
@@ -6904,25 +7005,41 @@ public class MainActivity extends Activity {
 
     private JSONObject favoriteSource(Media item) {
         JSONObject known = favoriteSources.optJSONObject(item.hash);
-        if (known != null && isFavoriteSourceLink(known.optString("link"))) return known;
+        String knownLink = known == null ? "" : known.optString("link");
+        boolean knownWork = isFavoriteSourceLink(knownLink);
+        if (knownWork && known.optBoolean("phoneImport")) return known;
         for (ScanRecord record : records) {
-            boolean matches;
-            synchronized (record) { matches = record.hashes.contains(item.hash); }
-            if (matches && rememberFavoriteSource(item.hash, record, true)) {
-                saveFavoriteSources();
-                return favoriteSources.optJSONObject(item.hash);
+            if (!isFavoriteSourceLink(record.link) || knownWork && !record.link.equals(knownLink)) continue;
+            synchronized (record) {
+                if (!record.hashes.contains(item.hash)) continue;
+                for (Media candidate : record.items) {
+                    if (candidate.hash.equals(item.hash) && rememberFavoriteSource(candidate, record, true)) {
+                        saveFavoriteSources();
+                        return favoriteSources.optJSONObject(item.hash);
+                    }
+                }
             }
         }
-        return null;
+        return knownWork || known != null && known.optBoolean("phoneImport") ? known : null;
     }
 
-    private boolean rememberFavoriteSource(String hash, ScanRecord record, boolean matched) {
-        if (record == null || !isFavoriteSourceLink(record.link)) return false;
-        JSONObject known = favoriteSources.optJSONObject(hash);
-        if (known != null && (matched || !known.optBoolean("matched"))) return false;
+    private boolean rememberFavoriteSource(Media item, ScanRecord record, boolean matched) {
+        boolean linked = record != null && isFavoriteSourceLink(record.link);
+        JSONObject known = favoriteSources.optJSONObject(item.hash);
+        boolean phoneImport = PHONE_MEDIA_KIND.equals(item.kind) || known != null && known.optBoolean("phoneImport");
+        if (!linked && !phoneImport) return false;
         try {
-            favoriteSources.put(hash, new JSONObject().put("link", record.link)
-                    .put("caption", record.caption).put("matched", matched));
+            if (known != null && isFavoriteSourceLink(known.optString("link"))
+                    && (!linked || matched || !known.optBoolean("matched"))) {
+                if (!linked || !phoneImport || known.optBoolean("phoneImport")
+                        || !record.link.equals(known.optString("link"))) return false;
+                known.put("phoneImport", true);
+                return true;
+            }
+            JSONObject source = new JSONObject();
+            if (linked) source.put("link", record.link).put("caption", record.caption).put("matched", matched);
+            if (phoneImport) source.put("phoneImport", true);
+            favoriteSources.put(item.hash, source);
             return true;
         } catch (org.json.JSONException error) {
             return false;
@@ -6934,8 +7051,7 @@ public class MainActivity extends Activity {
         boolean changed = false;
         synchronized (record) {
             for (Media item : record.items) {
-                if (!favoriteSources.has(item.hash) && isFavorite(item))
-                    changed |= rememberFavoriteSource(item.hash, record, true);
+                if (isFavorite(item)) changed |= rememberFavoriteSource(item, record, true);
             }
         }
         if (changed) saveFavoriteSources();
@@ -6990,7 +7106,8 @@ public class MainActivity extends Activity {
                 }
             }
             JSONObject source = sources == null ? null : sources.optJSONObject(hash);
-            if (!favoriteSources.has(hash) && source != null && isFavoriteSourceLink(source.optString("link"))) {
+            if (!favoriteSources.has(hash) && source != null
+                    && (source.optBoolean("phoneImport") || isFavoriteSourceLink(source.optString("link")))) {
                 try { favoriteSources.put(hash, source); }
                 catch (org.json.JSONException ignored) { }
             }
@@ -7004,12 +7121,44 @@ public class MainActivity extends Activity {
         return WorkMedia.isShareLink(link, true) ? "小红书" : WorkMedia.isShareLink(link, false) ? "抖音" : "快手";
     }
 
+    private EditText mediaSourceSearch(String hint) {
+        EditText search = new EditText(this);
+        search.setSingleLine(true);
+        search.setHint(hint);
+        search.setTextSize(13);
+        search.setTextColor(INK);
+        search.setHintTextColor(INK3);
+        search.setBackground(shape(TRACK, 12));
+        Drawable icon = getDrawable(R.drawable.record_search).mutate();
+        icon.setTint(INK2);
+        icon.setBounds(0, 0, dp(18), dp(18));
+        search.setCompoundDrawablesRelative(icon, null, null, null);
+        search.setCompoundDrawablePadding(dp(8));
+        search.setPadding(dp(12), 0, dp(12), 0);
+        return search;
+    }
+
+    private void onMediaSearchChanged(EditText search, Runnable update) {
+        search.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable text) { update.run(); }
+        });
+    }
+
+    private boolean matchesMediaSource(String link, String caption, String query) {
+        return query.isEmpty() || (caption + " " + link + " " + favoriteSourcePlatform(link))
+                .toLowerCase(Locale.ROOT).contains(query);
+    }
+
     private void showFavoriteSource(JSONObject source) {
         String link = source.optString("link");
         if (!isFavoriteSourceLink(link)) return;
         String platform = favoriteSourcePlatform(link);
         android.app.Dialog dialog = new android.app.Dialog(this);
-        LinearLayout panel = sheetPanel("作品来源", platform + (source.optBoolean("matched") ? " · 本机记录匹配" : ""));
+        String label = source.optBoolean("phoneImport") ? PHONE_MEDIA_KIND + " · 关联" + platform + "作品"
+                : platform + (source.optBoolean("matched") ? " · 本机记录匹配" : "");
+        LinearLayout panel = sheetPanel("作品来源", label);
         String caption = source.optString("caption");
         if (!caption.isEmpty()) {
             TextView title = homeLabel(caption, 14, INK, 650);
@@ -7270,7 +7419,7 @@ public class MainActivity extends Activity {
                     if (favoriteSources.remove(item.hash) != null) saveFavoriteSources();
                 } else if (adding) {
                     if (assignFavoriteGroup(item, group)) saveFavoriteGroups();
-                    if (rememberFavoriteSource(item.hash, source, false)) saveFavoriteSources();
+                    if (rememberFavoriteSource(item, source, false)) saveFavoriteSources();
                 }
                 if (adding && saved && (showingReader || showingWechat || showingKuaishou) && !isFinishing()) {
                     if (showingKuaishou) {
@@ -7564,6 +7713,8 @@ public class MainActivity extends Activity {
         private LinearLayout groupChips;
         private PostStatusStrip kuaishouPostStatus;
         private String activeGroup;
+        private String sourceQuery = "";
+        private final HashSet<String> matchingSources = new HashSet<>();
         private int category;
         private boolean selecting;
         private boolean busy;
@@ -7866,6 +8017,17 @@ public class MainActivity extends Activity {
                 manage.setContentDescription("管理分组");
                 manage.setOnClickListener(v -> manageGroups());
                 groups.addView(manage, new LinearLayout.LayoutParams(dp(44), dp(42)));
+
+                EditText search = mediaSourceSearch("按作品标题、链接或平台搜索");
+                LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, dp(42));
+                searchParams.setMargins(dp(20), dp(8), dp(20), 0);
+                root.addView(search, searchParams);
+                onMediaSearchChanged(search, () -> {
+                    sourceQuery = search.getText().toString().trim().toLowerCase(Locale.ROOT);
+                    setSelecting(false);
+                });
+                root.setFocusableInTouchMode(true);
+                root.requestFocus();
             }
 
             filterTrack = new FrameLayout(MainActivity.this);
@@ -8065,7 +8227,7 @@ public class MainActivity extends Activity {
                     boolean groupsChanged = false;
                     for (Media item : collected) {
                         groupsChanged |= assignFavoriteGroup(item, group);
-                        sourcesChanged |= rememberFavoriteSource(item.hash, source, false);
+                        sourcesChanged |= rememberFavoriteSource(item, source, false);
                     }
                     if (groupsChanged) saveFavoriteGroups();
                     if (sourcesChanged) saveFavoriteSources();
@@ -8096,7 +8258,38 @@ public class MainActivity extends Activity {
         }
 
         private boolean matchesCategory(Media item) {
-            return inFavoriteGroup(item) && (category == 0 || category == type(item));
+            return matchesFavoriteView(item) && (category == 0 || category == type(item));
+        }
+
+        private boolean matchesFavoriteView(Media item) {
+            return inFavoriteGroup(item) && (sourceQuery.isEmpty() || matchingSources.contains(item.hash));
+        }
+
+        private void updateSourceMatches() {
+            matchingSources.clear();
+            if (sourceQuery.isEmpty()) return;
+            HashSet<String> missing = new HashSet<>();
+            for (Media item : items) {
+                JSONObject source = favoriteSources.optJSONObject(item.hash);
+                String link = source == null ? "" : source.optString("link");
+                if (source != null && source.optBoolean("phoneImport") && PHONE_MEDIA_KIND.contains(sourceQuery))
+                    matchingSources.add(item.hash);
+                if (!isFavoriteSourceLink(link)) missing.add(item.hash);
+                else if (matchesMediaSource(link, source.optString("caption"), sourceQuery)) matchingSources.add(item.hash);
+            }
+            for (ScanRecord record : records) {
+                if (missing.isEmpty()) break;
+                if (!isFavoriteSourceLink(record.link)) continue;
+                boolean matches = matchesMediaSource(record.link, record.caption, sourceQuery);
+                synchronized (record) {
+                    for (Media item : record.items) {
+                        if (missing.remove(item.hash) && (matches
+                                || PHONE_MEDIA_KIND.equals(item.kind) && PHONE_MEDIA_KIND.contains(sourceQuery))) {
+                            matchingSources.add(item.hash);
+                        }
+                    }
+                }
+            }
         }
 
         private boolean inFavoriteGroup(Media item) {
@@ -8308,9 +8501,10 @@ public class MainActivity extends Activity {
         }
 
         private void render() {
+            updateSourceMatches();
             int[] counts = new int[categories.length];
             for (Media item : items) {
-                if (inFavoriteGroup(item)) {
+                if (matchesFavoriteView(item)) {
                     counts[0]++;
                     counts[type(item)]++;
                 }
@@ -8378,7 +8572,8 @@ public class MainActivity extends Activity {
                 String message = !loaded ? kuaishou ? "正在打开提取记录…" : wechat ? "正在读取表情…" : "正在读取收藏…"
                         : items.isEmpty() ? wechat ? "还没有导入表情\n选择电脑导出的 ZIP 后，图片和动图会显示在这里。"
                         : kuaishou ? "等待提取素材\n读取作品后，图片和视频会显示在这里" : "还没有收藏。在素材预览里点「收藏」即可添加。"
-                        : imported ? "这个分类没有素材" : "此分组或分类中没有收藏";
+                        : imported ? "这个分类没有素材" : sourceQuery.isEmpty()
+                        ? "此分组或分类中没有收藏" : "没有符合该作品来源的收藏";
                 TextView empty = label(message, kuaishou ? 12 : 14, INK2, false);
                 if (kuaishou) {
                     empty.setBackground(card(16));
