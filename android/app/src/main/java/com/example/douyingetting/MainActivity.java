@@ -229,6 +229,7 @@ public class MainActivity extends Activity {
     private boolean showingFavorites;
     private boolean showingGroupManager;
     private boolean showingRecycleBin;
+    private boolean showingPasswordSettings;
     private RecycleBin recycleBin;
     private FavoritesScreen favoriteScreen;
     private final java.util.LinkedHashSet<String> favoriteGroups = new java.util.LinkedHashSet<>();
@@ -1230,6 +1231,7 @@ public class MainActivity extends Activity {
         showingFavorites = false;
         showingGroupManager = false;
         showingRecycleBin = false;
+        showingPasswordSettings = false;
         showingMy = false;
     }
 
@@ -1971,7 +1973,15 @@ public class MainActivity extends Activity {
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(18), dp(8), dp(18), dp(20));
         scroll.addView(body);
-        body.addView(homeLabel("删除的记录和收藏保留 7 天。", 13, INK2, 450));
+        LinearLayout retention = new LinearLayout(this);
+        retention.setGravity(Gravity.CENTER_VERTICAL);
+        retention.setPadding(dp(12), dp(10), dp(12), dp(10));
+        retention.setBackground(shape(ACCENT_SOFT, 14));
+        retention.addView(icon(R.drawable.blue_info, ACCENT), new LinearLayout.LayoutParams(dp(17), dp(17)));
+        LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(0, -2, 1);
+        noteParams.leftMargin = dp(8);
+        retention.addView(homeLabel("删除的记录和收藏保留 7 天。", 12, INK, 550), noteParams);
+        body.addView(retention, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         body.addView(list);
@@ -1988,29 +1998,66 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (!showingRecycleBin || !list.isAttachedToWindow()) return;
                 list.removeAllViews();
-                if (entries.isEmpty()) list.addView(homeLabel("回收站为空", 14, INK2, 450));
-                for (RecycleBin.Entry entry : entries) {
-                    String group = entry.data.optString("group");
-                    boolean locked = !entry.record && !recyclePin(entry).isEmpty();
-                    String title = entry.record ? entry.data.optString("title", "提取记录")
-                            : locked ? "私密收藏素材" : "收藏素材";
-                    long days = (entry.expiresAt - now + RecycleBin.DAY - 1) / RecycleBin.DAY;
-                    String detail = (entry.record ? "提取记录" : groupName(group)) + " · 剩余 " + days + " 天";
-                    addMenuCard(list, entry.record ? R.drawable.blue_history : R.drawable.blue_folder, title, detail,
-                            v -> confirmRecycleRestore(entry, title, list));
-                    LinearLayout row = (LinearLayout) list.getChildAt(list.getChildCount() - 1);
-                    TextView restore = (TextView) row.getChildAt(row.getChildCount() - 1);
-                    restore.setText("恢复");
-                    restore.setTextSize(13);
-                    restore.setTextColor(ACCENT);
-                    if (!entry.record && !locked) {
-                        row.removeViewAt(0);
-                        row.addView(recordCover(new Media(entry.payload, "", "image/*", "", "", null, false)),
-                                0, new LinearLayout.LayoutParams(dp(52), dp(52)));
-                    }
+                if (entries.isEmpty()) {
+                    LinearLayout empty = new LinearLayout(this);
+                    empty.setOrientation(LinearLayout.VERTICAL);
+                    empty.setGravity(Gravity.CENTER_HORIZONTAL);
+                    empty.setPadding(0, dp(84), 0, dp(30));
+                    empty.addView(sectionIcon(R.drawable.dialog_trash, ACCENT, ACCENT_SOFT),
+                            new LinearLayout.LayoutParams(dp(64), dp(64)));
+                    TextView title = homeLabel("回收站为空", 18, INK, 750);
+                    title.setPadding(0, dp(12), 0, dp(4));
+                    empty.addView(title);
+                    empty.addView(homeLabel("最近没有可恢复的记录或收藏。", 12, INK2, 450));
+                    list.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+                    return;
                 }
+                addRecycleSection(list, entries, true, now);
+                addRecycleSection(list, entries, false, now);
             });
         });
+    }
+
+    private void addRecycleSection(LinearLayout list, ArrayList<RecycleBin.Entry> entries, boolean records, long now) {
+        LinearLayout section = null;
+        for (RecycleBin.Entry entry : entries) {
+            if (entry.record != records) continue;
+            if (section == null) section = addSettingsSection(list, records ? "提取记录" : "收藏素材");
+            boolean locked = !recyclePin(entry).isEmpty();
+            String title = recycleTitle(entry, locked);
+            long days = (entry.expiresAt - now + RecycleBin.DAY - 1) / RecycleBin.DAY;
+            String prefix = entry.record ? entry.data.optString("platform")
+                    : locked ? "需验证密码" : groupName(entry.data.optString("group"));
+            android.text.SpannableStringBuilder detail = new android.text.SpannableStringBuilder();
+            if (!prefix.isEmpty()) detail.append(prefix).append(" · ");
+            int remaining = detail.length();
+            detail.append("剩余 ").append(String.valueOf(days)).append(" 天");
+            if (days <= 1) detail.setSpan(new android.text.style.ForegroundColorSpan(DANGER), remaining,
+                    detail.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            TextView restore = homeLabel("恢复", 12, INK, 750);
+            restore.setGravity(Gravity.CENTER);
+            restore.setPadding(dp(9), dp(5), dp(9), dp(5));
+            restore.setBackground(shape(ACCENT_SOFT, 9));
+            LinearLayout row = settingsSectionRow(recycleCover(entry, locked), title, detail, restore);
+            row.setOnClickListener(v -> confirmRecycleRestore(entry, title, list));
+            pressFeedback(row);
+            if (section.getChildCount() != 0) section.addView(rowDivider());
+            section.addView(row);
+        }
+    }
+
+    private String recycleTitle(RecycleBin.Entry entry, boolean locked) {
+        if (entry.record) return entry.data.optString("title", "提取记录");
+        if (locked) return "私密收藏素材";
+        JSONObject source = entry.data.optJSONObject("source");
+        String caption = source == null ? "" : source.optString("caption");
+        return caption.isEmpty() ? "收藏素材" : caption;
+    }
+
+    private View recycleCover(RecycleBin.Entry entry, boolean locked) {
+        if (entry.record || locked) return sectionIcon(entry.record ? R.drawable.blue_history : R.drawable.blue_lock,
+                ACCENT, ACCENT_SOFT);
+        return recordCover(new Media(entry.payload, "", "image/*", "", "", null, false));
     }
 
     private String recyclePin(RecycleBin.Entry entry) {
@@ -2020,11 +2067,20 @@ public class MainActivity extends Activity {
     private void confirmRecycleRestore(RecycleBin.Entry entry, String title, LinearLayout list) {
         if (recordTransferBusy) return;
         String group = entry.data.optString("group");
-        String destination = entry.record ? "记录和暂存素材将恢复到提取记录。"
-                : "素材将恢复到「" + groupName(favoriteGroups.contains(group) ? group : "") + "」。";
-        Runnable confirm = () -> showConfirmation(R.drawable.record_import, false, "恢复此项？",
-                destination, "取消", "恢复", null, () -> restoreRecycleEntry(entry, list), title);
         String pin = recyclePin(entry);
+        Runnable confirm = () -> {
+            android.app.Dialog dialog = new android.app.Dialog(this);
+            LinearLayout panel = sheetPanel(entry.record ? "恢复提取记录？" : "恢复收藏素材？", null);
+            String destination = entry.record ? "恢复到提取记录，包含暂存素材"
+                    : "恢复到收藏夹「" + groupName(favoriteGroups.contains(group) ? group : "") + "」";
+            LinearLayout summary = settingsSectionRow(recycleCover(entry, !pin.isEmpty()), title, destination, null);
+            summary.setBackground(shape(BG, 13));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.topMargin = dp(12);
+            panel.addView(summary, params);
+            dialogActions(dialog, panel, "取消", "恢复", false, null, () -> restoreRecycleEntry(entry, list));
+            presentBottomSheet(dialog, panel);
+        };
         if (pin.isEmpty()) confirm.run();
         else showPin("验证私密收藏夹密码", group, "验证", "密码不正确", value -> matchesPin(value, pin), confirm);
     }
@@ -2979,29 +3035,88 @@ public class MainActivity extends Activity {
     }
 
     private void showPasswordSettings() {
-        android.app.Dialog dialog = new android.app.Dialog(this);
-        LinearLayout panel = sheetPanel("密码设置", null);
-        ScrollView scroll = dialogScroll();
-        panel.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        resetPages();
+        showingPasswordSettings = true;
+        LinearLayout root = pageRoot();
+        root.setClickable(true);
+        header(root, "密码设置", true, this::showSettings);
+        ScrollView scroll = new ScrollView(this);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout choices = new LinearLayout(this);
         choices.setOrientation(LinearLayout.VERTICAL);
+        choices.setPadding(dp(18), dp(8), dp(18), dp(24));
         scroll.addView(choices);
-        addSheetChoice(choices, "微信表情导入", "修改访问密码", R.drawable.wechat_import, false,
-                () -> dismissCardDialog(dialog, () -> changePin("微信表情导入", this::matchesWechatPin, verifier ->
-                        getPreferences(MODE_PRIVATE).edit().putString("wechat_pin", verifier).apply())));
+        LinearLayout functions = addSettingsSection(choices, "功能密码");
+        int wechatSurface = Color.parseColor(darkMode ? "#203B35" : "#E3F3E9");
+        addPasswordRow(functions, sectionIcon(R.drawable.wechat_import, ACCENT, wechatSurface), "微信表情导入", "修改访问密码",
+                () -> changePin("微信表情导入", this::matchesWechatPin, verifier ->
+                        getPreferences(MODE_PRIVATE).edit().putString("wechat_pin", verifier).apply()));
         if (!privateFavoritePins.isEmpty()) {
-            choices.addView(settingsGroupTitle("私密收藏夹", 14));
+            LinearLayout folders = addSettingsSection(choices, "私密收藏夹");
             for (String group : favoriteGroups) {
-                String stored = privateFavoritePins.get(group);
-                if (stored == null) continue;
-                addSheetChoice(choices, group, "修改收藏夹密码", R.drawable.blue_folder, false,
-                        () -> dismissCardDialog(dialog, () -> changePin(group, pin -> matchesPin(pin, stored), verifier -> {
+                if (!privateFavoritePins.containsKey(group)) continue;
+                addPasswordRow(folders, sectionIcon(R.drawable.blue_lock, ACCENT, ACCENT_SOFT), group, "修改收藏夹密码",
+                        () -> changePin("收藏夹 · " + group, pin -> matchesPin(pin, privateFavoritePins.get(group)), verifier -> {
                             privateFavoritePins.put(group, verifier);
                             saveFavoriteGroups();
-                        })));
+                        }));
             }
         }
-        showBottomSheet(dialog, panel);
+        presentSecondary(root);
+    }
+
+    private void addPasswordRow(LinearLayout section, View leading, String title, String detail, Runnable action) {
+        if (section.getChildCount() != 0) section.addView(rowDivider());
+        LinearLayout row = settingsSectionRow(leading, title, detail, icon(R.drawable.home_chevron, INK3));
+        row.setOnClickListener(v -> action.run());
+        pressFeedback(row);
+        section.addView(row);
+    }
+
+    private LinearLayout addSettingsSection(LinearLayout parent, String title) {
+        TextView heading = settingsGroupTitle(title, 16);
+        heading.setTextSize(12);
+        heading.setTextColor(INK2);
+        parent.addView(heading);
+        LinearLayout section = new LinearLayout(this);
+        section.setOrientation(LinearLayout.VERTICAL);
+        section.setBackground(card(16));
+        section.setClipToOutline(true);
+        parent.addView(section, new LinearLayout.LayoutParams(-1, -2));
+        return section;
+    }
+
+    private View sectionIcon(int resource, int tint, int background) {
+        ImageView image = icon(resource, tint);
+        image.setPadding(dp(10), dp(10), dp(10), dp(10));
+        image.setBackground(shape(background, 12));
+        return image;
+    }
+
+    private LinearLayout settingsSectionRow(View leading, String title, CharSequence detail, View trailing) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(11), dp(12), dp(11));
+        row.setMinimumHeight(dp(66));
+        row.addView(leading, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wordsParams = new LinearLayout.LayoutParams(0, -2, 1);
+        wordsParams.setMargins(dp(11), 0, dp(8), 0);
+        row.addView(words, wordsParams);
+        TextView name = homeLabel(title, 14, INK, 750);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        words.addView(name);
+        TextView description = homeLabel("", 12, INK2, 450);
+        description.setPadding(0, dp(3), 0, 0);
+        description.setText(detail);
+        words.addView(description);
+        if (trailing != null) {
+            int width = trailing instanceof ImageView ? dp(16) : -2;
+            row.addView(trailing, new LinearLayout.LayoutParams(width, width));
+        }
+        return row;
     }
 
     private void changePin(String target, java.util.function.Predicate<String> matchesCurrent,
@@ -5120,6 +5235,7 @@ public class MainActivity extends Activity {
             if (!isOwnedRecordFolder(record)) return null;
             return recycleBin.stage(record.folder, new JSONObject()
                     .put("record", true).put("legacy", "legacy".equals(record.id))
+                    .put("platform", "legacy".equals(record.id) ? "" : record.kuaishou ? "快手" : isXhsLink(record.link) ? "小红书" : "抖音")
                     .put("title", record.caption.isEmpty() ? record.link : record.caption));
         } catch (java.io.IOException | org.json.JSONException error) {
             return null;
@@ -7491,7 +7607,7 @@ public class MainActivity extends Activity {
     private void showPin(String title, String detail, String confirmLabel, String rejectedMessage,
                          java.util.function.Predicate<String> accept, Runnable accepted) {
         android.app.Dialog dialog = new android.app.Dialog(this);
-        LinearLayout panel = dialogPanel(0, false, title, detail);
+        LinearLayout panel = sheetPanel(title, detail);
         FrameLayout field = new FrameLayout(this);
         LinearLayout.LayoutParams fieldParams = new LinearLayout.LayoutParams(-1, dp(46));
         fieldParams.topMargin = dp(16);
@@ -7532,8 +7648,9 @@ public class MainActivity extends Activity {
             error.setText("");
             for (int i = 0; i < digits.length; i++) {
                 digits[i].setText(i < length ? "●" : "");
-                GradientDrawable border = shape(TRACK, 6);
-                border.setStroke(dp(1), i == Math.min(length, digits.length - 1) ? ACCENT : INK3);
+                boolean active = i == length;
+                GradientDrawable border = shape(active ? ACCENT_SOFT : BG, 8);
+                border.setStroke(dp(active ? 2 : 1), active ? ACCENT : LINE);
                 digits[i].setBackground(border);
             }
         };
@@ -7554,10 +7671,12 @@ public class MainActivity extends Activity {
             dismissCardDialog(dialog, accepted);
         };
         LinearLayout actions = new LinearLayout(this);
-        panel.addView(actions);
+        LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-1, -2);
+        actionParams.topMargin = dp(8);
+        panel.addView(actions, actionParams);
         actions.addView(dialogButton("取消", false, false, v -> dismissCardDialog(dialog, null)),
                 new LinearLayout.LayoutParams(0, -2, 1));
-        LinearLayout.LayoutParams confirm = new LinearLayout.LayoutParams(0, -2, 1);
+        LinearLayout.LayoutParams confirm = new LinearLayout.LayoutParams(0, -2, 1.55f);
         confirm.leftMargin = dp(8);
         actions.addView(dialogButton(confirmLabel, true, false, v -> submit.run()), confirm);
         inputPin.setOnEditorActionListener((v, action, event) -> {
@@ -7568,7 +7687,7 @@ public class MainActivity extends Activity {
         inputPin.requestFocus();
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                 | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-        showCardDialog(dialog, panel);
+        presentBottomSheet(dialog, panel);
     }
 
     private boolean canChangeFavorite(String hash) {
@@ -9570,6 +9689,7 @@ public class MainActivity extends Activity {
         else if (showingKuaishou) favoriteScreen.back();
         else if (showingGroupManager) favoriteScreen.leaveGroupManager();
         else if (showingRecycleBin) showMy();
+        else if (showingPasswordSettings) showSettings();
         else if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) returnToRecordsOrigin();
