@@ -228,6 +228,8 @@ public class MainActivity extends Activity {
     private boolean showingSettings;
     private boolean showingFavorites;
     private boolean showingGroupManager;
+    private boolean showingRecycleBin;
+    private RecycleBin recycleBin;
     private FavoritesScreen favoriteScreen;
     private final java.util.LinkedHashSet<String> favoriteGroups = new java.util.LinkedHashSet<>();
     private final java.util.HashMap<String, String> favoriteAssignments = new java.util.HashMap<>();
@@ -421,12 +423,12 @@ public class MainActivity extends Activity {
 
     private static final class PendingRecordDeletion {
         final ScanRecord record;
-        final File staged;
+        final RecycleBin.Entry entry;
         final long expiresAt;
 
-        PendingRecordDeletion(ScanRecord record, File staged) {
+        PendingRecordDeletion(ScanRecord record, RecycleBin.Entry entry) {
             this.record = record;
-            this.staged = staged;
+            this.entry = entry;
             expiresAt = android.os.SystemClock.elapsedRealtime() + RECORD_UNDO_MS;
         }
     }
@@ -435,6 +437,7 @@ public class MainActivity extends Activity {
         applyPalette();
         setTheme(darkMode ? R.style.BlueDark : R.style.BlueLight);
         super.onCreate(state);
+        recycleBin = new RecycleBin(new File(getFilesDir(), "record-trash"));
         decodeEnabled = getPreferences(MODE_PRIVATE).getBoolean("title_decode", true);
         motionEnabled = getPreferences(MODE_PRIVATE).getBoolean("page_motion", true);
         douyinPageDelayMs = getPreferences(MODE_PRIVATE).getInt("douyin_page_delay_ms", 2000);
@@ -455,7 +458,6 @@ public class MainActivity extends Activity {
         try {
             favoriteSources = new JSONObject(getPreferences(MODE_PRIVATE).getString("favorite_sources", "{}"));
         } catch (org.json.JSONException ignored) { }
-        cleanExpiredRecordTrash();
         batch.restore(getPreferences(MODE_PRIVATE).getString("extraction_queue", "[]"));
         showHome();
         updateSystemBars();
@@ -1227,6 +1229,7 @@ public class MainActivity extends Activity {
         showingSettings = false;
         showingFavorites = false;
         showingGroupManager = false;
+        showingRecycleBin = false;
         showingMy = false;
     }
 
@@ -1952,8 +1955,123 @@ public class MainActivity extends Activity {
         addMenuCard(page, R.drawable.blue_history, "提取记录", "按平台查看已提取的作品", v -> openRecordsFromMy());
         addMenuCard(page, R.drawable.extract_download, "导出备份", "扫描记录 · 收藏表情 · 原文件", v -> chooseBackupScope());
         addMenuCard(page, R.drawable.record_import, "导入备份", "恢复记录和收藏，重复内容自动跳过", v -> pickRecordArchive(false));
+        addMenuCard(page, R.drawable.dialog_trash, "回收站", "恢复 7 天内删除的记录和收藏", v -> showRecycleBin());
         addMenuCard(page, R.drawable.blue_info, "关于咻咿", "版本信息与使用说明", v -> showAbout());
         showMainPage(root, 2);
+    }
+
+    private void showRecycleBin() {
+        resetPages();
+        showingRecycleBin = true;
+        LinearLayout root = pageRoot();
+        header(root, "回收站", true, this::showMy);
+        ScrollView scroll = new ScrollView(this);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(18), dp(8), dp(18), dp(20));
+        scroll.addView(body);
+        body.addView(homeLabel("删除的记录和收藏保留 7 天。", 13, INK2, 450));
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        body.addView(list);
+        presentSecondary(root);
+        loadRecycleBin(list);
+    }
+
+    private void loadRecycleBin(LinearLayout list) {
+        list.removeAllViews();
+        list.addView(homeLabel("正在读取回收站…", 14, INK2, 450));
+        worker.execute(() -> {
+            long now = System.currentTimeMillis();
+            ArrayList<RecycleBin.Entry> entries = recycleBin.entries(now);
+            runOnUiThread(() -> {
+                if (!showingRecycleBin || !list.isAttachedToWindow()) return;
+                list.removeAllViews();
+                if (entries.isEmpty()) list.addView(homeLabel("回收站为空", 14, INK2, 450));
+                for (RecycleBin.Entry entry : entries) {
+                    String group = entry.data.optString("group");
+                    boolean locked = !entry.record && !recyclePin(entry).isEmpty();
+                    String title = entry.record ? entry.data.optString("title", "提取记录")
+                            : locked ? "私密收藏素材" : "收藏素材";
+                    long days = (entry.expiresAt - now + RecycleBin.DAY - 1) / RecycleBin.DAY;
+                    String detail = (entry.record ? "提取记录" : groupName(group)) + " · 剩余 " + days + " 天";
+                    addMenuCard(list, entry.record ? R.drawable.blue_history : R.drawable.blue_folder, title, detail,
+                            v -> confirmRecycleRestore(entry, title, list));
+                    LinearLayout row = (LinearLayout) list.getChildAt(list.getChildCount() - 1);
+                    TextView restore = (TextView) row.getChildAt(row.getChildCount() - 1);
+                    restore.setText("恢复");
+                    restore.setTextSize(13);
+                    restore.setTextColor(ACCENT);
+                    if (!entry.record && !locked) {
+                        row.removeViewAt(0);
+                        row.addView(recordCover(new Media(entry.payload, "", "image/*", "", "", null, false)),
+                                0, new LinearLayout.LayoutParams(dp(52), dp(52)));
+                    }
+                }
+            });
+        });
+    }
+
+    private String recyclePin(RecycleBin.Entry entry) {
+        return privateFavoritePins.getOrDefault(entry.data.optString("group"), entry.data.optString("pin"));
+    }
+
+    private void confirmRecycleRestore(RecycleBin.Entry entry, String title, LinearLayout list) {
+        if (recordTransferBusy) return;
+        String group = entry.data.optString("group");
+        String destination = entry.record ? "记录和暂存素材将恢复到提取记录。"
+                : "素材将恢复到「" + groupName(favoriteGroups.contains(group) ? group : "") + "」。";
+        Runnable confirm = () -> showConfirmation(R.drawable.record_import, false, "恢复此项？",
+                destination, "取消", "恢复", null, () -> restoreRecycleEntry(entry, list), title);
+        String pin = recyclePin(entry);
+        if (pin.isEmpty()) confirm.run();
+        else showPin("验证私密收藏夹密码", group, "验证", "密码不正确", value -> matchesPin(value, pin), confirm);
+    }
+
+    private void restoreRecycleEntry(RecycleBin.Entry entry, LinearLayout list) {
+        if (recordTransferBusy) return;
+        recordTransferBusy = true;
+        boolean legacy = entry.record && entry.data.optBoolean("legacy");
+        File target = entry.record ? legacy ? new File(getFilesDir(), "media") : new File(recordsFolder(), entry.name)
+                : new File(new File(getFilesDir(), "favorites"), entry.name);
+        worker.execute(() -> {
+            try {
+                recycleBin.restore(entry, target);
+                ArrayList<ScanRecord> restored = entry.record
+                        ? readRecords(new HashSet<>(Collections.singletonList(legacy ? "legacy" : entry.name))) : null;
+                if (restored != null) restored.removeIf(record -> !target.equals(record.folder));
+                runOnUiThread(() -> {
+                    recordTransferBusy = false;
+                    if (entry.record) {
+                        pendingRecordDeletions.removeIf(deletion -> entry.container.equals(deletion.entry.container));
+                        refreshRecordUndoNotice();
+                        for (ScanRecord record : restored) restoreRecordListEntry(record);
+                    } else {
+                        String hash = favoriteFileHash(target);
+                        String group = entry.data.optString("group");
+                        if (favoriteGroups.contains(group)) favoriteAssignments.put(hash, group);
+                        else favoriteAssignments.remove(hash);
+                        saveFavoriteGroups();
+                        try { favoriteSources.put(hash, entry.data.optJSONObject("source")); }
+                        catch (org.json.JSONException ignored) { }
+                        saveFavoriteSources();
+                    }
+                    if (showingRecycleBin && list.isAttachedToWindow()) loadRecycleBin(list);
+                    else if (showingMy) showMy();
+                    else if (!entry.record && showingFavorites) showFavorites();
+                    showBottomNotice(entry.record ? "已恢复提取记录" : "已恢复收藏素材");
+                });
+            } catch (java.io.IOException error) {
+                runOnUiThread(() -> {
+                    recordTransferBusy = false;
+                    if (showingRecycleBin && list.isAttachedToWindow()) loadRecycleBin(list);
+                    String detail = System.currentTimeMillis() >= entry.expiresAt ? "这项内容已超过 7 天的保留期限。"
+                            : target.exists() ? "原位置已有同一项，回收站里的副本仍会保留。" : "请稍后重试。";
+                    showMessage(R.drawable.record_import, "未能恢复", detail);
+                });
+            }
+        });
     }
 
     private void showAbout() {
@@ -3840,7 +3958,7 @@ public class MainActivity extends Activity {
     }
 
     private void confirmDelete(ScanRecord record) {
-        showConfirmation(0, true, "删除这条记录？", "记录和暂存素材将被移除，"
+        showConfirmation(0, true, "删除这条记录？", "记录和暂存素材将在回收站保留 7 天，"
                         + RECORD_UNDO_MS / 1000 + " 秒内可撤销。已保存的文件仍在下载目录。",
                 "保留记录", "删除记录", null, () -> deleteWithUndo(record),
                 record.caption.isEmpty() ? null : record.caption);
@@ -3864,7 +3982,7 @@ public class MainActivity extends Activity {
         }
         refreshRecordList.run();
         worker.execute(() -> {
-            File staged = stageRecordDeletion(record);
+            RecycleBin.Entry staged = stageRecordDeletion(record);
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 if (staged == null) {
@@ -3889,10 +4007,7 @@ public class MainActivity extends Activity {
         pendingRecordDeletions.add(pending);
         long remaining = Math.max(0, pending.expiresAt - android.os.SystemClock.elapsedRealtime());
         stripHandler.postDelayed(() -> {
-            if (pendingRecordDeletions.remove(pending)) {
-                worker.execute(() -> purgeRecordTrash(pending.staged.getParentFile()));
-                refreshRecordUndoNotice();
-            }
+            if (pendingRecordDeletions.remove(pending)) refreshRecordUndoNotice();
         }, remaining);
     }
 
@@ -3917,13 +4032,9 @@ public class MainActivity extends Activity {
         worker.execute(() -> {
             ArrayList<ScanRecord> restored = new ArrayList<>();
             for (PendingRecordDeletion deletion : pending) {
-                if (requestedAt >= deletion.expiresAt) {
-                    purgeRecordTrash(deletion.staged.getParentFile());
-                    continue;
-                }
+                if (requestedAt >= deletion.expiresAt) continue;
                 try {
-                    Files.move(deletion.staged.toPath(), deletion.record.folder.toPath());
-                    deletion.staged.getParentFile().delete();
+                    recycleBin.restore(deletion.entry, deletion.record.folder);
                     restored.add(deletion.record);
                 } catch (java.io.IOException ignored) { }
             }
@@ -4889,7 +5000,7 @@ public class MainActivity extends Activity {
         }
         File legacy = new File(getFilesDir(), "media");
         File[] oldFiles = legacy.listFiles();
-        if (included == null && oldFiles != null && oldFiles.length > 0) {
+        if ((included == null || included.contains("legacy")) && oldFiles != null && oldFiles.length > 0) {
             ScanRecord old = new ScanRecord("legacy", "旧版提取结果（来源链接未知）", legacy.lastModified(), legacy);
             old.complete = true;
             for (File file : oldFiles) {
@@ -5004,35 +5115,15 @@ public class MainActivity extends Activity {
         catch (java.io.IOException error) { return false; }
     }
 
-    private File recordTrashFolder() {
-        return new File(getFilesDir(), "record-trash");
-    }
-
-    private File stageRecordDeletion(ScanRecord record) {
-        File container = null;
+    private RecycleBin.Entry stageRecordDeletion(ScanRecord record) {
         try {
             if (!isOwnedRecordFolder(record)) return null;
-            Files.createDirectories(recordTrashFolder().toPath());
-            container = Files.createTempDirectory(recordTrashFolder().toPath(), "deleted-").toFile();
-            File staged = new File(container, "record");
-            Files.move(record.folder.toPath(), staged.toPath());
-            return staged;
-        } catch (java.io.IOException error) {
-            if (container != null) container.delete();
+            return recycleBin.stage(record.folder, new JSONObject()
+                    .put("record", true).put("legacy", "legacy".equals(record.id))
+                    .put("title", record.caption.isEmpty() ? record.link : record.caption));
+        } catch (java.io.IOException | org.json.JSONException error) {
             return null;
         }
-    }
-
-    private void purgeRecordTrash(File container) {
-        if (deleteFlatFolder(new File(container, "record"))) container.delete();
-    }
-
-    private void cleanExpiredRecordTrash() {
-        File[] existing = recordTrashFolder().listFiles(File::isDirectory);
-        if (existing == null || existing.length == 0) return;
-        stripHandler.postDelayed(() -> worker.execute(() -> {
-            for (File container : existing) purgeRecordTrash(container);
-        }), RECORD_UNDO_MS);
     }
 
     private void askCameraPermission(PermissionRequest request) {
@@ -6768,7 +6859,7 @@ public class MainActivity extends Activity {
                     v -> {
                         if (favorite) {
                             showConfirmation(R.drawable.dialog_heart, true, "取消收藏这项素材？",
-                                    "素材将从收藏夹移除。提取记录和已保存的文件仍会保留。",
+                                    "素材将在回收站保留 7 天。提取记录和已保存的文件仍会保留。",
                                     "保留收藏", "取消收藏", null,
                                     () -> dismissCardDialog(dialog, () -> setFavorite(item, false, "", work)));
                         } else dismissCardDialog(dialog, () -> showFavoriteDestination(null, "", 1,
@@ -7652,6 +7743,7 @@ public class MainActivity extends Activity {
                     favoriteAssignments.replaceAll((hash, group) -> oldName.equals(group) ? value : group);
                     String pin = privateFavoritePins.remove(oldName);
                     if (pin != null) privateFavoritePins.put(value, pin);
+                    worker.execute(() -> recycleBin.renameGroup(oldName, value));
                     if (favoriteScreen != null && oldName.equals(favoriteScreen.activeGroup)) favoriteScreen.activeGroup = value;
                 }
                 saveFavoriteGroups();
@@ -7687,17 +7779,15 @@ public class MainActivity extends Activity {
             showTopNotice("请先从收藏页解锁此素材所在的私密收藏夹");
             return;
         }
+        if (!adding) {
+            trashFavorites(Collections.singletonList(item), null);
+            return;
+        }
         worker.execute(() -> {
             String message;
             try {
-                if (adding) {
-                    copyMediaToFavorites(item);
-                    message = "已收藏到「" + groupName(group) + "」";
-                } else {
-                    if (!Files.deleteIfExists(favoriteFile(item).toPath()))
-                        throw new java.io.IOException("素材已不在收藏夹中");
-                    message = "已取消收藏";
-                }
+                copyMediaToFavorites(item);
+                message = "已收藏到「" + groupName(group) + "」";
             } catch (Exception error) { message = "收藏操作失败：" + error.getMessage(); }
             String result = message;
             runOnUiThread(() -> {
@@ -7705,11 +7795,11 @@ public class MainActivity extends Activity {
                 if (!saved) {
                     if (favoriteAssignments.remove(item.hash) != null) saveFavoriteGroups();
                     if (favoriteSources.remove(item.hash) != null) saveFavoriteSources();
-                } else if (adding) {
+                } else {
                     if (assignFavoriteGroup(item, group)) saveFavoriteGroups();
                     if (rememberFavoriteSource(item, source, false)) saveFavoriteSources();
                 }
-                if (adding && saved && (showingReader || showingWechat || showingKuaishou) && !isFinishing()) {
+                if (saved && (showingReader || showingWechat || showingKuaishou) && !isFinishing()) {
                     if (showingKuaishou) {
                         FavoritesScreen screen = favoriteScreen;
                         showBottomNotice("已收藏", "查看收藏", () -> openFavorites(screen::restoreKuaishou));
@@ -7717,12 +7807,53 @@ public class MainActivity extends Activity {
                     else showFavoriteNotice();
                     return;
                 }
-                if (showingFavorites && !saved && favoriteScreen != null) {
-                    favoriteScreen.items.removeIf(media -> item.hash.equals(media.hash));
-                    favoriteScreen.selected.removeIf(media -> item.hash.equals(media.hash));
+                showBottomNotice(result);
+            });
+        });
+    }
+
+    private void trashFavorites(List<Media> items, Runnable finished) {
+        java.util.LinkedHashMap<Media, JSONObject> metadata = new java.util.LinkedHashMap<>();
+        try {
+            for (Media item : items) {
+                if (!canChangeFavorite(item.hash)) continue;
+                String group = favoriteAssignments.getOrDefault(item.hash, "");
+                metadata.put(item, new JSONObject().put("group", group)
+                        .put("pin", privateFavoritePins.get(group)).put("source", favoriteSources.optJSONObject(item.hash)));
+            }
+        } catch (org.json.JSONException error) {
+            if (finished != null) finished.run();
+            showMessage(R.drawable.dialog_trash, "未移入回收站", "无法读取素材信息，请稍后重试。");
+            return;
+        }
+        worker.execute(() -> {
+            HashSet<String> removed = new HashSet<>();
+            metadata.forEach((item, entry) -> {
+                try {
+                    recycleBin.stage(favoriteFile(item), entry);
+                    removed.add(item.hash);
+                } catch (java.io.IOException | org.json.JSONException ignored) { }
+            });
+            runOnUiThread(() -> {
+                boolean groupsChanged = false;
+                boolean sourcesChanged = false;
+                for (String hash : removed) {
+                    groupsChanged |= favoriteAssignments.remove(hash) != null;
+                    sourcesChanged |= favoriteSources.remove(hash) != null;
+                }
+                if (groupsChanged) saveFavoriteGroups();
+                if (sourcesChanged) saveFavoriteSources();
+                if ((showingFavorites || showingGroupManager) && favoriteScreen != null) {
+                    favoriteScreen.items.removeIf(media -> removed.contains(media.hash));
+                    favoriteScreen.selected.removeIf(media -> removed.contains(media.hash));
+                    if (favoriteScreen.selected.isEmpty()) favoriteScreen.selecting = false;
                     favoriteScreen.render();
                 }
-                showBottomNotice(result);
+                if (finished != null) finished.run();
+                int failed = items.size() - removed.size();
+                if (failed == 0) showBottomNotice("已移入回收站 " + removed.size() + " 项");
+                else showMessage(R.drawable.dialog_trash, "有 " + failed + " 项未移入回收站",
+                        "已移入 " + removed.size() + " 项，可重新选择未移入的素材后重试。");
             });
         });
     }
@@ -7959,6 +8090,9 @@ public class MainActivity extends Activity {
     }
 
     private class FavoritesScreen {
+        private android.widget.GridView favoriteGrid;
+        private final ArrayList<Media> visibleFavorites = new ArrayList<>();
+        private final android.util.LruCache<Media, Drawable.ConstantState> favoriteThumbnails = new android.util.LruCache<>(60);
         private final boolean wechat;
         private final boolean kuaishou;
         private final boolean imported;
@@ -8347,15 +8481,16 @@ public class MainActivity extends Activity {
                     int previous = category;
                     category = target;
                     positionFilter(motionEnabled);
-                    list.animate().cancel();
+                    View results = imported ? list : favoriteGrid;
+                    results.animate().cancel();
                     render();
                     if (motionEnabled) {
-                        list.setAlpha(0f);
-                        list.setTranslationX(dp(previous < target ? 12 : -12));
-                        list.animate().alpha(1f).translationX(0f).setDuration(220).start();
+                        results.setAlpha(0f);
+                        results.setTranslationX(dp(previous < target ? 12 : -12));
+                        results.animate().alpha(1f).translationX(0f).setDuration(220).start();
                     } else {
-                        list.setAlpha(1f);
-                        list.setTranslationX(0f);
+                        results.setAlpha(1f);
+                        results.setTranslationX(0f);
                     }
                 });
                 filters[i] = tab;
@@ -8368,11 +8503,38 @@ public class MainActivity extends Activity {
                 View divider = new View(MainActivity.this);
                 divider.setBackgroundColor(LINE);
                 root.addView(divider, new LinearLayout.LayoutParams(-1, 1));
-            } else {
+            } else if (wechat) {
                 ScrollView scroll = new ScrollView(MainActivity.this);
                 root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
                 list.setPadding(dp(20), dp(12), dp(20), dp(20));
                 scroll.addView(list);
+            } else {
+                favoriteGrid = new android.widget.GridView(MainActivity.this);
+                favoriteGrid.setNumColumns(3);
+                favoriteGrid.setHorizontalSpacing(dp(6));
+                favoriteGrid.setVerticalSpacing(dp(8));
+                favoriteGrid.setPadding(dp(20), dp(20), dp(20), dp(20));
+                favoriteGrid.setClipToPadding(false);
+                favoriteGrid.setStretchMode(android.widget.GridView.STRETCH_COLUMN_WIDTH);
+                favoriteGrid.setSelector(android.R.color.transparent);
+                FrameLayout results = new FrameLayout(MainActivity.this);
+                root.addView(results, new LinearLayout.LayoutParams(-1, 0, 1));
+                results.addView(favoriteGrid, new FrameLayout.LayoutParams(-1, -1));
+                list.setPadding(dp(20), dp(12), dp(20), dp(20));
+                results.addView(list, new FrameLayout.LayoutParams(-1, -1));
+                favoriteGrid.setEmptyView(list);
+                favoriteGrid.setAdapter(new android.widget.BaseAdapter() {
+                    @Override public int getCount() { return visibleFavorites.size(); }
+                    @Override public Media getItem(int position) { return visibleFavorites.get(position); }
+                    @Override public long getItemId(int position) { return position; }
+                    @Override public View getView(int position, View recycled, android.view.ViewGroup parent) {
+                        FavoriteTile tile = recycled instanceof FavoriteTile ? (FavoriteTile) recycled : new FavoriteTile();
+                        tile.setLayoutParams(new android.widget.AbsListView.LayoutParams(-1, favoriteGrid.getColumnWidth()));
+                        tile.bind(getItem(position));
+                        return tile;
+                    }
+                });
+                favoriteGrid.setOnItemClickListener((parent, view, position, id) -> ((FavoriteTile) view).activate());
             }
 
             actions = new LinearLayout(MainActivity.this);
@@ -8955,11 +9117,13 @@ public class MainActivity extends Activity {
 
         private void render() {
             updateSourceMatches();
+            visibleFavorites.clear();
             int[] counts = new int[categories.length];
             for (Media item : items) {
                 if (matchesFavoriteView(item)) {
                     counts[0]++;
                     counts[type(item)]++;
+                    if (category == 0 || category == type(item)) visibleFavorites.add(item);
                 }
             }
             if (groupChips != null) renderGroupChips();
@@ -8972,56 +9136,26 @@ public class MainActivity extends Activity {
                 filters[i].setBackground(null);
             }
             list.removeAllViews();
-            LinearLayout row = null;
-            int count = 0;
-            int size = (getResources().getDisplayMetrics().widthPixels - dp(kuaishou ? 44 : 52)) / 3;
-            for (Media item : items) {
-                if (!matchesCategory(item)) continue;
-                if (count % 3 == 0) {
-                    row = new LinearLayout(MainActivity.this);
-                    LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
-                    rp.topMargin = dp(8);
-                    list.addView(row, rp);
-                }
-                FrameLayout tile = new FrameLayout(MainActivity.this);
-                tile.setBackground(card(10));
-                tile.setClipToOutline(true);
-                LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(size, size);
-                if (count % 3 != 0) tileParams.leftMargin = dp(6);
-                row.addView(tile, tileParams);
-                ImageView image = new ImageView(MainActivity.this);
-                image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                image.setImageDrawable(item.thumbnail);
-                tile.addView(image, new FrameLayout.LayoutParams(-1, -1));
-                if (type(item) != 1) {
-                    TextView badge = label(kuaishou && PHONE_MEDIA_KIND.equals(item.kind) ? PHONE_MEDIA_KIND
-                            : categories[type(item)], 10, Color.WHITE, true);
-                    badge.setBackground(shape(type(item) == 2 ? ACCENT : DARK, 6));
-                    badge.setPadding(dp(6), dp(2), dp(6), dp(2));
-                    FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
-                    badgeParams.setMargins(dp(6), 0, 0, dp(6));
-                    tile.addView(badge, badgeParams);
-                }
-                TextView check = label("", 16, Color.WHITE, true);
-                check.setGravity(Gravity.CENTER);
-                if (selecting) {
-                    FrameLayout.LayoutParams checkParams = new FrameLayout.LayoutParams(dp(28), dp(28), Gravity.END | Gravity.TOP);
-                    checkParams.setMargins(0, dp(6), dp(6), 0);
-                    tile.addView(check, checkParams);
-                }
-                updateTile(tile, check, item);
-                tile.setOnClickListener(v -> {
-                    if (!selecting) {
-                        preview(item, items, this::matchesCategory);
-                        return;
+            if (favoriteGrid != null) {
+                ((android.widget.BaseAdapter) favoriteGrid.getAdapter()).notifyDataSetChanged();
+            } else {
+                LinearLayout row = null;
+                int size = (getResources().getDisplayMetrics().widthPixels - dp(kuaishou ? 44 : 52)) / 3;
+                for (int i = 0; i < visibleFavorites.size(); i++) {
+                    if (i % 3 == 0) {
+                        row = new LinearLayout(MainActivity.this);
+                        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
+                        rowParams.topMargin = dp(8);
+                        list.addView(row, rowParams);
                     }
-                    if (!selected.add(item)) selected.remove(item);
-                    updateTile(tile, check, item);
-                    updateActions();
-                });
-                count++;
+                    FavoriteTile tile = new FavoriteTile();
+                    tile.bind(visibleFavorites.get(i));
+                    LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(size, size);
+                    if (i % 3 != 0) tileParams.leftMargin = dp(6);
+                    row.addView(tile, tileParams);
+                }
             }
-            if (count == 0) {
+            if (visibleFavorites.isEmpty()) {
                 String message = !loaded ? kuaishou ? "正在打开提取记录…" : wechat ? "正在读取表情…" : "正在读取收藏…"
                         : items.isEmpty() ? wechat ? "还没有导入表情\n选择电脑导出的 ZIP 后，图片和动图会显示在这里。"
                         : kuaishou ? "等待提取素材\n读取作品后，图片和视频会显示在这里" : "还没有收藏。在素材预览里点「收藏」即可添加。"
@@ -9037,6 +9171,81 @@ public class MainActivity extends Activity {
                 list.addView(empty, new LinearLayout.LayoutParams(-1, -2));
             }
             updateActions();
+        }
+
+        private class FavoriteTile extends FrameLayout {
+            private final ImageView image;
+            private final TextView badge;
+            private final TextView check;
+            private Media item;
+            private volatile int binding;
+            private boolean requested;
+
+            FavoriteTile() {
+                super(MainActivity.this);
+                setBackground(card(10));
+                setClipToOutline(true);
+                image = new ImageView(MainActivity.this) {
+                    @Override protected void onDraw(android.graphics.Canvas canvas) {
+                        super.onDraw(canvas);
+                        if (!imported && !requested && getLocalVisibleRect(new Rect())) loadThumbnail();
+                    }
+                };
+                image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                addView(image, new FrameLayout.LayoutParams(-1, -1));
+                badge = label("", 10, Color.WHITE, true);
+                badge.setPadding(dp(6), dp(2), dp(6), dp(2));
+                FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
+                badgeParams.setMargins(dp(6), 0, 0, dp(6));
+                addView(badge, badgeParams);
+                check = label("", 16, Color.WHITE, true);
+                check.setGravity(Gravity.CENTER);
+                FrameLayout.LayoutParams checkParams = new FrameLayout.LayoutParams(dp(28), dp(28), Gravity.END | Gravity.TOP);
+                checkParams.setMargins(0, dp(6), dp(6), 0);
+                addView(check, checkParams);
+                if (imported) setOnClickListener(v -> activate());
+            }
+
+            void activate() {
+                if (!selecting) {
+                    preview(item, items, FavoritesScreen.this::matchesCategory);
+                    return;
+                }
+                if (!selected.add(item)) selected.remove(item);
+                updateTile(this, check, item);
+                updateActions();
+            }
+
+            void bind(Media next) {
+                binding++;
+                item = next;
+                Drawable.ConstantState cached = favoriteThumbnails.get(item);
+                Drawable thumbnail = cached == null ? item.thumbnail : cached.newDrawable(getResources());
+                image.setImageDrawable(thumbnail);
+                requested = thumbnail != null;
+                int type = type(item);
+                badge.setVisibility(type == 1 ? GONE : VISIBLE);
+                badge.setText(kuaishou && PHONE_MEDIA_KIND.equals(item.kind) ? PHONE_MEDIA_KIND : categories[type]);
+                badge.setBackground(shape(type == 2 ? ACCENT : DARK, 6));
+                check.setVisibility(selecting ? VISIBLE : GONE);
+                updateTile(this, check, item);
+            }
+
+            private void loadThumbnail() {
+                requested = true;
+                Media target = item;
+                int request = binding;
+                worker.execute(() -> {
+                    if (request != binding) return;
+                    Drawable thumbnail = decodeThumbnail(target.file);
+                    runOnUiThread(() -> {
+                        if (request != binding || favoriteScreen != FavoritesScreen.this || isDestroyed()) return;
+                        Drawable.ConstantState state = thumbnail == null ? null : thumbnail.getConstantState();
+                        if (state != null) favoriteThumbnails.put(target, state);
+                        image.setImageDrawable(thumbnail);
+                    });
+                });
+            }
         }
 
         private void updateTile(FrameLayout tile, TextView check, Media item) {
@@ -9084,38 +9293,15 @@ public class MainActivity extends Activity {
 
         private void confirmRemove(ArrayList<Media> snapshot, Runnable afterRemoval) {
             showConfirmation(R.drawable.dialog_heart, true, "取消收藏这 " + snapshot.size() + " 项？",
-                    "选中素材将从收藏夹移除。\n扫描记录和已保存的文件仍会保留。",
+                    "选中素材将在回收站保留 7 天。\n扫描记录和已保存的文件仍会保留。",
                     "保留收藏", "取消收藏", null, () -> {
                 busy = true;
                 updateActions();
-                worker.execute(() -> {
-                    ArrayList<Media> removed = new ArrayList<>();
-                    for (Media item : snapshot) {
-                        if (item.file.delete() || !item.file.exists()) removed.add(item);
-                    }
-                    runOnUiThread(() -> {
-                        boolean changed = false;
-                        boolean sourcesChanged = false;
-                        for (Media item : removed) {
-                            changed |= favoriteAssignments.remove(item.hash) != null;
-                            sourcesChanged |= favoriteSources.remove(item.hash) != null;
-                        }
-                        if (changed) saveFavoriteGroups();
-                        if (sourcesChanged) saveFavoriteSources();
-                        if (favoriteScreen == this) {
-                            busy = false;
-                            items.removeAll(removed);
-                            selected.removeAll(removed);
-                            if (selected.isEmpty()) selecting = false;
-                            render();
-                            if (afterRemoval != null) afterRemoval.run();
-                        }
-                        int failed = snapshot.size() - removed.size();
-                        String result = "已取消收藏 " + removed.size() + " 项";
-                        if (failed == 0) showBottomNotice(result);
-                        else showMessage(R.drawable.dialog_heart, "有 " + failed + " 项未移除",
-                                result + "，剩余 " + failed + " 项暂未移除，可重新选择后重试。");
-                    });
+                trashFavorites(snapshot, () -> {
+                    busy = false;
+                    if (favoriteScreen != this) return;
+                    updateActions();
+                    if (afterRemoval != null) afterRemoval.run();
                 });
             });
         }
@@ -9135,8 +9321,10 @@ public class MainActivity extends Activity {
                 if (stream.read(bytes) < 12) continue;
                 String mime = format(bytes);
                 if (mime == null) continue;
-                Drawable thumbnail = decodeThumbnail(file);
-                items.add(new Media(file, name.substring(0, extension), mime, "", "收藏", thumbnail, false));
+                boolean animated = "image/webp".equals(mime) && bytes[12] == 'V' && bytes[13] == 'P'
+                        && bytes[14] == '8' && bytes[15] == 'X' && (bytes[20] & 2) != 0
+                        || "image/avif".equals(mime) && bytes[11] == 's';
+                items.add(new Media(file, name.substring(0, extension), mime, "", "收藏", null, animated));
             } catch (Exception ignored) { }
         }
         return items;
@@ -9364,6 +9552,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        worker.execute(() -> recycleBin.entries(System.currentTimeMillis()));
         if (showingReader) for (Animatable animation : animations) animation.start();
     }
 
@@ -9380,6 +9569,7 @@ public class MainActivity extends Activity {
         else if (showingWechat) favoriteScreen.back();
         else if (showingKuaishou) favoriteScreen.back();
         else if (showingGroupManager) favoriteScreen.leaveGroupManager();
+        else if (showingRecycleBin) showMy();
         else if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) returnToRecordsOrigin();
