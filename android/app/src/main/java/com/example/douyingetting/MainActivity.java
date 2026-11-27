@@ -138,6 +138,8 @@ public class MainActivity extends Activity {
     private boolean recordTransferBusy;
     private int backupScope = 2; // 0 records, 1 favorites, 2 both
     private String backupGroup;
+    private boolean backupEncrypted;
+    private boolean backupIncludePrivate;
     private boolean backupMaterialsOnly;
     private RecordArchive.Prepared pendingRestore;
     private boolean savedRecordPageOpened;
@@ -230,6 +232,8 @@ public class MainActivity extends Activity {
     private boolean showingGroupManager;
     private boolean showingRecycleBin;
     private boolean showingPasswordSettings;
+    private boolean showingStorageCleanup;
+    private Runnable returnFromStorageRecord;
     private RecycleBin recycleBin;
     private FavoritesScreen favoriteScreen;
     private final java.util.LinkedHashSet<String> favoriteGroups = new java.util.LinkedHashSet<>();
@@ -453,6 +457,8 @@ public class MainActivity extends Activity {
             favoriteImportGroup = state.getString("favoriteImportGroup");
             backupScope = state.getInt("backupScope", 2);
             backupGroup = state.getString("backupGroup");
+            backupEncrypted = state.getBoolean("backupEncrypted");
+            backupIncludePrivate = state.getBoolean("backupIncludePrivate");
             backupMaterialsOnly = state.getBoolean("backupMaterialsOnly");
         }
         loadFavoriteGroups();
@@ -483,6 +489,8 @@ public class MainActivity extends Activity {
         state.putParcelableArrayList("pendingSharedMedia", pendingSharedMedia);
         state.putInt("backupScope", backupScope);
         state.putString("backupGroup", backupGroup);
+        state.putBoolean("backupEncrypted", backupEncrypted);
+        state.putBoolean("backupIncludePrivate", backupIncludePrivate);
         state.putBoolean("backupMaterialsOnly", backupMaterialsOnly);
     }
 
@@ -1232,6 +1240,8 @@ public class MainActivity extends Activity {
         showingGroupManager = false;
         showingRecycleBin = false;
         showingPasswordSettings = false;
+        showingStorageCleanup = false;
+        returnFromStorageRecord = null;
         showingMy = false;
     }
 
@@ -2034,12 +2044,16 @@ public class MainActivity extends Activity {
             detail.append("剩余 ").append(String.valueOf(days)).append(" 天");
             if (days <= 1) detail.setSpan(new android.text.style.ForegroundColorSpan(DANGER), remaining,
                     detail.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            detail.append(" · 点击预览");
             TextView restore = homeLabel("恢复", 12, INK, 750);
             restore.setGravity(Gravity.CENTER);
             restore.setPadding(dp(9), dp(5), dp(9), dp(5));
+            restore.setMinHeight(dp(44));
             restore.setBackground(shape(ACCENT_SOFT, 9));
             LinearLayout row = settingsSectionRow(recycleCover(entry, locked), title, detail, restore);
-            row.setOnClickListener(v -> confirmRecycleRestore(entry, title, list));
+            row.setOnClickListener(v -> verifyRecycleAccess(entry, () -> previewRecycleEntry(entry, list)));
+            restore.setOnClickListener(v -> confirmRecycleRestore(entry, title, list));
+            restore.setContentDescription("恢复 " + title);
             pressFeedback(row);
             if (section.getChildCount() != 0) section.addView(rowDivider());
             section.addView(row);
@@ -2064,6 +2078,50 @@ public class MainActivity extends Activity {
         return privateFavoritePins.getOrDefault(entry.data.optString("group"), entry.data.optString("pin"));
     }
 
+    private void verifyRecycleAccess(RecycleBin.Entry entry, Runnable allowed) {
+        String pin = recyclePin(entry);
+        if (pin.isEmpty()) allowed.run();
+        else showPin("验证私密收藏夹密码", entry.data.optString("group"), "验证", "密码不正确",
+                value -> matchesPin(value, pin), allowed);
+    }
+
+    private void previewRecycleEntry(RecycleBin.Entry entry, View owner) {
+        if (System.currentTimeMillis() >= entry.expiresAt) {
+            showTopNotice("这项内容已超过回收期限");
+            return;
+        }
+        worker.execute(() -> {
+            ArrayList<Media> previews = new ArrayList<>();
+            if (entry.record) {
+                File[] files;
+                try {
+                    files = recordArchiveFiles(entry.payload).stream().filter(name -> !"manifest.json".equals(name))
+                            .map(name -> new File(entry.payload, name)).toArray(File[]::new);
+                } catch (Exception ignored) {
+                    files = entry.payload.listFiles(File::isFile);
+                    if (files != null) java.util.Arrays.sort(files, java.util.Comparator.comparing(File::getName));
+                }
+                if (files != null) {
+                    for (File file : files) {
+                        Media item = readLocalPreviewMedia(file);
+                        if (item != null) previews.add(item);
+                    }
+                }
+            } else {
+                Media item = readLocalPreviewMedia(entry.payload);
+                if (item != null) previews.add(item);
+            }
+            runOnUiThread(() -> {
+                if (!showingRecycleBin || !owner.isAttachedToWindow()) return;
+                if (System.currentTimeMillis() >= entry.expiresAt) showTopNotice("这项内容已超过回收期限");
+                else if (!previews.isEmpty()) preview(previews, 0);
+                else if (entry.record) showMessage(R.drawable.blue_history, "记录预览",
+                        entry.data.optString("title", "提取记录") + "\n这条记录没有可预览的暂存素材。");
+                else showTopNotice("这项收藏暂时无法预览");
+            });
+        });
+    }
+
     private void confirmRecycleRestore(RecycleBin.Entry entry, String title, LinearLayout list) {
         if (recordTransferBusy) return;
         String group = entry.data.optString("group");
@@ -2081,8 +2139,7 @@ public class MainActivity extends Activity {
             dialogActions(dialog, panel, "取消", "恢复", false, null, () -> restoreRecycleEntry(entry, list));
             presentBottomSheet(dialog, panel);
         };
-        if (pin.isEmpty()) confirm.run();
-        else showPin("验证私密收藏夹密码", group, "验证", "密码不正确", value -> matchesPin(value, pin), confirm);
+        verifyRecycleAccess(entry, confirm);
     }
 
     private void restoreRecycleEntry(RecycleBin.Entry entry, LinearLayout list) {
@@ -2163,11 +2220,50 @@ public class MainActivity extends Activity {
                         backupScope = scope;
                         backupGroup = null;
                         backupMaterialsOnly = false;
-                        pickRecordArchive(true);
+                        chooseBackupProtection();
                     }));
         }
         dialogActions(dialog, panel, "取消", null, false, null, null);
         showCardDialog(dialog, panel);
+    }
+
+    private void chooseBackupProtection() {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("备份保护", "加密备份使用独立的 6 位数字密码恢复。");
+        android.widget.CheckBox includePrivate = new android.widget.CheckBox(this);
+        includePrivate.setText("包含私密收藏夹");
+        includePrivate.setTextColor(INK);
+        if (backupScope != 0) panel.addView(includePrivate);
+        addSheetChoice(panel, "加密备份", "使用密码保护备份文件", R.drawable.blue_lock, false, () ->
+                dismissCardDialog(dialog, () -> {
+                    backupEncrypted = true;
+                    backupIncludePrivate = backupScope != 0 && includePrivate.isChecked();
+                    if (!backupIncludePrivate) pickRecordArchive(true);
+                    else {
+                        ArrayList<String> groups = new ArrayList<>(favoriteGroups);
+                        groups.removeIf(group -> !privateFavoritePins.containsKey(group));
+                        verifyPrivateBackupGroups(groups, 0);
+                    }
+                }));
+        addSheetChoice(panel, "普通备份", "包含提取记录和所选公开收藏", R.drawable.dialog_file, false, () ->
+                dismissCardDialog(dialog, () -> {
+                    backupEncrypted = false;
+                    backupIncludePrivate = false;
+                    pickRecordArchive(true);
+                }));
+        showBottomSheet(dialog, panel);
+    }
+
+    private void verifyPrivateBackupGroups(List<String> groups, int index) {
+        if (index == groups.size()) {
+            pickRecordArchive(true);
+            return;
+        }
+        String group = groups.get(index);
+        String pin = privateFavoritePins.get(group);
+        showPin("验证私密收藏夹密码", group + " · " + (index + 1) + " / " + groups.size(),
+                "继续", "密码不正确", value -> matchesPin(value, pin),
+                () -> verifyPrivateBackupGroups(groups, index + 1));
     }
 
     private ArrayList<File> backupFavorites() {
@@ -2176,7 +2272,7 @@ public class MainActivity extends Activity {
         if (saved != null) for (File file : saved) {
             String group = favoriteAssignments.get(favoriteFileHash(file));
             if (file.isFile() && !file.getName().endsWith(".tmp")
-                    && (backupGroup == null ? !privateFavoritePins.containsKey(group) : backupGroup.equals(group)))
+                    && (backupGroup == null ? backupIncludePrivate || !privateFavoritePins.containsKey(group) : backupGroup.equals(group)))
                 files.add(file);
         }
         return files;
@@ -2196,6 +2292,15 @@ public class MainActivity extends Activity {
                 dismissCardDialog(dialog, () -> exportFavoriteGroup(group, true)));
         addMenuCard(panel, R.drawable.dialog_file, "咻咿备份", "保留收藏夹、原文件和作品来源", v ->
                 dismissCardDialog(dialog, () -> exportFavoriteGroup(group, false)));
+        addMenuCard(panel, R.drawable.blue_lock, "加密备份", "使用备份密码保护这个收藏夹", v ->
+                dismissCardDialog(dialog, () -> {
+                    backupScope = 1;
+                    backupGroup = group;
+                    backupMaterialsOnly = false;
+                    backupEncrypted = true;
+                    backupIncludePrivate = privateFavoritePins.containsKey(group);
+                    pickRecordArchive(true);
+                }));
         dialogActions(dialog, panel, "取消", null, false, null, null);
         showCardDialog(dialog, panel);
     }
@@ -2204,6 +2309,8 @@ public class MainActivity extends Activity {
         backupScope = 1;
         backupGroup = group;
         backupMaterialsOnly = materialsOnly;
+        backupEncrypted = false;
+        backupIncludePrivate = false;
         pickRecordArchive(true);
     }
 
@@ -2231,10 +2338,11 @@ public class MainActivity extends Activity {
         }
         Intent intent = new Intent(exporting ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType(exporting ? "application/zip" : "*/*");
+        intent.setType(exporting ? backupEncrypted ? "application/octet-stream" : "application/zip" : "*/*");
         if (exporting) intent.putExtra(Intent.EXTRA_TITLE, (backupGroup == null ? "咻咿备份" :
                 (backupMaterialsOnly ? "收藏素材-" : "咻咿备份-") + backupGroup.replaceAll("[^\\p{L}\\p{M}\\p{N} ._-]", "_")) + "-"
-                + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".zip");
+                + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date())
+                + (backupEncrypted ? ".xiuyibak" : ".zip"));
         try { startActivityForResult(intent, exporting ? EXPORT_RECORDS : IMPORT_RECORDS); }
         catch (android.content.ActivityNotFoundException error) {
             showTopNotice("当前设备没有可用的系统文件选择器");
@@ -2288,10 +2396,19 @@ public class MainActivity extends Activity {
         if (recordTransferBusy) return;
         Uri uri = data.getData();
         if (request == IMPORT_RECORDS) {
-            prepareBackupRestore(uri);
+            prepareBackupRestore(uri, null);
             return;
         }
+        if (backupEncrypted) createBackupPin(password -> exportBackup(uri, password), () -> {
+            try { android.provider.DocumentsContract.deleteDocument(getContentResolver(), uri); }
+            catch (Exception ignored) { }
+        });
+        else exportBackup(uri, null);
+    }
+
+    private void exportBackup(Uri uri, char[] password) {
         if (backupScope != 1 && (scanning || (currentRecord != null && currentRecord.processingPage))) {
+            if (password != null) java.util.Arrays.fill(password, '\0');
             showTopNotice("扫描仍在进行，请暂停后重新导出");
             return;
         }
@@ -2316,7 +2433,8 @@ public class MainActivity extends Activity {
                         if (favorites.isEmpty()) throw new java.io.IOException("收藏夹为空");
                         WorkExport.writeZip(output, favorites);
                         favoriteCount = favorites.size();
-                    } else favoriteCount = RecordArchive.write(output, folders, favorites, favoriteMetadata,
+                    } else favoriteCount = RecordArchive.write(password == null ? output : BackupEncryption.encrypt(output, password),
+                            folders, favorites, favoriteMetadata,
                             this::recordArchiveFiles, this::favoriteArchiveExtension);
                 }
                 String report = materialsOnly ? "已导出 " + favoriteCount + " 个收藏素材"
@@ -2330,8 +2448,66 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (finishBackupProgress(progress)) showMessage(R.drawable.dialog_file, "未能导出", archiveFailureReason(error, true));
                 });
+            } finally {
+                if (password != null) java.util.Arrays.fill(password, '\0');
             }
         });
+    }
+
+    private void createBackupPin(java.util.function.Consumer<char[]> action, Runnable cancel) {
+        showPin("设置备份密码", "输入 6 位数字，恢复这份备份时需要用到。", "下一步", "", pin -> true,
+                first -> showPin("确认备份密码", "再次输入同一组 6 位数字。", "加密导出", "两次输入的密码不一致",
+                        first::equals, pin -> action.accept(pin.toCharArray()), cancel), cancel);
+    }
+
+    private void unlockBackup(Uri uri, int version, boolean retry) {
+        if (version == 1) {
+            showLegacyBackupPassword(uri, retry);
+            return;
+        }
+        showPin("解锁加密备份", retry ? "密码不正确或文件已损坏。请重新输入备份密码。"
+                : "输入导出时设置的 6 位数字密码。", "解锁", "",
+                pin -> true, pin -> prepareBackupRestore(uri, pin.toCharArray()), null);
+    }
+
+    private void showLegacyBackupPassword(Uri uri, boolean retry) {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("解锁旧版加密备份",
+                retry ? "密码不正确或文件已损坏。请重新输入旧版备份密码。" : "输入这份旧备份原有的密码。");
+        EditText password = backupPasswordField(panel, "备份密码");
+        TextView error = homeLabel("", 12, DANGER, 550);
+        panel.addView(error);
+        LinearLayout actions = new LinearLayout(this);
+        panel.addView(actions);
+        actions.addView(dialogButton("取消", false, false, v -> dismissCardDialog(dialog, null)),
+                new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        params.leftMargin = dp(8);
+        actions.addView(dialogButton("解锁", true, false, v -> {
+            String value = password.getText().toString();
+            if (value.length() < 8) { error.setText("请输入至少 8 个字符"); return; }
+            password.setText("");
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(password.getWindowToken(), 0);
+            dismissCardDialog(dialog, () -> prepareBackupRestore(uri, value.toCharArray()));
+        }), params);
+        password.requestFocus();
+        dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        presentBottomSheet(dialog, panel);
+    }
+
+    private EditText backupPasswordField(LinearLayout panel, String hint) {
+        EditText field = mediaSourceSearch(hint);
+        field.setCompoundDrawablesRelative(null, null, null, null);
+        field.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        field.setSingleLine(true);
+        field.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(128)});
+        field.setSaveEnabled(false);
+        field.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(46));
+        params.setMargins(0, dp(10), 0, dp(6));
+        panel.addView(field, params);
+        return field;
     }
 
     private android.app.Dialog backupProgress(String title, String detail) {
@@ -2371,16 +2547,28 @@ public class MainActivity extends Activity {
         return known;
     }
 
-    private void prepareBackupRestore(Uri uri) {
+    private void prepareBackupRestore(Uri uri, char[] password) {
         recordTransferBusy = true;
         android.app.Dialog progress = backupProgress("正在读取备份…", "正在检查备份内容和本机重复项。");
         HashSet<String> known = knownRecordIds();
         worker.execute(() -> {
             RecordArchive.Prepared staged = null;
+            int version = 0;
             try {
-                try (InputStream input = getContentResolver().openInputStream(uri)) {
-                    if (input == null) throw new java.io.IOException("无法读取所选备份");
-                    staged = RecordArchive.prepare(input, new File(getCacheDir(), "record-import-" + UUID.randomUUID()),
+                try (InputStream raw = getContentResolver().openInputStream(uri)) {
+                    if (raw == null) throw new java.io.IOException("无法读取所选备份");
+                    java.io.BufferedInputStream input = new java.io.BufferedInputStream(raw);
+                    version = BackupEncryption.version(input);
+                    if (version != 0 && password == null) {
+                        int detectedVersion = version;
+                        runOnUiThread(() -> {
+                            if (finishBackupProgress(progress)) unlockBackup(uri, detectedVersion, false);
+                        });
+                        return;
+                    }
+                    if (version == 0 && password != null) throw new BackupEncryption.InvalidBackup(null);
+                    staged = RecordArchive.prepare(version != 0 ? BackupEncryption.decrypt(input, password) : input,
+                            new File(getCacheDir(), "record-import-" + UUID.randomUUID()),
                             this::recordArchiveFiles, this::favoriteArchiveExtension);
                 }
                 RecordArchive.Prepared archive = staged;
@@ -2388,12 +2576,23 @@ public class MainActivity extends Activity {
                 JSONObject metadata = archive.favoriteMetadata == null ? new JSONObject()
                         : new JSONObject(new String(archive.favoriteMetadata, StandardCharsets.UTF_8));
                 runOnUiThread(() -> {
-                    if (finishBackupProgress(progress)) showRestorePreview(archive, preview, metadata);
+                    if (finishBackupProgress(progress)) {
+                        if (password != null) remapPrivateBackupGroups(metadata);
+                        else metadata.remove("privatePins");
+                        showRestorePreview(archive, preview, metadata);
+                    }
                     else archive.close();
                 });
             } catch (Exception error) {
                 if (staged != null) staged.close();
-                runOnUiThread(() -> showRestoreError(progress, error));
+                int detectedVersion = version;
+                runOnUiThread(() -> {
+                    if (error instanceof BackupEncryption.InvalidBackup && detectedVersion != 0) {
+                        if (finishBackupProgress(progress)) unlockBackup(uri, detectedVersion, true);
+                    } else showRestoreError(progress, error);
+                });
+            } finally {
+                if (password != null) java.util.Arrays.fill(password, '\0');
             }
         });
     }
@@ -2968,6 +3167,7 @@ public class MainActivity extends Activity {
         TextView storageValue = homeLabel("计算中…", 14, ACCENT, 700);
         usage.addView(storageValue, new LinearLayout.LayoutParams(-2, -2));
         storage.addView(rowDivider());
+        addMenuCard(page, R.drawable.blue_storage, "存储清理", "查看占用并选择要清理的项目", v -> showStorageCleanup(1));
 
         LinearLayout modeRow = new LinearLayout(this);
         modeRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -3343,9 +3543,297 @@ public class MainActivity extends Activity {
         }
         File[] favorites = new File(getFilesDir(), "favorites").listFiles();
         if (favorites != null) for (File file : favorites) if (file.isFile() && !file.getName().endsWith(".tmp")) bytes += file.length();
-        if (bytes <= 0) return "0 MB";
-        double mb = bytes / (1024d * 1024d);
-        return String.format(Locale.US, mb >= 10 ? "%.0f MB" : "%.1f MB", mb);
+        return formatStorage(bytes);
+    }
+
+    private String formatStorage(long bytes) {
+        return android.text.format.Formatter.formatShortFileSize(this, bytes);
+    }
+
+    private static final String[] STORAGE_TYPES = {"收藏", "提取暂存", "缓存"};
+
+    private static final class StorageItem {
+        final File file;
+        final ScanRecord record;
+        final String title;
+        final long bytes;
+        final boolean hidden;
+
+        StorageItem(File file, ScanRecord record, String title, long bytes, boolean hidden) {
+            this.file = file;
+            this.record = record;
+            this.title = title;
+            this.bytes = bytes;
+            this.hidden = hidden;
+        }
+    }
+
+    private static long storageBytes(File target) {
+        if (Files.isSymbolicLink(target.toPath())) return 0;
+        if (target.isFile()) return target.length();
+        long bytes = 0;
+        File[] children = target.listFiles();
+        if (children != null) for (File child : children) bytes += storageBytes(child);
+        return bytes;
+    }
+
+    private void showStorageCleanup(int category) {
+        showStorageCleanup(category, Collections.emptySet(), 0);
+    }
+
+    private void showStorageCleanup(int category, java.util.Set<File> selectedFiles, int scrollY) {
+        resetPages();
+        showingStorageCleanup = true;
+        LinearLayout root = pageRoot();
+        header(root, "存储清理", true, this::showSettings);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setPadding(dp(12), dp(4), dp(12), dp(6));
+        root.addView(tabs);
+        ScrollView scroll = new ScrollView(this);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(18), 0, dp(18), dp(16));
+        scroll.addView(list);
+        list.addView(homeLabel("正在统计空间…", 13, INK2, 450));
+        Button clean = dialogButton("清理所选", true, false, null);
+        clean.setEnabled(false);
+        clean.setAlpha(0.45f);
+        LinearLayout.LayoutParams cleanParams = new LinearLayout.LayoutParams(-1, -2);
+        cleanParams.setMargins(dp(18), dp(8), dp(18), dp(16));
+        root.addView(clean, cleanParams);
+        presentSecondary(root);
+
+        ArrayList<ScanRecord> snapshot = new ArrayList<>(records);
+        java.util.HashMap<String, String> assignments = new java.util.HashMap<>(favoriteAssignments);
+        HashSet<String> privateGroups = new HashSet<>(privateFavoritePins.keySet());
+        java.util.HashMap<String, String> titles = new java.util.HashMap<>();
+        favoriteSources.keys().forEachRemaining(hash -> {
+            JSONObject source = favoriteSources.optJSONObject(hash);
+            if (source != null && !source.optString("caption").isEmpty()) titles.put(hash, source.optString("caption"));
+        });
+        worker.execute(() -> {
+            ArrayList<ArrayList<StorageItem>> inventory = new ArrayList<>();
+            for (int i = 0; i < STORAGE_TYPES.length; i++) inventory.add(new ArrayList<>());
+            File[] favorites = new File(getFilesDir(), "favorites").listFiles();
+            if (favorites != null) for (File file : favorites) {
+                if (!file.isFile() || file.getName().endsWith(".tmp")) continue;
+                String hash = favoriteFileHash(file);
+                inventory.get(0).add(new StorageItem(file, null, titles.getOrDefault(hash, file.getName()), file.length(),
+                        privateGroups.contains(assignments.get(hash))));
+            }
+            for (ScanRecord record : snapshot) if (record.folder.isDirectory())
+                inventory.get(1).add(new StorageItem(record.folder, record,
+                        record.caption.isEmpty() ? record.link : record.caption, storageBytes(record.folder), false));
+            File[] caches = getCacheDir().listFiles();
+            if (caches != null) for (File file : caches) {
+                String name = file.getName();
+                if (!name.startsWith("record-import-") && !name.startsWith("wechat-import-")
+                        && !name.startsWith("wechat-received-")) continue;
+                long size = storageBytes(file);
+                if (size > 0) inventory.get(2).add(new StorageItem(file, null, name, size, false));
+            }
+            for (ArrayList<StorageItem> items : inventory) items.sort((a, b) -> Long.compare(b.bytes, a.bytes));
+            runOnUiThread(() -> {
+                if (!showingStorageCleanup || !root.isAttachedToWindow()) return;
+                int[] active = {category};
+                java.util.LinkedHashSet<StorageItem> selected = new java.util.LinkedHashSet<>();
+                for (ArrayList<StorageItem> items : inventory) for (StorageItem item : items)
+                    if (!item.hidden && selectedFiles.contains(item.file)) selected.add(item);
+                ArrayList<TextView> labels = new ArrayList<>();
+                Runnable update = () -> {
+                    long bytes = 0;
+                    for (StorageItem item : selected) bytes += item.bytes;
+                    clean.setText(selected.isEmpty() ? "清理所选" : "清理 " + selected.size() + " 项 · " + formatStorage(bytes));
+                    clean.setEnabled(!selected.isEmpty());
+                    clean.setAlpha(selected.isEmpty() ? 0.45f : 1f);
+                };
+                Runnable render = () -> {
+                    list.removeAllViews();
+                    for (int i = 0; i < labels.size(); i++)
+                        labels.get(i).setBackground(shape(active[0] == i ? ACCENT_SOFT : SURFACE, 12));
+                    LinearLayout section = addSettingsSection(list, "按大小排序");
+                    int shown = 0;
+                    for (StorageItem item : inventory.get(active[0])) {
+                        if (item.hidden) continue;
+                        int sign = active[0] == 1 ? R.drawable.blue_history : active[0] == 2 ? R.drawable.dialog_file : R.drawable.blue_folder;
+                        android.widget.CheckBox checkbox = new android.widget.CheckBox(this);
+                        checkbox.setContentDescription("选择 " + item.title);
+                        checkbox.setChecked(selected.contains(item));
+                        checkbox.setOnCheckedChangeListener((button, checked) -> {
+                            if (checked) selected.add(item);
+                            else selected.remove(item);
+                            update.run();
+                        });
+                        View cover = active[0] == 0
+                                ? recordCover(new Media(item.file, "", "image/*", "", "", null, false))
+                                : sectionIcon(sign, ACCENT, ACCENT_SOFT);
+                        String detail = formatStorage(item.bytes) + (active[0] == 0 ? " · 点击预览"
+                                : active[0] == 1 ? " · 查看记录" : "");
+                        LinearLayout row = settingsSectionRow(cover, item.title, detail, checkbox);
+                        row.setOnClickListener(v -> {
+                            if (item.record != null) {
+                                if (!records.contains(item.record)) {
+                                    showTopNotice("该记录已不存在");
+                                    return;
+                                }
+                                HashSet<File> checked = new HashSet<>();
+                                for (StorageItem entry : selected) checked.add(entry.file);
+                                int position = scroll.getScrollY();
+                                showingStorageCleanup = false;
+                                showRecord(item.record);
+                                returnFromStorageRecord = () -> showStorageCleanup(1, checked, position);
+                            } else if (active[0] == 0) {
+                                previewStorageFavorite(item.file, root);
+                            } else checkbox.toggle();
+                        });
+                        pressFeedback(row);
+                        if (shown++ != 0) section.addView(rowDivider());
+                        section.addView(row);
+                    }
+                    if (shown == 0) {
+                        TextView empty = homeLabel("没有可清理的项目", 13, INK2, 450);
+                        empty.setPadding(dp(14), dp(16), dp(14), dp(16));
+                        section.addView(empty);
+                    }
+                    if (active[0] == 0 && inventory.get(0).stream().anyMatch(item -> item.hidden)) {
+                        TextView note = homeLabel("私密收藏计入占用，可在解锁收藏夹后管理。", 12, INK2, 450);
+                        note.setPadding(0, dp(12), 0, 0);
+                        list.addView(note);
+                    }
+                    scroll.scrollTo(0, 0);
+                };
+                for (int i = 0; i < STORAGE_TYPES.length; i++) {
+                    int type = i;
+                    long total = 0;
+                    for (StorageItem item : inventory.get(i)) total += item.bytes;
+                    TextView tab = homeLabel(STORAGE_TYPES[i] + "\n" + formatStorage(total), 13, INK, 700);
+                    tab.setGravity(Gravity.CENTER);
+                    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(56), 1);
+                    params.setMargins(dp(4), 0, dp(4), 0);
+                    tabs.addView(tab, params);
+                    labels.add(tab);
+                    tab.setOnClickListener(v -> { active[0] = type; render.run(); });
+                }
+                clean.setOnClickListener(v -> confirmStorageCleanup(new ArrayList<>(selected), active[0]));
+                render.run();
+                update.run();
+                if (scrollY > 0) scroll.post(() -> scroll.scrollTo(0, scrollY));
+            });
+        });
+    }
+
+    private void previewStorageFavorite(File file, View owner) {
+        String hash = favoriteFileHash(file);
+        if (privateFavoritePins.containsKey(favoriteAssignments.get(hash))) return;
+        worker.execute(() -> {
+            Media item = readLocalPreviewMedia(file);
+            runOnUiThread(() -> {
+                if (!showingStorageCleanup || !owner.isAttachedToWindow()
+                        || privateFavoritePins.containsKey(favoriteAssignments.get(hash))) return;
+                if (item == null) showTopNotice("这项收藏暂时无法预览");
+                else preview(Collections.singletonList(item), 0);
+            });
+        });
+    }
+
+    private boolean returnToStorageCleanup() {
+        if (returnFromStorageRecord == null) return false;
+        Runnable back = returnFromStorageRecord;
+        returnFromStorageRecord = null;
+        back.run();
+        return true;
+    }
+    private void confirmStorageCleanup(ArrayList<StorageItem> selected, int category) {
+        if (selected.isEmpty()) return;
+        long bytes = 0;
+        for (StorageItem item : selected) bytes += item.bytes;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("永久清理 " + selected.size() + " 项？",
+                "预计释放 " + formatStorage(bytes) + "。所选项目会立即删除，无法在回收站恢复。");
+        ScrollView scroll = dialogScroll();
+        LinearLayout files = new LinearLayout(this);
+        files.setOrientation(LinearLayout.VERTICAL);
+        for (StorageItem item : selected) {
+            TextView row = homeLabel(item.title + " · " + formatStorage(item.bytes), 12, INK2, 500);
+            row.setPadding(0, dp(7), 0, dp(7));
+            files.addView(row);
+        }
+        scroll.addView(files);
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        dialogActions(dialog, panel, "取消", "确认清理", true, null, () -> cleanStorage(selected, category));
+        presentBottomSheet(dialog, panel);
+    }
+
+    private void cleanStorage(ArrayList<StorageItem> selected, int category) {
+        if (recordTransferBusy || wechatImportBusy || importingFavoriteMedia || importingPhoneMedia
+                || scanning || currentRecord != null && currentRecord.processingPage) {
+            showTopNotice("请等当前导入、扫描或备份结束后再清理");
+            return;
+        }
+        if (selected.stream().anyMatch(item -> item.file.getParentFile().equals(new File(getFilesDir(), "favorites"))
+                && privateFavoritePins.containsKey(favoriteAssignments.get(favoriteFileHash(item.file))))) {
+            showTopNotice("收藏夹的隐私状态已改变，请重新选择");
+            showStorageCleanup(category);
+            return;
+        }
+        recordTransferBusy = true;
+        android.app.Dialog progress = backupProgress("正在清理…", "正在处理所选文件。");
+        worker.execute(() -> {
+            ArrayList<ScanRecord> deletedRecords = new ArrayList<>();
+            HashSet<String> deletedFavorites = new HashSet<>();
+            long released = 0;
+            int failed = 0;
+            for (StorageItem item : selected) {
+                try {
+                    if (item.record != null) {
+                        RecycleBin.Entry staged = stageRecordDeletion(item.record);
+                        if (staged == null) throw new java.io.IOException("无法移除记录");
+                        deletedRecords.add(item.record);
+                        recycleBin.discard(staged);
+                        long remaining = storageBytes(staged.payload);
+                        released += Math.max(0, item.bytes - remaining);
+                        if (remaining != 0) failed++;
+                    } else if (getCacheDir().equals(item.file.getParentFile())) {
+                        try (java.util.stream.Stream<java.nio.file.Path> paths = Files.walk(item.file.toPath())) {
+                            for (java.nio.file.Path path : paths.sorted(java.util.Comparator.reverseOrder())
+                                    .toArray(java.nio.file.Path[]::new)) Files.delete(path);
+                        }
+                        released += item.bytes;
+                    } else {
+                        Files.delete(item.file.toPath());
+                        deletedFavorites.add(favoriteFileHash(item.file));
+                        released += item.bytes;
+                    }
+                } catch (java.io.IOException | org.json.JSONException error) { failed++; }
+            }
+            long totalReleased = released;
+            int failures = failed;
+            runOnUiThread(() -> {
+                boolean visible = finishBackupProgress(progress);
+                records.removeAll(deletedRecords);
+                if (deletedRecords.contains(currentRecord)) {
+                    currentRecord = null;
+                    viewingSavedRecord = false;
+                    clearMediaSelection();
+                    media.clear();
+                    renderResults();
+                    updateResultLabels();
+                }
+                for (String hash : deletedFavorites) {
+                    favoriteAssignments.remove(hash);
+                    favoriteSources.remove(hash);
+                }
+                if (!deletedFavorites.isEmpty()) {
+                    saveFavoriteGroups();
+                    saveFavoriteSources();
+                }
+                if (!visible) return;
+                if (showingStorageCleanup) showStorageCleanup(category);
+                showBottomNotice("已释放 " + formatStorage(totalReleased)
+                        + (failures == 0 ? "" : "，" + failures + " 项未完全清理"));
+            });
+        });
     }
 
     private String versionName() {
@@ -6970,37 +7458,42 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(-1, -2);
             ap.topMargin = dp(12);
             panel.addView(actions, ap);
-            addPreviewAction(actions, favorite ? "取消收藏" : "收藏",
-                    favorite ? R.drawable.dialog_heart_filled : R.drawable.dialog_heart, false,
-                    v -> {
-                        if (favorite) {
-                            showConfirmation(R.drawable.dialog_heart, true, "取消收藏这项素材？",
-                                    "素材将在回收站保留 7 天。提取记录和已保存的文件仍会保留。",
-                                    "保留收藏", "取消收藏", null,
-                                    () -> dismissCardDialog(dialog, () -> setFavorite(item, false, "", work)));
-                        } else dismissCardDialog(dialog, () -> showFavoriteDestination(null, "", 1,
-                                group -> setFavorite(item, true, group, work), () -> preview(sequence, index)));
-                    });
-            addPreviewAction(actions, "分享", R.drawable.dialog_share, false, v -> shareMedia(Collections.singletonList(item)));
-            addPreviewAction(actions, "关闭", R.drawable.dialog_close, false, v -> dismissCardDialog(dialog, null));
-            addPreviewAction(actions, "保存", R.drawable.extract_download, true, v -> dismissCardDialog(dialog, () -> {
-                if (canOrganizeSave(work)) {
-                    saveMedia(new ArrayList<>(Collections.singletonList(item)), work, null, null);
-                    return;
-                }
-                worker.execute(() -> {
-                    try {
-                        saveToDownloads(item);
-                        runOnUiThread(() -> {
-                            status.setText("已保存 " + item.file.getName());
-                            showBottomNotice("保存成功");
+            boolean previewOnly = showingStorageCleanup || showingRecycleBin;
+            if (!previewOnly) {
+                addPreviewAction(actions, favorite ? "取消收藏" : "收藏",
+                        favorite ? R.drawable.dialog_heart_filled : R.drawable.dialog_heart, false,
+                        v -> {
+                            if (favorite) {
+                                showConfirmation(R.drawable.dialog_heart, true, "取消收藏这项素材？",
+                                        "素材将在回收站保留 7 天。提取记录和已保存的文件仍会保留。",
+                                        "保留收藏", "取消收藏", null,
+                                        () -> dismissCardDialog(dialog, () -> setFavorite(item, false, "", work)));
+                            } else dismissCardDialog(dialog, () -> showFavoriteDestination(null, "", 1,
+                                    group -> setFavorite(item, true, group, work), () -> preview(sequence, index)));
                         });
-                    } catch (Exception error) {
-                        runOnUiThread(() -> showMessage(R.drawable.extract_download, "这项素材未保存",
-                                fileFailureReason(error) + "素材仍在本机，可稍后重新保存。"));
+                addPreviewAction(actions, "分享", R.drawable.dialog_share, false, v -> shareMedia(Collections.singletonList(item)));
+            }
+            addPreviewAction(actions, "关闭", R.drawable.dialog_close, false, v -> dismissCardDialog(dialog, null));
+            if (!previewOnly) {
+                addPreviewAction(actions, "保存", R.drawable.extract_download, true, v -> dismissCardDialog(dialog, () -> {
+                    if (canOrganizeSave(work)) {
+                        saveMedia(new ArrayList<>(Collections.singletonList(item)), work, null, null);
+                        return;
                     }
-                });
-            }));
+                    worker.execute(() -> {
+                        try {
+                            saveToDownloads(item);
+                            runOnUiThread(() -> {
+                                status.setText("已保存 " + item.file.getName());
+                                showBottomNotice("保存成功");
+                            });
+                        } catch (Exception error) {
+                            runOnUiThread(() -> showMessage(R.drawable.extract_download, "这项素材未保存",
+                                    fileFailureReason(error) + "素材仍在本机，可稍后重新保存。"));
+                        }
+                    });
+                }));
+            }
             if (stopPrevious != null) stopPrevious.run();
             scroll.removeAllViews();
             scroll.addView(panel, new ScrollView.LayoutParams(-1, -2));
@@ -7430,9 +7923,16 @@ public class MainActivity extends Activity {
                 sources.put(hash, favoriteSources.optJSONObject(hash));
             }
             ArrayList<String> groups = new ArrayList<>(favoriteGroups);
-            groups.removeIf(privateFavoritePins::containsKey);
-            return new JSONObject().put("groups", new JSONArray(group == null ? groups : Collections.singleton(group)))
-                    .put("assignments", assignments).put("sources", sources).toString().getBytes(StandardCharsets.UTF_8);
+            if (!backupIncludePrivate) groups.removeIf(privateFavoritePins::containsKey);
+            JSONObject metadata = new JSONObject().put("groups", new JSONArray(group == null ? groups : Collections.singleton(group)))
+                    .put("assignments", assignments).put("sources", sources);
+            if (backupEncrypted && backupIncludePrivate) {
+                JSONObject pins = new JSONObject();
+                for (String name : group == null ? groups : Collections.singletonList(group))
+                    pins.put(name, privateFavoritePins.get(name));
+                metadata.put("privatePins", pins);
+            }
+            return metadata.toString().getBytes(StandardCharsets.UTF_8);
         } catch (org.json.JSONException error) {
             throw new IllegalStateException(error);
         }
@@ -7453,6 +7953,11 @@ public class MainActivity extends Activity {
         if (backup.favoriteMetadata == null) return 0;
         java.util.Set<String> groups = backupGroupNames(data);
         favoriteGroups.addAll(groups);
+        JSONObject pins = data.optJSONObject("privatePins");
+        if (pins != null) for (String group : groups) {
+            String pin = pins.optString(group);
+            if (pin.matches("[0-9a-f]{32}:[0-9a-f]{64}")) privateFavoritePins.putIfAbsent(group, pin);
+        }
         JSONObject assignments = data.optJSONObject("assignments");
         JSONObject sources = data.optJSONObject("sources");
         int changed = 0;
@@ -7475,6 +7980,43 @@ public class MainActivity extends Activity {
         saveFavoriteGroups();
         saveFavoriteSources();
         return changed;
+    }
+
+    private void remapPrivateBackupGroups(JSONObject data) {
+        JSONObject pins = data.optJSONObject("privatePins");
+        if (pins == null) return;
+        java.util.LinkedHashSet<String> names = backupGroupNames(data);
+        java.util.LinkedHashSet<String> mappedNames = new java.util.LinkedHashSet<>();
+        JSONObject mappedPins = new JSONObject();
+        JSONObject assignments = data.optJSONObject("assignments");
+        java.util.HashMap<String, String> renames = new java.util.HashMap<>();
+        try {
+            for (String name : names) {
+                String pin = pins.optString(name);
+                String target = name;
+                if (pin.matches("[0-9a-f]{32}:[0-9a-f]{64}")) {
+                    int i = 1;
+                    while ((favoriteGroups.contains(target) && !pin.equals(privateFavoritePins.get(target)))
+                            || (!target.equals(name) && (names.contains(target) || mappedNames.contains(target)))) {
+                        String suffix = i == 1 ? "（备份）" : "（备份" + i + "）";
+                        target = name.substring(0, Math.min(name.length(), 24 - suffix.length())) + suffix;
+                        i++;
+                    }
+                    mappedPins.put(target, pin);
+                }
+                mappedNames.add(target);
+                if (!target.equals(name)) renames.put(name, target);
+            }
+            if (assignments != null && !renames.isEmpty()) {
+                java.util.Iterator<String> hashes = assignments.keys();
+                while (hashes.hasNext()) {
+                    String hash = hashes.next();
+                    String target = renames.get(assignments.optString(hash));
+                    if (target != null) assignments.put(hash, target);
+                }
+            }
+            data.put("groups", new JSONArray(mappedNames)).put("privatePins", mappedPins);
+        } catch (org.json.JSONException error) { throw new IllegalStateException(error); }
     }
 
     private String favoriteSourcePlatform(String link) {
@@ -7606,6 +8148,12 @@ public class MainActivity extends Activity {
 
     private void showPin(String title, String detail, String confirmLabel, String rejectedMessage,
                          java.util.function.Predicate<String> accept, Runnable accepted) {
+        showPin(title, detail, confirmLabel, rejectedMessage, accept, pin -> accepted.run(), null);
+    }
+
+    private void showPin(String title, String detail, String confirmLabel, String rejectedMessage,
+                         java.util.function.Predicate<String> accept, java.util.function.Consumer<String> accepted,
+                         Runnable cancel) {
         android.app.Dialog dialog = new android.app.Dialog(this);
         LinearLayout panel = sheetPanel(title, detail);
         FrameLayout field = new FrameLayout(this);
@@ -7661,20 +8209,21 @@ public class MainActivity extends Activity {
                 error.setText("请输入完整的 6 位数字密码");
                 return;
             }
-            if (!accept.test(inputPin.getText().toString())) {
+            String pin = inputPin.getText().toString();
+            if (!accept.test(pin)) {
                 inputPin.setText("");
                 error.setText(rejectedMessage);
                 return;
             }
             inputPin.setText("");
             ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(inputPin.getWindowToken(), 0);
-            dismissCardDialog(dialog, accepted);
+            dismissCardDialog(dialog, () -> accepted.accept(pin));
         };
         LinearLayout actions = new LinearLayout(this);
         LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-1, -2);
         actionParams.topMargin = dp(8);
         panel.addView(actions, actionParams);
-        actions.addView(dialogButton("取消", false, false, v -> dismissCardDialog(dialog, null)),
+        actions.addView(dialogButton("取消", false, false, v -> dismissCardDialog(dialog, cancel)),
                 new LinearLayout.LayoutParams(0, -2, 1));
         LinearLayout.LayoutParams confirm = new LinearLayout.LayoutParams(0, -2, 1.55f);
         confirm.leftMargin = dp(8);
@@ -7685,6 +8234,7 @@ public class MainActivity extends Activity {
             return true;
         });
         inputPin.requestFocus();
+        dialog.setOnCancelListener(v -> { if (cancel != null) cancel.run(); });
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                 | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
         presentBottomSheet(dialog, panel);
@@ -8762,6 +9312,7 @@ public class MainActivity extends Activity {
 
         void back() {
             if (selecting) setSelecting(false);
+            else if (savedKuaishou != null && returnToStorageCleanup()) return;
             else if (kuaishou && returnToBatch()) return;
             else if (wechat) showWechat();
             else if (savedKuaishou != null) showRecords();
@@ -9432,21 +9983,26 @@ public class MainActivity extends Activity {
         if (files == null) return items;
         java.util.Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
         for (File file : files) {
-            String name = file.getName();
-            int extension = name.lastIndexOf('.');
-            if (!file.isFile() || extension <= 0 || name.endsWith(".tmp")) continue;
-            try (InputStream stream = new FileInputStream(file)) {
-                byte[] bytes = new byte[32];
-                if (stream.read(bytes) < 12) continue;
-                String mime = format(bytes);
-                if (mime == null) continue;
-                boolean animated = "image/webp".equals(mime) && bytes[12] == 'V' && bytes[13] == 'P'
-                        && bytes[14] == '8' && bytes[15] == 'X' && (bytes[20] & 2) != 0
-                        || "image/avif".equals(mime) && bytes[11] == 's';
-                items.add(new Media(file, name.substring(0, extension), mime, "", "收藏", null, animated));
-            } catch (Exception ignored) { }
+            Media item = readLocalPreviewMedia(file);
+            if (item != null) items.add(item);
         }
         return items;
+    }
+
+    private Media readLocalPreviewMedia(File file) {
+        String name = file.getName();
+        int extension = name.lastIndexOf('.');
+        if (!file.isFile() || extension <= 0 || name.endsWith(".tmp")) return null;
+        try (InputStream stream = new FileInputStream(file)) {
+            byte[] bytes = new byte[32];
+            if (stream.read(bytes) < 12) return null;
+            String mime = format(bytes);
+            if (mime == null) return null;
+            boolean animated = "image/webp".equals(mime) && bytes[12] == 'V' && bytes[13] == 'P'
+                    && bytes[14] == '8' && bytes[15] == 'X' && (bytes[20] & 2) != 0
+                    || "image/avif".equals(mime) && bytes[11] == 's';
+            return new Media(file, name.substring(0, extension), mime, "", "收藏", null, animated);
+        } catch (java.io.IOException error) { return null; }
     }
 
     private String fileFailureReason(Exception error) {
@@ -9676,6 +10232,7 @@ public class MainActivity extends Activity {
     }
 
     private void leaveReader() {
+        if (returnToStorageCleanup()) return;
         if (returnToBatch()) return;
         if (viewingSavedRecord && !resumedFromHome) showRecords();
         else showHome();
@@ -9690,6 +10247,7 @@ public class MainActivity extends Activity {
         else if (showingGroupManager) favoriteScreen.leaveGroupManager();
         else if (showingRecycleBin) showMy();
         else if (showingPasswordSettings) showSettings();
+        else if (showingStorageCleanup) showSettings();
         else if (showingFavorites) favoriteScreen.back();
         else if (showingRecords) leaveRecords();
         else if (showingRecordPlatforms) returnToRecordsOrigin();

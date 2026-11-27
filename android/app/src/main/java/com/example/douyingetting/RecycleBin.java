@@ -94,6 +94,12 @@ final class RecycleBin {
         }
     }
 
+    void discard(Entry entry) throws IOException, JSONException {
+        entry.data.put("deletedAt", System.currentTimeMillis() - RETENTION);
+        write(entry);
+        purge(entry.container);
+    }
+
     private void write(Entry entry) throws IOException {
         File temporary = new File(entry.container, "trash.tmp");
         Files.write(temporary.toPath(), entry.data.toString().getBytes(StandardCharsets.UTF_8));
