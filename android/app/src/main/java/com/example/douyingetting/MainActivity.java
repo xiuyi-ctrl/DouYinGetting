@@ -239,6 +239,17 @@ public class MainActivity extends Activity {
     private final java.util.LinkedHashSet<String> favoriteGroups = new java.util.LinkedHashSet<>();
     private final java.util.HashMap<String, String> favoriteAssignments = new java.util.HashMap<>();
     private final java.util.HashMap<String, String> privateFavoritePins = new java.util.HashMap<>();
+    private final java.util.HashMap<String, String> favoriteFingerprintKeys = new java.util.HashMap<>();
+    private final java.util.Set<android.app.Dialog> privateDialogs = Collections.newSetFromMap(new java.util.WeakHashMap<>());
+    private android.os.CancellationSignal privateAuthentication;
+    private Runnable cancelPrivateAuthentication;
+    private boolean privateForeground;
+    private int privateEpoch;
+    private final android.content.BroadcastReceiver screenOff = new android.content.BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) lockPrivateFavorites();
+        }
+    };
     private JSONObject favoriteSources = new JSONObject();
     private Runnable returnFromFavorites;
     private boolean recordsFromSettings;
@@ -442,6 +453,9 @@ public class MainActivity extends Activity {
         applyPalette();
         setTheme(darkMode ? R.style.BlueDark : R.style.BlueLight);
         super.onCreate(state);
+        android.content.IntentFilter screenEvents = new android.content.IntentFilter(Intent.ACTION_SCREEN_OFF);
+        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(screenOff, screenEvents, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(screenOff, screenEvents);
         recycleBin = new RecycleBin(new File(getFilesDir(), "record-trash"));
         decodeEnabled = getPreferences(MODE_PRIVATE).getBoolean("title_decode", true);
         motionEnabled = getPreferences(MODE_PRIVATE).getBoolean("page_motion", true);
@@ -1237,6 +1251,7 @@ public class MainActivity extends Activity {
         showingRecordPlatforms = false;
         showingSettings = false;
         showingFavorites = false;
+        syncPrivateWindow();
         showingGroupManager = false;
         showingRecycleBin = false;
         showingPasswordSettings = false;
@@ -2081,8 +2096,7 @@ public class MainActivity extends Activity {
     private void verifyRecycleAccess(RecycleBin.Entry entry, Runnable allowed) {
         String pin = recyclePin(entry);
         if (pin.isEmpty()) allowed.run();
-        else showPin("验证私密收藏夹密码", entry.data.optString("group"), "验证", "密码不正确",
-                value -> matchesPin(value, pin), allowed);
+        else choosePrivateUnlock(entry.data.optString("group"), pin, allowed);
     }
 
     private void previewRecycleEntry(RecycleBin.Entry entry, View owner) {
@@ -2090,6 +2104,8 @@ public class MainActivity extends Activity {
             showTopNotice("这项内容已超过回收期限");
             return;
         }
+        boolean sensitive = !recyclePin(entry).isEmpty();
+        int epoch = privateEpoch;
         worker.execute(() -> {
             ArrayList<Media> previews = new ArrayList<>();
             if (entry.record) {
@@ -2113,8 +2129,9 @@ public class MainActivity extends Activity {
             }
             runOnUiThread(() -> {
                 if (!showingRecycleBin || !owner.isAttachedToWindow()) return;
+                if (sensitive && (!privateForeground || epoch != privateEpoch)) return;
                 if (System.currentTimeMillis() >= entry.expiresAt) showTopNotice("这项内容已超过回收期限");
-                else if (!previews.isEmpty()) preview(previews, 0);
+                else if (!previews.isEmpty()) preview(previews, 0, sensitive);
                 else if (entry.record) showMessage(R.drawable.blue_history, "记录预览",
                         entry.data.optString("title", "提取记录") + "\n这条记录没有可预览的暂存素材。");
                 else showTopNotice("这项收藏暂时无法预览");
@@ -2137,6 +2154,7 @@ public class MainActivity extends Activity {
             params.topMargin = dp(12);
             panel.addView(summary, params);
             dialogActions(dialog, panel, "取消", "恢复", false, null, () -> restoreRecycleEntry(entry, list));
+            if (!pin.isEmpty()) watchPrivateDialog(dialog, false);
             presentBottomSheet(dialog, panel);
         };
         verifyRecycleAccess(entry, confirm);
@@ -4492,6 +4510,7 @@ public class MainActivity extends Activity {
 
     private void showCardDialog(android.app.Dialog dialog, View panel, int maxWidth, int horizontalMargin, boolean animate) {
         if (isFinishing() || isDestroyed()) return;
+        if (privateFolderVisible()) watchPrivateDialog(dialog, true);
         dialog.setContentView(panel);
         android.view.Window window = dialog.getWindow();
         window.setBackgroundDrawableResource(android.R.color.transparent);
@@ -4544,6 +4563,7 @@ public class MainActivity extends Activity {
 
     private void presentBottomSheet(android.app.Dialog dialog, LinearLayout panel) {
         if (isFinishing() || isDestroyed()) return;
+        if (privateFolderVisible()) watchPrivateDialog(dialog, true);
         dialog.setContentView(panel);
         android.view.Window window = dialog.getWindow();
         window.setBackgroundDrawableResource(android.R.color.transparent);
@@ -7358,7 +7378,12 @@ public class MainActivity extends Activity {
     }
 
     private void preview(List<Media> sequence, int index) {
+        preview(sequence, index, privateFolderVisible());
+    }
+
+    private void preview(List<Media> sequence, int index, boolean sensitive) {
         android.app.Dialog dialog = new android.app.Dialog(this);
+        if (sensitive) watchPrivateDialog(dialog, true);
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         renderPreview(dialog, scroll, sequence, index, null);
@@ -7613,6 +7638,7 @@ public class MainActivity extends Activity {
         if (!owner.isShowing() || fullscreenPreviewDialog != null) return;
         boolean video = inlineVideo != null;
         FullscreenPreviewDialog dialog = new FullscreenPreviewDialog(this);
+        if (privateDialogs.contains(owner)) watchPrivateDialog(dialog, true);
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(Color.BLACK);
@@ -8092,6 +8118,11 @@ public class MainActivity extends Activity {
                 String value = pins.optString(name);
                 if (value.matches("[0-9a-f]{32}:[0-9a-f]{64}")) privateFavoritePins.put(name, value);
             }
+            JSONObject fingerprints = data.optJSONObject("fingerprintKeys");
+            if (fingerprints != null) for (String name : privateFavoritePins.keySet()) {
+                String alias = fingerprints.optString(name);
+                if (alias.matches("xiuyi-private-[0-9a-f-]{36}")) favoriteFingerprintKeys.put(name, alias);
+            }
             JSONObject assignments = data.optJSONObject("assignments");
             if (assignments != null) assignments.keys().forEachRemaining(hash -> {
                 String name = assignments.optString(hash);
@@ -8104,7 +8135,8 @@ public class MainActivity extends Activity {
         try {
             JSONObject data = new JSONObject().put("names", new JSONArray(favoriteGroups))
                     .put("assignments", new JSONObject(favoriteAssignments))
-                    .put("privatePins", new JSONObject(privateFavoritePins));
+                    .put("privatePins", new JSONObject(privateFavoritePins))
+                    .put("fingerprintKeys", new JSONObject(favoriteFingerprintKeys));
             getPreferences(MODE_PRIVATE).edit().putString("favorite_groups", data.toString()).apply();
         } catch (org.json.JSONException ignored) { }
     }
@@ -8137,7 +8169,144 @@ public class MainActivity extends Activity {
             allowed.run();
             return;
         }
-        showPin("解锁私密收藏夹", group, "解锁", "密码不正确", pin -> matchesPin(pin, saved), allowed);
+        verifyPrivatePin(group, saved, allowed);
+    }
+
+    private void verifyPrivatePin(String group, String saved, Runnable allowed) {
+        if (!privateForeground) return;
+        int epoch = privateEpoch;
+        watchPrivateDialog(showPin("解锁私密收藏夹", group, "解锁", "密码不正确", pin -> matchesPin(pin, saved), () -> {
+            if (privateForeground && epoch == privateEpoch) allowed.run();
+        }), false);
+    }
+
+    private void choosePrivateUnlock(String group, String pin, Runnable allowed) {
+        if (!privateForeground) return;
+        String alias = favoriteFingerprintKeys.get(group);
+        Runnable enterPin = () -> verifyPrivatePin(group, pin, allowed);
+        if (alias == null || !FavoriteFingerprint.available(this)
+                || !pin.equals(privateFavoritePins.get(group))) {
+            enterPin.run();
+            return;
+        }
+        int epoch = privateEpoch;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("解锁私密收藏夹", group);
+        addSheetChoice(panel, "使用指纹", "通过 Android 生物识别验证", R.drawable.blue_lock, false, () ->
+                dismissCardDialog(dialog, () -> {
+                    if (!privateForeground || epoch != privateEpoch) return;
+                    authenticatePrivateFingerprint(group, alias, false, allowed, enterPin);
+                }));
+        addSheetChoice(panel, "输入 6 位密码", "", R.drawable.blue_gear, false, () ->
+                dismissCardDialog(dialog, () -> { if (epoch == privateEpoch) enterPin.run(); }));
+        watchPrivateDialog(dialog, false);
+        showBottomSheet(dialog, panel);
+    }
+
+    private void authenticatePrivateFingerprint(String group, String alias, boolean creating,
+                                                Runnable allowed, Runnable fallback) {
+        if (!privateForeground || privateAuthentication != null) return;
+        javax.crypto.Cipher cipher;
+        try {
+            cipher = FavoriteFingerprint.cipher(alias, creating);
+        } catch (java.security.GeneralSecurityException | java.io.IOException error) {
+            if (creating) FavoriteFingerprint.remove(alias);
+            else {
+                FavoriteFingerprint.remove(favoriteFingerprintKeys.remove(group));
+                saveFavoriteGroups();
+            }
+            showTopNotice("指纹暂不可用，请使用收藏夹密码");
+            if (fallback != null) fallback.run();
+            return;
+        }
+        int epoch = privateEpoch;
+        android.os.CancellationSignal signal = new android.os.CancellationSignal();
+        privateAuthentication = signal;
+        cancelPrivateAuthentication = creating ? () -> FavoriteFingerprint.remove(alias) : null;
+        android.hardware.biometrics.BiometricPrompt.Builder builder = new android.hardware.biometrics.BiometricPrompt.Builder(this)
+                .setTitle(creating ? "启用指纹解锁" : "解锁私密收藏夹").setSubtitle(group)
+                .setNegativeButton(creating ? "取消" : "使用密码", getMainExecutor(), (dialog, which) -> {
+                    if (privateAuthentication != signal) return;
+                    finishPrivateAuthentication(signal, false);
+                    if (fallback != null && privateForeground && epoch == privateEpoch) fallback.run();
+                });
+        if (android.os.Build.VERSION.SDK_INT >= 30)
+            builder.setAllowedAuthenticators(android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_STRONG);
+        try {
+            builder.build().authenticate(new android.hardware.biometrics.BiometricPrompt.CryptoObject(cipher),
+                    signal, getMainExecutor(), new android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+                @Override public void onAuthenticationSucceeded(android.hardware.biometrics.BiometricPrompt.AuthenticationResult result) {
+                    if (privateAuthentication != signal || !privateForeground || epoch != privateEpoch) return;
+                    try {
+                        result.getCryptoObject().getCipher().doFinal(new byte[]{1});
+                    } catch (java.security.GeneralSecurityException error) {
+                        finishPrivateAuthentication(signal, false);
+                        if (fallback != null) fallback.run();
+                        return;
+                    }
+                    finishPrivateAuthentication(signal, true);
+                    allowed.run();
+                }
+
+                @Override public void onAuthenticationError(int code, CharSequence message) {
+                    if (privateAuthentication != signal) return;
+                    finishPrivateAuthentication(signal, false);
+                    if (!privateForeground || epoch != privateEpoch) return;
+                    if (code == android.hardware.biometrics.BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED
+                            || code == android.hardware.biometrics.BiometricPrompt.BIOMETRIC_ERROR_CANCELED) return;
+                    showTopNotice("指纹暂不可用，请使用收藏夹密码");
+                    if (fallback != null) fallback.run();
+                }
+            });
+        } catch (RuntimeException error) {
+            finishPrivateAuthentication(signal, false);
+            showTopNotice("无法启动指纹验证");
+            if (fallback != null) fallback.run();
+        }
+    }
+
+    private void finishPrivateAuthentication(android.os.CancellationSignal signal, boolean success) {
+        if (privateAuthentication != signal) return;
+        privateAuthentication = null;
+        Runnable cleanup = cancelPrivateAuthentication;
+        cancelPrivateAuthentication = null;
+        if (!success && cleanup != null) cleanup.run();
+    }
+
+    private boolean privateFolderVisible() {
+        return showingFavorites && favoriteScreen != null && privateFavoritePins.containsKey(favoriteScreen.activeGroup);
+    }
+
+    private void syncPrivateWindow() {
+        int secure = android.view.WindowManager.LayoutParams.FLAG_SECURE;
+        if (privateFolderVisible()) getWindow().addFlags(secure);
+        else if (privateForeground) getWindow().clearFlags(secure);
+    }
+
+    private void watchPrivateDialog(android.app.Dialog dialog, boolean sensitive) {
+        privateDialogs.add(dialog);
+        if (sensitive) dialog.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+    }
+
+    private void lockPrivateFavorites() {
+        privateForeground = false;
+        privateEpoch++;
+        android.os.CancellationSignal signal = privateAuthentication;
+        if (signal != null) {
+            finishPrivateAuthentication(signal, false);
+            signal.cancel();
+        }
+        if (fullscreenPreviewDialog != null && privateDialogs.contains(fullscreenPreviewDialog))
+            fullscreenPreviewDialog.dismiss();
+        for (android.app.Dialog dialog : new ArrayList<>(privateDialogs)) if (dialog.isShowing()) dialog.dismiss();
+        privateDialogs.clear();
+        if (privateFolderVisible()) {
+            favoriteScreen.activeGroup = null;
+            favoriteScreen.category = 0;
+            favoriteScreen.positionFilter(false);
+            favoriteScreen.setSelecting(false);
+        }
+        syncPrivateWindow();
     }
 
     private boolean matchesPin(String pin, String saved) {
@@ -8146,12 +8315,12 @@ public class MainActivity extends Activity {
         return MessageDigest.isEqual(saved.getBytes(StandardCharsets.US_ASCII), pinHash(pin, salt).getBytes(StandardCharsets.US_ASCII));
     }
 
-    private void showPin(String title, String detail, String confirmLabel, String rejectedMessage,
+    private android.app.Dialog showPin(String title, String detail, String confirmLabel, String rejectedMessage,
                          java.util.function.Predicate<String> accept, Runnable accepted) {
-        showPin(title, detail, confirmLabel, rejectedMessage, accept, pin -> accepted.run(), null);
+        return showPin(title, detail, confirmLabel, rejectedMessage, accept, pin -> accepted.run(), null);
     }
 
-    private void showPin(String title, String detail, String confirmLabel, String rejectedMessage,
+    private android.app.Dialog showPin(String title, String detail, String confirmLabel, String rejectedMessage,
                          java.util.function.Predicate<String> accept, java.util.function.Consumer<String> accepted,
                          Runnable cancel) {
         android.app.Dialog dialog = new android.app.Dialog(this);
@@ -8238,6 +8407,7 @@ public class MainActivity extends Activity {
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                 | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
         presentBottomSheet(dialog, panel);
+        return dialog;
     }
 
     private boolean canChangeFavorite(String hash) {
@@ -8412,6 +8582,8 @@ public class MainActivity extends Activity {
                     favoriteAssignments.replaceAll((hash, group) -> oldName.equals(group) ? value : group);
                     String pin = privateFavoritePins.remove(oldName);
                     if (pin != null) privateFavoritePins.put(value, pin);
+                    String fingerprint = favoriteFingerprintKeys.remove(oldName);
+                    if (fingerprint != null) favoriteFingerprintKeys.put(value, fingerprint);
                     worker.execute(() -> recycleBin.renameGroup(oldName, value));
                     if (favoriteScreen != null && oldName.equals(favoriteScreen.activeGroup)) favoriteScreen.activeGroup = value;
                 }
@@ -8549,6 +8721,7 @@ public class MainActivity extends Activity {
 
     private void leaveFavorites() {
         showingFavorites = false;
+        syncPrivateWindow();
         favoriteScreen = null;
         Runnable onBack = returnFromFavorites;
         returnFromFavorites = null;
@@ -9420,12 +9593,16 @@ public class MainActivity extends Activity {
 
         private void selectFavoriteGroup(String name) {
             if (busy || java.util.Objects.equals(activeGroup, name)) return;
-            verifyFavoriteGroup(name, () -> {
+            Runnable open = () -> {
                 activeGroup = name;
+                syncPrivateWindow();
                 category = 0;
                 positionFilter(false);
                 setSelecting(false);
-            });
+            };
+            String pin = privateFavoritePins.get(name);
+            if (pin == null) open.run();
+            else choosePrivateUnlock(name, pin, open);
         }
 
         private void showGroupPicker(ArrayList<Media> moving) {
@@ -9469,6 +9646,7 @@ public class MainActivity extends Activity {
             if (busy || !loaded) return;
             if (privateFavoritePins.containsKey(activeGroup)) {
                 activeGroup = null;
+                syncPrivateWindow();
                 category = 0;
                 setSelecting(false);
             }
@@ -9691,6 +9869,7 @@ public class MainActivity extends Activity {
                 if (isPrivate) {
                     verifyFavoriteGroup(group, () -> {
                         privateFavoritePins.remove(group);
+                        FavoriteFingerprint.remove(favoriteFingerprintKeys.remove(group));
                         saveFavoriteGroups();
                         renderManagedGroups(groups);
                     });
@@ -9707,6 +9886,30 @@ public class MainActivity extends Activity {
                             });
                 }
             });
+            if (isPrivate) {
+                boolean enabled = favoriteFingerprintKeys.containsKey(group);
+                addRecordAction(options, enabled ? "关闭指纹解锁" : "启用指纹解锁", R.drawable.blue_lock, INK, () -> {
+                    popup.dismiss();
+                    if (!enabled && !FavoriteFingerprint.available(MainActivity.this)) {
+                        showMessage(R.drawable.blue_lock, "指纹解锁暂不可用", "请先在 Android 系统设置中录入指纹。");
+                        return;
+                    }
+                    verifyFavoriteGroup(group, () -> {
+                        if (enabled) {
+                            FavoriteFingerprint.remove(favoriteFingerprintKeys.remove(group));
+                            saveFavoriteGroups();
+                            showBottomNotice("已关闭指纹解锁");
+                            return;
+                        }
+                        String alias = "xiuyi-private-" + UUID.randomUUID();
+                        authenticatePrivateFingerprint(group, alias, true, () -> {
+                            favoriteFingerprintKeys.put(group, alias);
+                            saveFavoriteGroups();
+                            showBottomNotice("已启用指纹解锁");
+                        }, null);
+                    });
+                });
+            }
             if (count > 0) addRecordAction(options, "导出收藏夹", R.drawable.extract_download, INK, () -> {
                 popup.dismiss();
                 verifyFavoriteGroup(group, () -> chooseGroupExport(group));
@@ -9741,6 +9944,7 @@ public class MainActivity extends Activity {
                 favoriteGroups.remove(group);
                 favoriteAssignments.values().removeIf(group::equals);
                 privateFavoritePins.remove(group);
+                FavoriteFingerprint.remove(favoriteFingerprintKeys.remove(group));
                 if (group.equals(activeGroup)) activeGroup = null;
                 saveFavoriteGroups();
                 setSelecting(false);
@@ -10204,6 +10408,7 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        unregisterReceiver(screenOff);
         scanning = false;
         stripHandler.removeCallbacksAndMessages(null);
         if (themeAnimation != null) themeAnimation.cancel();
@@ -10227,8 +10432,17 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        android.os.PowerManager power = getSystemService(android.os.PowerManager.class);
+        android.app.KeyguardManager keyguard = getSystemService(android.app.KeyguardManager.class);
+        privateForeground = power.isInteractive() && !keyguard.isDeviceLocked();
+        syncPrivateWindow();
         worker.execute(() -> recycleBin.entries(System.currentTimeMillis()));
         if (showingReader) for (Animatable animation : animations) animation.start();
+    }
+
+    @Override protected void onStop() {
+        lockPrivateFavorites();
+        super.onStop();
     }
 
     private void leaveReader() {
