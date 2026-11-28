@@ -397,6 +397,8 @@ public class MainActivity extends Activity {
         int postTotal;
         final ArrayList<PostFailure> postFailures = new ArrayList<>();
         String caption = "";
+        String mergeBatch = "";
+        final java.util.LinkedHashSet<String> mergedLinks = new java.util.LinkedHashSet<>();
         final String id;
         final String link;
         final long createdAt;
@@ -727,12 +729,27 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams pasteParams = new LinearLayout.LayoutParams(dp(84), -2);
         pasteParams.rightMargin = dp(8);
         inputActions.addView(paste, pasteParams);
+        android.widget.CheckBox merge = new android.widget.CheckBox(this);
+        merge.setText("同平台链接合并为一条记录");
+        merge.setTextColor(INK);
+        linkCard.addView(merge, new LinearLayout.LayoutParams(-1, -2));
         Button add = dialogButton("加入队列", false, false, v -> {
             String text = links.getText().toString();
+            BatchExtraction incoming = new BatchExtraction();
+            incoming.add(text);
+            if (merge.isChecked() && incoming.tasks.stream().map(task -> task.platform).distinct().count() > 1) {
+                showTopNotice("合并记录仅支持同一个平台，请分平台加入");
+                return;
+            }
+            int before = batch.tasks.size();
             int added = batch.add(text);
             if (added == 0) {
                 showTopNotice(text.trim().isEmpty() ? "请先粘贴作品链接" : "没有找到可加入的新链接");
                 return;
+            }
+            if (merge.isChecked()) {
+                String group = UUID.randomUUID().toString();
+                for (int i = before; i < batch.tasks.size(); i++) batch.tasks.get(i).mergeGroup = group;
             }
             saveBatch();
             links.getText().clear();
@@ -800,6 +817,11 @@ public class MainActivity extends Activity {
                     true, false, v -> startBatch());
             batchFooter.addView(start, new LinearLayout.LayoutParams(-1, dp(46)));
         } else if (!batch.tasks.isEmpty()) {
+            if (batch.tasks.stream().anyMatch(task -> !task.mergeGroup.isEmpty()
+                    && records.stream().noneMatch(record -> task.mergeGroup.equals(record.mergeBatch)))) {
+                batchFooter.addView(dialogButton("汇总已完成记录", true, false, v -> startBatch()),
+                        new LinearLayout.LayoutParams(-1, dp(46)));
+            }
             batchFooter.addView(dialogButton("清空队列", false, false, v -> {
                 batch.tasks.clear();
                 saveBatch();
@@ -952,8 +974,10 @@ public class MainActivity extends Activity {
 
     private void startBatch() {
         if (batchTask != null || !canStartBatch()) return;
+        if (recordTransferBusy) return;
         BatchExtraction.Task task = batch.next();
         if (task == null) {
+            if (finishMergedBatch()) return;
             showBatch("队列处理完毕");
             return;
         }
@@ -4001,6 +4025,8 @@ public class MainActivity extends Activity {
         TextView total = label("", 12, INK2, true);
         total.setGravity(Gravity.CENTER);
         toolbar.addView(total, new LinearLayout.LayoutParams(dp(66), dp(32)));
+        Button mergeRecords = shareButton("合并", v -> chooseRecordsToMerge());
+        toolbar.addView(mergeRecords, new LinearLayout.LayoutParams(dp(60), dp(36)));
 
         root.setFocusableInTouchMode(true);
         String platform = kuaishouRecords ? "kuaishou" : xhsMode ? "xhs" : "douyin";
@@ -4107,6 +4133,131 @@ public class MainActivity extends Activity {
         return kuaishouRecords ? record.kuaishou : !record.kuaishou && isXhsLink(record.link) == xhsMode;
     }
 
+    private int recordPlatform(ScanRecord record) {
+        return record.kuaishou ? 2 : isXhsLink(record.link) ? 1 : 0;
+    }
+
+    private void chooseRecordsToMerge() {
+        if (recordTransferBusy || !canStartBatch()) return;
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout panel = sheetPanel("合并提取记录", "选择同一平台的记录，生成汇总记录并去除重复素材。");
+        EditText search = mediaSourceSearch("搜索要合并的记录");
+        panel.addView(search, new LinearLayout.LayoutParams(-1, dp(44)));
+        ScrollView scroll = dialogScroll();
+        panel.addView(scroll);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(list);
+        ArrayList<ScanRecord> selected = new ArrayList<>();
+        for (ScanRecord record : records) {
+            if (!matchesRecordPlatform(record)) continue;
+            android.widget.CheckBox choice = new android.widget.CheckBox(this);
+            choice.setText((record.caption.isEmpty() ? record.link : record.caption) + " · " + record.items.size() + " 项");
+            choice.setTextColor(INK);
+            choice.setPadding(dp(8), dp(8), dp(8), dp(8));
+            choice.setOnCheckedChangeListener((button, checked) -> {
+                if (checked) selected.add(record);
+                else selected.remove(record);
+            });
+            list.addView(choice);
+        }
+        onMediaSearchChanged(search, () -> {
+            String query = search.getText().toString().trim().toLowerCase(Locale.ROOT);
+            for (int i = 0; i < list.getChildCount(); i++) {
+                android.widget.CheckBox choice = (android.widget.CheckBox) list.getChildAt(i);
+                choice.setVisibility(choice.getText().toString().toLowerCase(Locale.ROOT).contains(query) ? View.VISIBLE : View.GONE);
+            }
+        });
+        Button confirm = dialogButton("合并选中记录", true, false, v -> {
+            if (selected.size() < 2) { showTopNotice("请选择至少两条记录"); return; }
+            dismissCardDialog(dialog, () -> mergeRecords(selected, "", merged -> {
+                recordSearches.clear();
+                recordTypes.clear();
+                showRecords();
+            }));
+        });
+        panel.addView(confirm);
+        showBottomSheet(dialog, panel);
+    }
+
+    private boolean finishMergedBatch() {
+        java.util.LinkedHashMap<String, ArrayList<ScanRecord>> groups = new java.util.LinkedHashMap<>();
+        for (BatchExtraction.Task task : batch.tasks) {
+            if (task.mergeGroup.isEmpty() || records.stream().anyMatch(record -> task.mergeGroup.equals(record.mergeBatch))) continue;
+            ScanRecord source = batchRecord(task);
+            if (source != null) {
+                ArrayList<ScanRecord> group = groups.computeIfAbsent(task.mergeGroup, key -> new ArrayList<>());
+                if (!group.contains(source)) group.add(source);
+            }
+        }
+        for (java.util.Map.Entry<String, ArrayList<ScanRecord>> group : groups.entrySet()) {
+            if (group.getValue().size() < 2) continue;
+            mergeRecords(group.getValue(), group.getKey(), merged -> startBatch());
+            return true;
+        }
+        return false;
+    }
+
+    private void mergeRecords(List<ScanRecord> sources, String batchGroup, java.util.function.Consumer<ScanRecord> done) {
+        ArrayList<ScanRecord> snapshot = new ArrayList<>(sources);
+        if (recordTransferBusy || !canStartBatch()) return;
+        if (snapshot.size() < 2 || snapshot.stream().anyMatch(record -> !records.contains(record) || record.processingPage
+                || !isFavoriteSourceLink(record.link) || recordPlatform(record) != recordPlatform(snapshot.get(0)))) {
+            showTopNotice("请选择同平台且已停止扫描的记录");
+            return;
+        }
+        recordTransferBusy = true;
+        android.app.Dialog progress = backupProgress("正在合并记录…", "正在复制素材并去除重复项。");
+        String id = UUID.randomUUID().toString();
+        ScanRecord merged = new ScanRecord(id, snapshot.get(0).link, System.currentTimeMillis(), new File(recordsFolder(), id));
+        merged.kuaishou = snapshot.get(0).kuaishou;
+        merged.workMedia = snapshot.stream().allMatch(record -> record.workMedia || record.kuaishou);
+        merged.complete = true;
+        merged.mainDone = true;
+        merged.mergeBatch = batchGroup;
+        merged.caption = BatchExtraction.PLATFORMS[recordPlatform(merged)] + "合并记录 · " + snapshot.size() + " 条";
+        worker.execute(() -> {
+            try {
+                Files.createDirectories(merged.folder.toPath());
+                for (ScanRecord source : snapshot) {
+                    merged.mergedLinks.add(source.link);
+                    merged.mergedLinks.addAll(source.mergedLinks);
+                    merged.scanned += source.scanned;
+                    merged.mainScanned += source.mainScanned;
+                    merged.replyScanned += source.replyScanned;
+                    synchronized (source) {
+                        for (Media item : source.items) {
+                            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                            try (InputStream input = new FileInputStream(item.file)) {
+                                byte[] buffer = new byte[65536];
+                                int count;
+                                while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
+                            }
+                            String hash = String.format(Locale.ROOT, "%064x", new java.math.BigInteger(1, digest.digest()));
+                            if (!merged.hashes.add(hash)) continue;
+                            String name = item.file.getName();
+                            File target = new File(merged.folder, hash + name.substring(name.lastIndexOf('.')));
+                            Files.copy(item.file.toPath(), target.toPath());
+                            merged.items.add(new Media(target, hash, item.mime, item.commentId, item.kind, null, item.animated));
+                        }
+                    }
+                }
+                if (!persistRecord(merged)) throw new java.io.IOException("合并记录无法保存");
+                runOnUiThread(() -> {
+                    if (!finishBackupProgress(progress)) return;
+                    records.add(0, merged);
+                    done.accept(merged);
+                    showBottomNotice("已合并 " + snapshot.size() + " 条记录，共 " + merged.items.size() + " 项素材");
+                });
+            } catch (Exception error) {
+                deleteRecordFiles(merged);
+                runOnUiThread(() -> {
+                    if (finishBackupProgress(progress)) showMessage(R.drawable.blue_history, "未能合并", fileFailureReason(error));
+                });
+            }
+        });
+    }
+
     private void addRecordCards(LinearLayout page, TextView total, EditText search, int filter) {
         page.removeAllViews();
         String query = search.getText().toString().trim().toLowerCase(Locale.ROOT);
@@ -4116,7 +4267,7 @@ public class MainActivity extends Activity {
             if (!matchesRecordPlatform(record) || (filter != 0 && post != (filter == 1))) continue;
             String platform = record.kuaishou ? "快手" : isXhsLink(record.link) ? "小红书" : "抖音";
             String type = record.kuaishou || record.workMedia ? "作品正文 提取作品" : "评论扫描 扫描评论";
-            String searchable = (record.caption + " " + record.link + " " + platform + " " + type).toLowerCase(Locale.ROOT);
+            String searchable = (record.caption + " " + record.link + " " + record.mergedLinks + " " + platform + " " + type).toLowerCase(Locale.ROOT);
             if (java.util.Arrays.stream(query.split("\\s+")).allMatch(searchable::contains)) visibleRecords.add(record);
         }
         total.setText("共 " + visibleRecords.size() + " 条");
@@ -4352,6 +4503,19 @@ public class MainActivity extends Activity {
                     : "已打开本机暂存记录；重新扫描会生成新记录");
         }
         showReader();
+        if (!record.mergedLinks.isEmpty()) {
+            status.setText("合并记录 · " + record.mergedLinks.size() + " 个作品来源 · 点击查看");
+            status.setOnClickListener(v -> {
+                android.app.Dialog dialog = new android.app.Dialog(this);
+                LinearLayout panel = sheetPanel("合并记录的作品来源", null);
+                ScrollView scroll = dialogScroll();
+                TextView links = homeLabel(android.text.TextUtils.join("\n\n", record.mergedLinks), 13, INK2, 450);
+                links.setTextIsSelectable(true);
+                scroll.addView(links);
+                panel.addView(scroll);
+                showBottomSheet(dialog, panel);
+            });
+        } else status.setOnClickListener(null);
         renderResults();
         updateResultLabels();
         readerScroll.post(() -> readerScroll.smoothScrollTo(0, resultAnchor.getTop()));
@@ -5530,6 +5694,10 @@ public class MainActivity extends Activity {
                 record.kuaishou = "kuaishou".equals(data.optString("platform"));
                 record.workMedia = data.optBoolean("workMedia");
                 record.caption = data.optString("caption");
+                record.mergeBatch = data.optString("mergeBatch");
+                JSONArray mergedLinks = data.optJSONArray("mergedLinks");
+                for (int i = 0; mergedLinks != null && i < mergedLinks.length(); i++)
+                    if (isFavoriteSourceLink(mergedLinks.optString(i))) record.mergedLinks.add(mergedLinks.optString(i));
                 record.postTotal = Math.max(0, data.optInt("postTotal"));
                 JSONArray postFailures = data.optJSONArray("postFailures");
                 if (record.kuaishou || record.workMedia) {
@@ -5646,6 +5814,8 @@ public class MainActivity extends Activity {
             data.put("id", record.id);
             data.put("link", record.link);
             data.put("createdAt", record.createdAt);
+            data.put("mergeBatch", record.mergeBatch);
+            data.put("mergedLinks", new JSONArray(record.mergedLinks));
             if (record.kuaishou) {
                 data.put("platform", "kuaishou");
             }

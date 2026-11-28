@@ -32,6 +32,7 @@ final class BatchExtraction {
         State state = State.QUEUED;
         String detail = "";
         String recordId = "";
+        String mergeGroup = "";
 
         Task(String link, int platform, String key) {
             this.link = link;
@@ -112,7 +113,8 @@ final class BatchExtraction {
         for (Task task : tasks) {
             try {
                 data.put(new JSONObject().put("link", task.link).put("comments", task.comments)
-                        .put("state", task.state.name()).put("detail", task.detail).put("record", task.recordId));
+                        .put("state", task.state.name()).put("detail", task.detail).put("record", task.recordId)
+                        .put("mergeGroup", task.mergeGroup));
             } catch (JSONException error) {
                 throw new IllegalStateException(error);
             }
@@ -130,6 +132,7 @@ final class BatchExtraction {
                 if (task == null) continue;
                 task.comments = task.platform != 2 && row.optBoolean("comments");
                 task.recordId = row.optString("record");
+                task.mergeGroup = row.optString("mergeGroup");
                 task.detail = row.optString("detail");
                 try { task.state = State.valueOf(row.optString("state")); }
                 catch (IllegalArgumentException ignored) { task.state = State.QUEUED; }
